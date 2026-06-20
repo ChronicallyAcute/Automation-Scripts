@@ -539,8 +539,10 @@ class MainWindow(QMainWindow):
         self._dims_done_for.clear()
         self._model.finalize_scan()
         self._status.setText(result.summary())
-        if self._model.needs_dimensions():
-            self._ensure_dims()
+        # Always compute true (w, h) for every item — the masonry grid needs
+        # real aspect ratios to size cells, not just when a dimension sort is
+        # active.  peek_size() is a fast header-only read run off the GUI thread.
+        self._ensure_dims()
         self._bar_hide_timer.start(BAR_HIDE_MS)
 
     def _rebuild_recent_menu(self) -> None:

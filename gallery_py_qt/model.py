@@ -27,7 +27,7 @@ from __future__ import annotations
 import os
 from collections import OrderedDict
 
-from PySide6.QtCore import QAbstractListModel, QModelIndex, Qt, QSize
+from PySide6.QtCore import QAbstractListModel, QModelIndex, Qt, QSize, Signal
 from PySide6.QtGui import QImage, QPixmap, QTransform
 
 from . import config
@@ -53,6 +53,10 @@ def _pixmap_cap(thumb_px: int) -> int:
 
 
 class GalleryModel(QAbstractListModel):
+    # Emitted when per-path (w, h) dimensions are updated without a re-sort.
+    # The masonry view listens to this to recompute cell heights.
+    dimsChanged = Signal()
+
     def __init__(self, favorites: Favorites, loader: ThumbnailLoader,
                  parent=None):
         super().__init__(parent)
@@ -164,7 +168,9 @@ class GalleryModel(QAbstractListModel):
         """Supply (w, h) per path (from a background scan); re-sort if needed."""
         self._dims.update(dims)
         if self.needs_dimensions():
-            self._reindex()
+            self._reindex()          # modelReset already drives a re-layout
+        else:
+            self.dimsChanged.emit()  # masonry needs to reflow without re-sorting
 
     def _dim_area(self, p: str) -> int:
         w, h = self._dims.get(p, (0, 0))

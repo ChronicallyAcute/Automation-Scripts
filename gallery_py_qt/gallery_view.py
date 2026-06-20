@@ -217,6 +217,7 @@ class GalleryView(QAbstractScrollArea):
                 (old.dataChanged,   self._on_data_changed),
                 (old.rowsInserted,  self._relayout),
                 (old.rowsRemoved,   self._on_model_reset),
+                (old.dimsChanged,   self._on_dims_changed),
             ):
                 try:
                     sig.disconnect(slot)
@@ -228,7 +229,13 @@ class GalleryView(QAbstractScrollArea):
             model.dataChanged.connect(self._on_data_changed)
             model.rowsInserted.connect(self._relayout)
             model.rowsRemoved.connect(self._on_model_reset)
+            model.dimsChanged.connect(self._on_dims_changed)
         self._on_model_reset()
+
+    def _on_dims_changed(self) -> None:
+        """The background dimension scan finished; reflow with true heights."""
+        if not self._layout_timer.isActive():
+            self._layout_timer.start()
 
     def model(self):
         return self._model
@@ -278,6 +285,13 @@ class GalleryView(QAbstractScrollArea):
         changed = False
         for row in range(top.row(), bottom.row() + 1):
             idx = m.index(row)
+            # Only inspect pixmaps already in the model's cache.  Calling
+            # data(DecorationRole) on an unloaded row queues a thumbnail
+            # request, and set_thumb_px() re-emits dataChanged for EVERY row —
+            # without this guard that would stampede the loader with the whole
+            # gallery at once instead of just the visible cells.
+            if not idx.data(LoadedRole):
+                continue
             pm = idx.data(Qt.ItemDataRole.DecorationRole)
             if isinstance(pm, QPixmap) and not pm.isNull():
                 path = idx.data(PathRole)
@@ -556,4 +570,7 @@ class GalleryView(QAbstractScrollArea):
 
     def showEvent(self, e) -> None:
         super().showEvent(e)
+        # The first _relayout (during setModel) often runs before the viewport
+        # has a real width and bails out; relayout again now that we're visible.
+        self._relayout()
         self._vid_update.start()
