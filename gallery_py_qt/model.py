@@ -291,3 +291,11 @@ class GalleryModel(QAbstractListModel):
             self._all.append(path)
             self._all_set.add(path)
             self._reindex()
+
+    def update_video_frame(self, path: str, pm: "QPixmap") -> None:
+        """Overwrite the displayed pixmap with a live video preview frame."""
+        self._pixmaps[path] = pm
+        row = self._path_to_row.get(path)
+        if row is not None:
+            idx = self.index(row)
+            self.dataChanged.emit(idx, idx, [Qt.ItemDataRole.DecorationRole])

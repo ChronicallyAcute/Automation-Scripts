@@ -174,9 +174,11 @@ class _Slot(QWidget):
         b.setText(glyph)
         b.setCheckable(checkable)
         b.setCursor(Qt.CursorShape.PointingHandCursor)
-        b.setStyleSheet(
-            f"color: {config.OVERLAY_FG}; background: rgba(0,0,0,90);"
-            " border-radius: 4px; font-size: 15px; padding: 3px 6px;")
+        base = (f"QToolButton {{ color: {config.OVERLAY_FG}; background: rgba(0,0,0,90);"
+                " border-radius: 4px; font-size: 15px; padding: 3px 6px; }}")
+        checked = (f"QToolButton:checked {{ color: {config.ACCENT};"
+                   " background: rgba(74,143,212,55); }}")
+        b.setStyleSheet(base + (checked if checkable else ""))
         b.clicked.connect(cb)
         if layout is not None:
             layout.addWidget(b)
@@ -264,7 +266,9 @@ class MultiView(QDialog):
     openLightbox = Signal(int)
 
     def __init__(self, model, favorites, start_row=0, parent=None):
-        super().__init__(parent)
+        # Qt.WindowType.Window is required so showFullScreen() covers the OS
+        # taskbar on Windows (QDialog is otherwise constrained by parent geometry).
+        super().__init__(parent, Qt.WindowType.Window)
         self._model = model
         self._favs = favorites
         self._start = start_row
@@ -375,7 +379,9 @@ class MultiView(QDialog):
         if total == 0:
             return
         want = self._detect_layout(start)
-        if want != self._layout_slots:
+        # Never change the slot layout while any slot is pinned -- that would
+        # destroy the pinned slot widget and lose its state.
+        if want != self._layout_slots and not any(s.is_pinned for s in self._slots):
             self._build_slots(want)
         self._start = max(0, min(start, total - 1))
         row = self._start

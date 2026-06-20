@@ -12,15 +12,183 @@ Fork improvements over gallery_qt.main_window:
 from __future__ import annotations
 import os
 
-from PySide6.QtCore import Qt, QObject, QRunnable, QThreadPool, Signal, QTimer, QSize
+from PySide6.QtCore import (Qt, QObject, QRunnable, QThreadPool, Signal,
+                            QTimer, QSize, QDir, QModelIndex)
 from PySide6.QtGui import QAction, QKeySequence, QShortcut, QPixmap
 from PySide6.QtWidgets import (QMainWindow, QWidget, QFrame, QHBoxLayout,
                                QVBoxLayout, QLabel, QToolButton, QLineEdit,
-                               QComboBox, QSpinBox, QFileDialog, QMenu,
-                               QPushButton, QApplication, QListView, QTreeView,
-                               QAbstractItemView, QGridLayout)
+                               QComboBox, QSpinBox, QMenu, QPushButton,
+                               QApplication, QListView, QTreeView,
+                               QAbstractItemView, QGridLayout, QDialog,
+                               QFileSystemModel, QDialogButtonBox,
+                               QSplitter, QSizePolicy)
 
 BAR_HIDE_MS = 2000
+
+
+# ---------------------------------------------------------------------------
+# Custom folder picker with checkbox support
+# ---------------------------------------------------------------------------
+
+class _CheckFSModel(QFileSystemModel):
+    """QFileSystemModel extended with per-directory checkbox state.
+
+    Column 0 gets Qt.ItemFlag.ItemIsUserCheckable so the view draws a native
+    checkbox on each directory entry.  Checked paths are tracked in a set and
+    survive tree expansion/collapsing.
+    """
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._checked: set[str] = set()
+        self.setFilter(QDir.Filter.AllDirs | QDir.Filter.NoDotAndDotDot)
+        self.setRootPath("")
+
+    def flags(self, index: QModelIndex):
+        base = super().flags(index)
+        if index.isValid() and index.column() == 0:
+            base |= Qt.ItemFlag.ItemIsUserCheckable
+        return base
+
+    def data(self, index: QModelIndex, role=Qt.ItemDataRole.DisplayRole):
+        if (role == Qt.ItemDataRole.CheckStateRole
+                and index.isValid() and index.column() == 0):
+            return (Qt.CheckState.Checked if self.filePath(index) in self._checked
+                    else Qt.CheckState.Unchecked)
+        return super().data(index, role)
+
+    def setData(self, index: QModelIndex, value, role=Qt.ItemDataRole.EditRole) -> bool:
+        if (role == Qt.ItemDataRole.CheckStateRole
+                and index.isValid() and index.column() == 0):
+            path = self.filePath(index)
+            cs = Qt.CheckState(value) if isinstance(value, int) else value
+            if cs == Qt.CheckState.Checked:
+                self._checked.add(path)
+            else:
+                self._checked.discard(path)
+            self.dataChanged.emit(index, index, [role])
+            return True
+        return super().setData(index, value, role)
+
+    def checked_paths(self) -> list[str]:
+        return [p for p in sorted(self._checked) if os.path.isdir(p)]
+
+
+class _FolderPickDlg(QDialog):
+    """Folder picker: checkbox tree (left) + selected-folder list (right).
+
+    Users can tick folders via checkboxes, Ctrl/Shift-click for multi-select,
+    or double-click a folder to add it immediately.  Both mechanisms are
+    reconciled on Accept: checked folders take priority; if nothing is checked,
+    the current tree selection is used instead.
+    """
+
+    def __init__(self, parent=None, recents: list[str] | None = None):
+        super().__init__(parent, Qt.WindowType.Window)
+        self.setWindowTitle("Open Folder(s)  —  check boxes or Ctrl-click for multi-select")
+        self.resize(900, 580)
+        self.setStyleSheet(parent.styleSheet() if parent else "")
+
+        # File-system model with checkboxes
+        self._fs = _CheckFSModel(self)
+
+        # Tree view
+        self._tree = QTreeView()
+        self._tree.setModel(self._fs)
+        self._tree.setSelectionMode(
+            QAbstractItemView.SelectionMode.ExtendedSelection)
+        self._tree.setAnimated(True)
+        for col in range(1, 4):           # hide size/type/date
+            self._tree.hideColumn(col)
+        home = self._fs.index(QDir.homePath())
+        self._tree.expand(home)
+        self._tree.scrollTo(home)
+        self._tree.setCurrentIndex(home)
+        self._tree.doubleClicked.connect(self._on_dbl)
+
+        # Checked-paths list
+        self._list = QListView()
+        from PySide6.QtCore import QStringListModel
+        self._list_model = QStringListModel(self)
+        self._list.setModel(self._list_model)
+        self._list.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        self._list.setSizePolicy(QSizePolicy.Policy.Expanding,
+                                 QSizePolicy.Policy.Expanding)
+
+        list_label = QLabel("Selected folders:")
+        list_label.setStyleSheet(f"color: {config.FG_MID}; padding: 2px 0;")
+        right_panel = QWidget()
+        rlay = QVBoxLayout(right_panel)
+        rlay.setContentsMargins(0, 0, 0, 0)
+        rlay.addWidget(list_label)
+        rlay.addWidget(self._list, 1)
+        clear_btn = QPushButton("Clear all")
+        clear_btn.clicked.connect(self._clear_all)
+        rlay.addWidget(clear_btn)
+
+        # Recent folders (quick-add)
+        if recents:
+            rec_label = QLabel("Recent:")
+            rec_label.setStyleSheet(f"color: {config.FG_MID}; padding-top: 8px;")
+            rlay.addWidget(rec_label)
+            for r in recents[:6]:
+                btn = QPushButton(os.path.basename(r) or r)
+                btn.setToolTip(r)
+                btn.clicked.connect(lambda _=False, p=r: self._add_path(p))
+                rlay.addWidget(btn)
+
+        splitter = QSplitter(Qt.Orientation.Horizontal)
+        splitter.addWidget(self._tree)
+        splitter.addWidget(right_panel)
+        splitter.setSizes([580, 300])
+
+        buttons = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Open |
+            QDialogButtonBox.StandardButton.Cancel)
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+
+        root = QVBoxLayout(self)
+        root.addWidget(splitter, 1)
+        root.addWidget(buttons)
+
+        # Keep checked-list in sync with checkbox changes
+        self._fs.dataChanged.connect(self._refresh_list)
+
+    # -- internal helpers -----------------------------------------------------
+    def _on_dbl(self, index: QModelIndex) -> None:
+        path = self._fs.filePath(index)
+        if os.path.isdir(path):
+            self._add_path(path)
+
+    def _add_path(self, path: str) -> None:
+        self._fs._checked.add(path)
+        self._refresh_list()
+
+    def _clear_all(self) -> None:
+        self._fs._checked.clear()
+        self._refresh_list()
+        # Force repaint of checkboxes
+        self._fs.dataChanged.emit(
+            QModelIndex(), QModelIndex(),
+            [Qt.ItemDataRole.CheckStateRole])
+
+    def _refresh_list(self, *_) -> None:
+        self._list_model.setStringList(self._fs.checked_paths())
+
+    # -- result ---------------------------------------------------------------
+    def selected_folders(self) -> list[str]:
+        """Checked folders first; fall back to tree selection if nothing checked."""
+        checked = self._fs.checked_paths()
+        if checked:
+            return checked
+        selected = []
+        for idx in self._tree.selectedIndexes():
+            if idx.column() == 0:
+                p = self._fs.filePath(idx)
+                if os.path.isdir(p) and p not in selected:
+                    selected.append(p)
+        return selected
 
 from . import config, theme
 from .engine import scan, prefs, favorites, cache
@@ -323,70 +491,13 @@ class MainWindow(QMainWindow):
 
     # -- folder / scan ---------------------------------------------------------
     def _pick_folders(self) -> None:
-        """Folder chooser that allows MULTIPLE folders and previews their media."""
-        dlg = QFileDialog(self, "Select folder(s)  \u2014  Ctrl/Shift-click for multiple")
-        dlg.setFileMode(QFileDialog.FileMode.Directory)
-        dlg.setOption(QFileDialog.Option.DontUseNativeDialog, True)
-        dlg.setOption(QFileDialog.Option.ShowDirsOnly, True)
-        for v in dlg.findChildren(QListView) + dlg.findChildren(QTreeView):
-            v.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
-
-        preview = QLabel("Select a folder\nto preview")
-        preview.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        preview.setWordWrap(True)
-        preview.setFixedWidth(240)
-        preview.setMinimumHeight(240)
-        preview.setStyleSheet("background:#000; color:#888;"
-                              " border:1px solid #262626; border-radius:6px;")
-        lay = dlg.layout()
-        if isinstance(lay, QGridLayout):
-            lay.addWidget(preview, 0, lay.columnCount(), lay.rowCount(), 1)
-        dlg.currentChanged.connect(
-            lambda p: self._update_folder_preview(p, preview))
-
-        if dlg.exec():
-            folders = [f for f in dlg.selectedFiles() if os.path.isdir(f)]
+        """Folder chooser with checkboxes + multi-select + recent folders."""
+        dlg = _FolderPickDlg(self, self._recents)
+        if dlg.exec() == QDialog.DialogCode.Accepted:
+            folders = dlg.selected_folders()
             if folders:
                 self.open_folders(folders)
 
-    def _update_folder_preview(self, path: str, label: QLabel) -> None:
-        if not path or not os.path.isdir(path):
-            return
-        first_img = first_any = None
-        count = 0
-        try:
-            for name in os.listdir(path):
-                ext = os.path.splitext(name.lower())[1]
-                if ext in config.SUPPORTED:
-                    count += 1
-                    full = os.path.join(path, name)
-                    if first_any is None:
-                        first_any = full
-                    if first_img is None and ext in config.IMAGE_EXT:
-                        first_img = full
-                    if first_img and count > 50:
-                        break
-        except OSError:
-            label.setText("(unreadable)")
-            label.setPixmap(QPixmap())
-            return
-        target = first_img or first_any
-        if target is None:
-            label.setPixmap(QPixmap())
-            label.setText("(no media)")
-            return
-        try:
-            qim = cache.get_thumbnail(target, 220)
-        except Exception:
-            qim = None
-        if qim is not None and not qim.isNull():
-            label.setPixmap(QPixmap.fromImage(qim).scaled(
-                220, 220, Qt.AspectRatioMode.KeepAspectRatio,
-                Qt.TransformationMode.SmoothTransformation))
-            label.setToolTip(f"{count} media file(s)")
-        else:
-            label.setPixmap(QPixmap())
-            label.setText(f"{count} media file(s)")
 
     def open_folder(self, folder: str) -> None:
         self.open_folders([folder])
@@ -535,6 +646,8 @@ class MainWindow(QMainWindow):
         lb.requestInfo.connect(lambda p: InfoDialog(p, self).exec())
         lb.openMulti.connect(self._open_multiview)
         lb.showFullScreen()
+        lb.raise_()
+        lb.activateWindow()
         lb.show_row(row)
 
     def _open_multiview(self, start_row: int) -> None:
@@ -543,6 +656,8 @@ class MainWindow(QMainWindow):
         mv.trashed.connect(self._trash_path)
         mv.openLightbox.connect(self._open_lightbox)
         mv.showFullScreen()
+        mv.raise_()
+        mv.activateWindow()
 
     # -- autoscroll / fullscreen -----------------------------------------------
     def _toggle_autoscroll(self) -> None:
@@ -561,7 +676,12 @@ class MainWindow(QMainWindow):
         sb.setValue(sb.value() + 2)
 
     def _toggle_fs(self) -> None:
-        self.showNormal() if self.isFullScreen() else self.showFullScreen()
+        if self.isFullScreen():
+            self.showNormal()
+        else:
+            self.showFullScreen()
+            self.raise_()
+            self.activateWindow()
 
     # -- session persistence ---------------------------------------------------
     def _restore_session(self) -> None:

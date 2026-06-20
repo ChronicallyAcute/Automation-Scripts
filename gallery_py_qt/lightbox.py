@@ -1,4 +1,14 @@
-"""Full-screen lightbox: image zoom/pan/rotate + native video playback."""
+"""Full-screen lightbox: image zoom/pan/rotate + native video playback.
+
+Changes vs original:
+  - Qt.WindowType.Window flag ensures the dialog covers the OS taskbar when
+    shown full-screen on Windows (QDialog without this flag is constrained
+    by its parent's geometry on some platforms).
+  - Volume slider added to the transport bar.
+  - 'F' key shortcut toggles favourite for the current item.
+  - Full-screen toggle calls raise_() + activateWindow() after showFullScreen()
+    so the window reliably takes focus and sits above system trays.
+"""
 from __future__ import annotations
 import os
 
@@ -6,7 +16,8 @@ from PySide6.QtCore import Qt, QUrl, Signal, QTimer
 from PySide6.QtGui import QPixmap, QImage, QKeySequence, QShortcut
 from PySide6.QtWidgets import (QDialog, QGraphicsView, QGraphicsScene,
                                QGraphicsPixmapItem, QVBoxLayout, QHBoxLayout,
-                               QToolButton, QLabel, QStackedWidget, QWidget)
+                               QToolButton, QLabel, QStackedWidget, QWidget,
+                               QSlider)
 from PySide6.QtMultimedia import QMediaPlayer, QAudioOutput
 from PySide6.QtMultimediaWidgets import QVideoWidget
 
@@ -60,7 +71,9 @@ class Lightbox(QDialog):
     openMulti   = Signal(int)
 
     def __init__(self, model, favorites, parent=None):
-        super().__init__(parent)
+        # Qt.WindowType.Window is required so showFullScreen() covers the OS
+        # taskbar on Windows (QDialog is otherwise constrained by parent geometry).
+        super().__init__(parent, Qt.WindowType.Window)
         self._model = model
         self._favs = favorites
         self._row = 0
@@ -83,7 +96,7 @@ class Lightbox(QDialog):
         bar.addStretch(1)
         self._fav_btn = self._tb(config.ICON_HEART_EMPTY, self._toggle_fav)
         self._tb(config.ICON_ROTATE_CCW, lambda: self._img.rotate_by(-90), bar)
-        self._tb(config.ICON_ROTATE_CW, lambda: self._img.rotate_by(90), bar)
+        self._tb(config.ICON_ROTATE_CW,  lambda: self._img.rotate_by(90), bar)
         self._tb(config.ICON_INFO, lambda: self.requestInfo.emit(self._path()), bar)
         self._tb(config.ICON_GRID, lambda: self.openMulti.emit(self._row), bar)
         self._tb(config.ICON_TRASH, self._trash, bar)
@@ -108,9 +121,11 @@ class Lightbox(QDialog):
         self._stack.addWidget(self._video_panel)
         root.addWidget(self._stack, 1)
 
+        # Transport bar (seek + volume)
         self._transport = QWidget()
         tlay = QHBoxLayout(self._transport)
         tlay.setContentsMargins(10, 4, 10, 8)
+        tlay.setSpacing(8)
         self._play_btn = self._tb(config.ICON_PAUSE, self._toggle_play)
         tlay.addWidget(self._play_btn)
         self._scrub = SeekBar()
@@ -118,6 +133,27 @@ class Lightbox(QDialog):
         self._time = QLabel("0:00 / 0:00")
         self._time.setStyleSheet(f"color: {config.FG_MID};")
         tlay.addWidget(self._time)
+
+        # Volume control
+        vol_icon = QLabel("\U0001f50a︎")
+        vol_icon.setStyleSheet(f"color: {config.FG_MID}; font-size: 13px;")
+        tlay.addWidget(vol_icon)
+        self._vol_slider = QSlider(Qt.Orientation.Horizontal)
+        self._vol_slider.setRange(0, 100)
+        self._vol_slider.setValue(80)
+        self._vol_slider.setFixedWidth(80)
+        self._vol_slider.setStyleSheet(
+            f"QSlider::groove:horizontal {{ height:3px; background:{config.FG_DIM};"
+            " border-radius:2px; }}"
+            f"QSlider::sub-page:horizontal {{ background:{config.ACCENT};"
+            " border-radius:2px; }}"
+            f"QSlider::handle:horizontal {{ width:10px; margin:-4px 0;"
+            f" border-radius:5px; background:{config.FG_BRIGHT}; }}")
+        self._audio.setVolume(0.80)
+        self._vol_slider.valueChanged.connect(
+            lambda v: self._audio.setVolume(v / 100.0))
+        tlay.addWidget(self._vol_slider)
+
         root.addWidget(self._transport)
 
         self._player.positionChanged.connect(self._on_pos)
@@ -141,20 +177,27 @@ class Lightbox(QDialog):
     def _install_shortcuts(self) -> None:
         for keys, fn in [
             (QKeySequence(Qt.Key.Key_Escape), self.close),
-            (QKeySequence(Qt.Key.Key_Left), self.prev),
-            (QKeySequence(Qt.Key.Key_Right), self.next),
-            (QKeySequence(Qt.Key.Key_Plus), lambda: self._img.zoom_by(1.25)),
-            (QKeySequence(Qt.Key.Key_Equal), lambda: self._img.zoom_by(1.25)),
-            (QKeySequence(Qt.Key.Key_Minus), lambda: self._img.zoom_by(0.8)),
-            (QKeySequence(Qt.Key.Key_Space), self._toggle_play),
+            (QKeySequence(Qt.Key.Key_Left),   self.prev),
+            (QKeySequence(Qt.Key.Key_Right),  self.next),
+            (QKeySequence(Qt.Key.Key_Plus),   lambda: self._img.zoom_by(1.25)),
+            (QKeySequence(Qt.Key.Key_Equal),  lambda: self._img.zoom_by(1.25)),
+            (QKeySequence(Qt.Key.Key_Minus),  lambda: self._img.zoom_by(0.8)),
+            (QKeySequence(Qt.Key.Key_Space),  self._toggle_play),
             (QKeySequence(Qt.Key.Key_Delete), self._trash),
-            (QKeySequence(Qt.Key.Key_F), self._toggle_fs),
+            (QKeySequence(Qt.Key.Key_F),      self._toggle_fav),
+            (QKeySequence(Qt.Key.Key_F11),    self._toggle_fs),
             (QKeySequence(Qt.Key.Key_Comma),  lambda: self._seek_relative(-1000)),
             (QKeySequence(Qt.Key.Key_Period), lambda: self._seek_relative(1000)),
-            (QKeySequence("Shift+Left"),  lambda: self._seek_relative(-5000)),
-            (QKeySequence("Shift+Right"), lambda: self._seek_relative(5000)),
-            (QKeySequence("Ctrl+Left"),  lambda: self._seek_relative(-15000)),
-            (QKeySequence("Ctrl+Right"), lambda: self._seek_relative(15000)),
+            (QKeySequence("Shift+Left"),      lambda: self._seek_relative(-5000)),
+            (QKeySequence("Shift+Right"),     lambda: self._seek_relative(5000)),
+            (QKeySequence("Ctrl+Left"),       lambda: self._seek_relative(-15000)),
+            (QKeySequence("Ctrl+Right"),      lambda: self._seek_relative(15000)),
+            (QKeySequence(Qt.Key.Key_BracketLeft),
+             lambda: self._vol_slider.setValue(
+                 max(0, self._vol_slider.value() - 10))),
+            (QKeySequence(Qt.Key.Key_BracketRight),
+             lambda: self._vol_slider.setValue(
+                 min(100, self._vol_slider.value() + 10))),
         ]:
             QShortcut(keys, self, activated=fn)
 
@@ -165,12 +208,13 @@ class Lightbox(QDialog):
         if not path:
             return
         n, total = row + 1, self._model.rowCount()
-        self._counter.setText(f"{n} / {total}   \u00b7   {os.path.basename(path)}")
-        self._fav_btn.setText(config.ICON_HEART_FULL if self._favs.is_fav(path)
-                              else config.ICON_HEART_EMPTY)
+        self._counter.setText(f"{n} / {total}   ·   {os.path.basename(path)}")
+        is_fav = self._favs.is_fav(path)
+        self._fav_btn.setText(
+            config.ICON_HEART_FULL if is_fav else config.ICON_HEART_EMPTY)
         self._fav_btn.setStyleSheet(
             f"color: {config.RED}; font-size: 15px; border: none; padding: 4px 8px;"
-            if self._favs.is_fav(path) else
+            if is_fav else
             f"color: {config.FG_MID}; font-size: 15px; border: none; padding: 4px 8px;")
         if media.is_video(path):
             self._stack.setCurrentIndex(1)
@@ -217,7 +261,12 @@ class Lightbox(QDialog):
             self.trashed.emit(p)
 
     def _toggle_fs(self) -> None:
-        self.showNormal() if self.isFullScreen() else self.showFullScreen()
+        if self.isFullScreen():
+            self.showNormal()
+        else:
+            self.showFullScreen()
+            self.raise_()
+            self.activateWindow()
 
     def _toggle_play(self) -> None:
         if self._player.playbackState() == QMediaPlayer.PlaybackState.PlayingState:
