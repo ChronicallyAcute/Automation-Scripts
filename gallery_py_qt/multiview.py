@@ -22,7 +22,7 @@ from PySide6.QtWidgets import (QDialog, QWidget, QGridLayout, QVBoxLayout,
                                QHBoxLayout, QLabel, QToolButton, QStackedWidget,
                                QGraphicsScene, QGraphicsView, QSizePolicy)
 from PySide6.QtGui import QPixmap, QKeySequence, QShortcut, QPalette, QColor
-from PySide6.QtMultimedia import QMediaPlayer, QAudioOutput
+from PySide6.QtMultimedia import QMediaPlayer
 from PySide6.QtMultimediaWidgets import QGraphicsVideoItem
 
 from . import config
@@ -123,9 +123,9 @@ class _Slot(QWidget):
         self._video_item.nativeSizeChanged.connect(lambda *_: self._fit_video())
 
         self._player = QMediaPlayer(self)
-        self._audio  = QAudioOutput(self)
-        self._audio.setMuted(True)
-        self._player.setAudioOutput(self._audio)
+        # Multi-view tiles play silently by design (several tiles run at once),
+        # so no audio output is attached — this skips audio-stream decoding
+        # rather than decoding into a muted sink.
         self._player.setVideoOutput(self._video_item)
         self._player.setLoops(QMediaPlayer.Loops.Infinite)
         self._player.mediaStatusChanged.connect(self._on_status)

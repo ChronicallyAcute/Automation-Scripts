@@ -20,7 +20,7 @@ from PySide6.QtGui import (QPalette, QColor, QPainter, QPen, QPixmap,
                             QPolygonF)
 from PySide6.QtWidgets import (QAbstractScrollArea, QFrame, QWidget,
                                QToolButton, QHBoxLayout)
-from PySide6.QtMultimedia import QMediaPlayer, QAudioOutput, QVideoSink
+from PySide6.QtMultimedia import QMediaPlayer, QVideoSink
 
 from . import config
 from .model import PathRole, IsVideoRole, FavRole, LoadedRole
@@ -36,41 +36,42 @@ class _VideoPreviewPool(QWidget):
     def __init__(self, frame_cb, parent=None):
         super().__init__(parent)
         self._frame_cb = frame_cb
-        self._free: list[tuple[QMediaPlayer, QAudioOutput, QVideoSink]] = []
-        self._used: dict[str, tuple[QMediaPlayer, QAudioOutput, QVideoSink]] = {}
+        self._free: list[tuple[QMediaPlayer, QVideoSink]] = []
+        self._used: dict[str, tuple[QMediaPlayer, QVideoSink]] = {}
         for _ in range(self.MAX):
             p = QMediaPlayer(self)
-            a = QAudioOutput(self)
-            a.setMuted(True)
-            p.setAudioOutput(a)
+            # No audio output is attached: these previews only pull video frames
+            # through the sink, so leaving audio unset skips audio-stream
+            # decoding entirely (cheaper than decoding into a muted output) and
+            # avoids holding open four audio device handles.
             p.setLoops(QMediaPlayer.Loops.Infinite)
             s = QVideoSink(self)
             p.setVideoSink(s)
-            self._free.append((p, a, s))
+            self._free.append((p, s))
 
     def play(self, path: str) -> None:
         if path in self._used:
             return
         if not self._free:
             self.stop(next(iter(self._used)))
-        player, audio, sink = self._free.pop()
+        player, sink = self._free.pop()
         sink.videoFrameChanged.connect(
             lambda frame, p=path: self._on_frame(p, frame))
         player.setSource(QUrl.fromLocalFile(path))
         player.play()
-        self._used[path] = (player, audio, sink)
+        self._used[path] = (player, sink)
 
     def stop(self, path: str) -> None:
         if path not in self._used:
             return
-        player, audio, sink = self._used.pop(path)
+        player, sink = self._used.pop(path)
         player.stop()
         player.setSource(QUrl())
         try:
             sink.videoFrameChanged.disconnect()
         except RuntimeError:
             pass
-        self._free.append((player, audio, sink))
+        self._free.append((player, sink))
 
     def stop_all(self) -> None:
         for path in list(self._used):

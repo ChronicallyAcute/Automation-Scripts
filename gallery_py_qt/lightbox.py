@@ -18,7 +18,7 @@ from PySide6.QtWidgets import (QDialog, QGraphicsView, QGraphicsScene,
                                QGraphicsPixmapItem, QVBoxLayout, QHBoxLayout,
                                QToolButton, QLabel, QStackedWidget, QWidget,
                                QSlider)
-from PySide6.QtMultimedia import QMediaPlayer, QAudioOutput
+from PySide6.QtMultimedia import QMediaPlayer, QAudioOutput, QtAudio
 from PySide6.QtMultimediaWidgets import QVideoWidget
 
 from . import config
@@ -149,9 +149,8 @@ class Lightbox(QDialog):
             " border-radius:2px; }}"
             f"QSlider::handle:horizontal {{ width:10px; margin:-4px 0;"
             f" border-radius:5px; background:{config.FG_BRIGHT}; }}")
-        self._audio.setVolume(0.80)
-        self._vol_slider.valueChanged.connect(
-            lambda v: self._audio.setVolume(v / 100.0))
+        self._vol_slider.valueChanged.connect(self._set_volume_pct)
+        self._set_volume_pct(self._vol_slider.value())
         tlay.addWidget(self._vol_slider)
 
         root.addWidget(self._transport)
@@ -267,6 +266,21 @@ class Lightbox(QDialog):
             self.showFullScreen()
             self.raise_()
             self.activateWindow()
+
+    def _set_volume_pct(self, pct: int) -> None:
+        """Apply the slider position as a perceptually-even volume.
+
+        QAudioOutput.setVolume() expects a linear amplitude (0.0-1.0), but human
+        loudness perception is logarithmic — mapping the slider straight onto
+        amplitude crams almost all the audible change into the bottom of the
+        track.  QtAudio.convertVolume() does the standard log→linear remap so
+        the slider feels uniform end to end.
+        """
+        amp = QtAudio.convertVolume(
+            pct / 100.0,
+            QtAudio.VolumeScale.LogarithmicVolumeScale,
+            QtAudio.VolumeScale.LinearVolumeScale)
+        self._audio.setVolume(amp)
 
     def _toggle_play(self) -> None:
         if self._player.playbackState() == QMediaPlayer.PlaybackState.PlayingState:
