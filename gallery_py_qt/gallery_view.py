@@ -23,7 +23,7 @@ from PySide6.QtWidgets import (QAbstractScrollArea, QFrame, QWidget,
 from PySide6.QtMultimedia import QMediaPlayer, QAudioOutput, QVideoSink
 
 from . import config
-from .model import PathRole, IsVideoRole, FavRole
+from .model import PathRole, IsVideoRole, FavRole, LoadedRole
 
 
 # ---------------------------------------------------------------------------
@@ -215,7 +215,7 @@ class GalleryView(QAbstractScrollArea):
             for sig, slot in (
                 (old.modelReset,    self._on_model_reset),
                 (old.dataChanged,   self._on_data_changed),
-                (old.rowsInserted,  self._on_model_reset),
+                (old.rowsInserted,  self._relayout),
                 (old.rowsRemoved,   self._on_model_reset),
             ):
                 try:
@@ -226,7 +226,7 @@ class GalleryView(QAbstractScrollArea):
         if model is not None:
             model.modelReset.connect(self._on_model_reset)
             model.dataChanged.connect(self._on_data_changed)
-            model.rowsInserted.connect(self._on_model_reset)
+            model.rowsInserted.connect(self._relayout)
             model.rowsRemoved.connect(self._on_model_reset)
         self._on_model_reset()
 
@@ -247,8 +247,21 @@ class GalleryView(QAbstractScrollArea):
         self._overlay.hide()
         self._vid_pool.stop_all()
         self._pending_frames.clear()
-        self._pm_dims.clear()
+        # _pm_dims is NOT cleared — path→aspect-ratio never changes for a given
+        # file, so stale entries are always correct and save a re-layout cycle.
         self._cur_row = -1
+        # Seed dims from thumbnails already in the model's in-memory pixmap cache
+        # so the very first relayout after a modelReset uses the correct heights
+        # instead of falling back to square cells.
+        m = self._model
+        if m is not None:
+            for i in range(m.rowCount()):
+                idx = m.index(i)
+                path = idx.data(PathRole)
+                if path and path not in self._pm_dims and idx.data(LoadedRole):
+                    pm = idx.data(Qt.ItemDataRole.DecorationRole)
+                    if isinstance(pm, QPixmap) and not pm.isNull():
+                        self._pm_dims[path] = (pm.width(), pm.height())
         self._relayout()
 
     def _on_data_changed(self, top: QModelIndex, bottom: QModelIndex,
