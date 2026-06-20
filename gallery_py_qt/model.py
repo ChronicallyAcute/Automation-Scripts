@@ -1,24 +1,24 @@
 """Virtualized list model backing the gallery grid.
 
 QListView only calls data() for items it is about to paint, so memory stays
-bounded automatically — no manual hydrate/dehydrate needed.  Thumbnails are
+bounded automatically \u2014 no manual hydrate/dehydrate needed.  Thumbnails are
 fetched lazily through the threaded loader and cached (LRU-capped) as QPixmaps.
 
 Fork improvements over gallery_qt.model:
-  • _all_set — O(1) membership test for the master path list (was implicit
+  \u2022 _all_set \u2014 O(1) membership test for the master path list (was implicit
     O(n) via list membership checks in the original).
-  • _path_to_row — O(1) reverse lookup from path → current row index.
+  \u2022 _path_to_row \u2014 O(1) reverse lookup from path \u2192 current row index.
     The original did an O(n) linear scan on *every* thumbnail arrival,
-    favourite toggle, and rotation — producing O(n²) behaviour when
+    favourite toggle, and rotation \u2014 producing O(n\u00b2) behaviour when
     thousands of thumbnails arrive in rapid succession.
-  • add_paths_batch / finalize_scan — progressive streaming population.
+  \u2022 add_paths_batch / finalize_scan \u2014 progressive streaming population.
     add_paths_batch() appends accepted items via beginInsertRows so the
     view shows media as soon as the first batch arrives from the scanner.
     finalize_scan() re-sorts everything once scanning is complete.
-  • remove_path uses beginRemoveRows / endRemoveRows instead of a full model
+  \u2022 remove_path uses beginRemoveRows / endRemoveRows instead of a full model
     reset, so deleting a single file doesn't force the view to repaint every
     visible cell.
-  • Adaptive pixmap cap — the in-RAM pixmap budget is expressed in megabytes
+  \u2022 Adaptive pixmap cap \u2014 the in-RAM pixmap budget is expressed in megabytes
     (default 256 MB) and converted to an item count based on the current
     thumbnail size, rather than a fixed 400-item ceiling that left large
     thumbnails wasting far more RAM than intended.
@@ -41,7 +41,7 @@ FavRole     = Qt.ItemDataRole.UserRole + 3
 LoadedRole  = Qt.ItemDataRole.UserRole + 4
 
 # Target memory ceiling for the in-process pixmap LRU cache.
-# At 320 px thumbnails (≈ 400 KB RGBA each) this yields ~640 items ≈ 256 MB.
+# At 320 px thumbnails (? 400 KB RGBA each) this yields ~640 items ? 256 MB.
 _PIXMAP_MEM_CAP_MB = 256
 
 
@@ -75,7 +75,7 @@ class GalleryModel(QAbstractListModel):
         self._descending = False
         self._loader.ready.connect(self._on_thumb_ready)
 
-    # ── population ────────────────────────────────────────────────────────────
+    # -- population ------------------------------------------------------------
     def set_paths(self, paths: list[str]) -> None:
         """Replace the full path list and re-index (non-streaming)."""
         self._all = list(paths)
@@ -126,7 +126,7 @@ class GalleryModel(QAbstractListModel):
                 self.index(0), self.index(len(self._rows) - 1),
                 [Qt.ItemDataRole.DecorationRole])
 
-    # ── filter helpers ────────────────────────────────────────────────────────
+    # -- filter helpers --------------------------------------------------------
     def _passes_filter(self, p: str) -> bool:
         vid = media.is_video(p)
         if vid and not self._show_videos:
@@ -137,7 +137,7 @@ class GalleryModel(QAbstractListModel):
             return False
         return True
 
-    # ── filtering / sorting ──────────────────────────────────────────────────
+    # -- filtering / sorting --------------------------------------------------
     def set_filter(self, images: bool, videos: bool, query: str) -> None:
         self._show_images, self._show_videos = images, videos
         self._query = query.strip().lower()
@@ -191,11 +191,11 @@ class GalleryModel(QAbstractListModel):
         if self._descending:
             rows.reverse()
         self._rows = rows
-        # Rebuild reverse index in one pass — O(n), amortised over many lookups.
+        # Rebuild reverse index in one pass -- O(n), amortised over many lookups.
         self._path_to_row = {p: i for i, p in enumerate(rows)}
         self.endResetModel()
 
-    # ── Qt model interface ────────────────────────────────────────────────────
+    # -- Qt model interface ----------------------------------------------------
     def rowCount(self, parent=QModelIndex()) -> int:
         return 0 if parent.isValid() else len(self._rows)
 
@@ -228,7 +228,7 @@ class GalleryModel(QAbstractListModel):
             return None
         return None
 
-    # ── thumbnail arrival ─────────────────────────────────────────────────────
+    # -- thumbnail arrival -----------------------------------------------------
     def _on_thumb_ready(self, path: str, max_px: int, qim: QImage) -> None:
         if max_px != self._thumb_px:
             return
@@ -241,14 +241,14 @@ class GalleryModel(QAbstractListModel):
         self._pixmaps.move_to_end(path)
         while len(self._pixmaps) > self._pixmap_cap:
             self._pixmaps.popitem(last=False)
-        # O(1) row lookup via reverse index — was O(n) in the original.
+        # O(1) row lookup via reverse index -- was O(n) in the original.
         row = self._path_to_row.get(path)
         if row is not None:
             idx = self.index(row)
             self.dataChanged.emit(idx, idx, [Qt.ItemDataRole.DecorationRole])
 
     def rotate_path(self, path: str) -> None:
-        """Rotate display 90° CW (display-only; persists for this session)."""
+        """Rotate display 90\u00b0 CW (display-only; persists for this session)."""
         self._rotation[path] = (self._rotation.get(path, 0) + 90) % 360
         pm = self._pixmaps.get(path)
         if pm is not None:
@@ -276,7 +276,7 @@ class GalleryModel(QAbstractListModel):
         row = self._path_to_row.pop(path, None)
         if row is None:
             return
-        # Proper granular removal — avoids the full model reset the original used.
+        # Proper granular removal -- avoids the full model reset the original used.
         self.beginRemoveRows(QModelIndex(), row, row)
         self._rows.pop(row)
         # Shift subsequent row indices down by one.

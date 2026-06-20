@@ -5,15 +5,15 @@ thread via a queued signal carrying the source path and a ready QImage.  Only
 the GUI thread converts QImage -> QPixmap (a Qt requirement).
 
 Fork improvements over gallery_qt.loader:
-  • Priority scheduling — each new request gets a monotonically increasing
+  \u2022 Priority scheduling \u2014 each new request gets a monotonically increasing
     priority so the most-recently-requested path is always decoded first.
     This means scrolling to any position in a 50,000-item gallery immediately
     shows thumbnails at that position rather than waiting for earlier requests
     in the queue to drain.
-  • Thread count auto-sizes to the machine's CPU count (capped at 16) instead
+  \u2022 Thread count auto-sizes to the machine's CPU count (capped at 16) instead
     of the original hard-coded 4, making better use of modern multi-core CPUs
     for the mix of I/O and CPU work that thumbnail decoding involves.
-  • cancel() lets callers mark queued-but-not-yet-started jobs as skip-on-run,
+  \u2022 cancel() lets callers mark queued-but-not-yet-started jobs as skip-on-run,
     useful when a path is deleted or scrolled so far out of view that decoding
     it is wasted work.
 """

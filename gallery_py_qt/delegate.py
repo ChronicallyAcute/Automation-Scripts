@@ -36,7 +36,7 @@ class CardDelegate(QStyledItemDelegate):
             painter.drawPixmap(x, y, scaled)
         else:
             painter.setPen(QPen(QColor(config.FG_DIM)))
-            painter.drawText(rect, Qt.AlignmentFlag.AlignCenter, "…")
+            painter.drawText(rect, Qt.AlignmentFlag.AlignCenter, "\u2026")
 
         if index.data(IsVideoRole):
             self._draw_play_badge(painter, rect)

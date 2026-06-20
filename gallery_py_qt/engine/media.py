@@ -5,10 +5,10 @@ thumbnail loader calls into here and the GUI thread only does the cheap
 QImage -> QPixmap hand-off.
 
 Fork improvements over gallery_qt.engine.media:
-  • pil_to_qimage() uses Format_RGB888 for fully-opaque images (JPEG, BMP,
+  \u2022 pil_to_qimage() uses Format_RGB888 for fully-opaque images (JPEG, BMP,
     non-alpha PNG) instead of always converting to RGBA.  This saves 25 % of
     decode memory and the conversion step for the most common image type.
-  • load_thumbnail() / load_full_qimage() detect alpha presence before
+  \u2022 load_thumbnail() / load_full_qimage() detect alpha presence before
     converting, skipping the unconditional im.convert("RGBA").
 """
 from __future__ import annotations
@@ -38,7 +38,7 @@ try:
 except ImportError:
     cv2 = None
     HAS_CV2 = False
-    print("[gallery-py-qt] opencv-python not installed — videos disabled. "
+    print("[gallery-py-qt] opencv-python not installed \u2014 videos disabled. "
           "Install with: pip install opencv-python", file=sys.stderr)
 
 # PIL modes that carry an alpha channel.
@@ -58,7 +58,7 @@ def _has_alpha(im: "Image.Image") -> bool:
     return False
 
 
-# ── PIL <-> QImage ───────────────────────────────────────────────────────────
+# -- PIL <-> QImage -----------------------------------------------------------
 
 def pil_to_qimage(im: "Image.Image") -> QImage:
     """Convert a PIL image to an owned QImage.
@@ -80,7 +80,7 @@ def pil_to_qimage(im: "Image.Image") -> QImage:
     return qim.copy()   # detach from the Python bytes buffer
 
 
-# ── Size / duration peeks (cheap, header-only where possible) ────────────────
+# -- Size / duration peeks (cheap, header-only where possible) ----------------
 
 def peek_size(path: str) -> tuple[int, int]:
     if is_video(path):
@@ -114,7 +114,7 @@ def peek_duration(path: str) -> float:
         return 0.0
 
 
-# ── Video keyframe extraction ─────────────────────────────────────────────────
+# -- Video keyframe extraction -------------------------------------------------
 
 def _video_frame(path: str, frac: float = 0.1) -> QImage | None:
     if not HAS_CV2:
@@ -144,7 +144,7 @@ def _video_frame(path: str, frac: float = 0.1) -> QImage | None:
         cap.release()
 
 
-# ── Thumbnail + full-image loading ───────────────────────────────────────────
+# -- Thumbnail + full-image loading -------------------------------------------
 
 def load_thumbnail(path: str, max_px: int) -> QImage | None:
     """Load `path` scaled to <= max_px on its longest side. Returns QImage."""

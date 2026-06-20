@@ -5,7 +5,7 @@ instead of a full re-decode.  QImage.save/load is thread-safe (no QPixmap), so
 this can run entirely inside the loader's worker threads.
 
 Fork improvement over gallery_qt.engine.cache:
-  • A single os.stat() call replaces the original os.path.exists() +
+  \u2022 A single os.stat() call replaces the original os.path.exists() +
     os.path.getmtime() pair, halving the syscall count per cache lookup.
     At thousands of thumbnails per second this is a measurable win.
 """
@@ -36,7 +36,7 @@ def get_thumbnail(path: str, max_px: int) -> QImage | None:
         mtime = 0.0
     cp = _cache_path(_key(path, mtime, max_px))
 
-    # Single stat check — raises FileNotFoundError on a miss, avoiding the
+    # Single stat check -- raises FileNotFoundError on a miss, avoiding the
     # separate os.path.exists() call the original used.
     try:
         os.stat(cp)

@@ -38,7 +38,7 @@ class InfoDialog(QDialog):
 
         w, h = media.peek_size(path)
         if w and h:
-            row("Dimensions", f"{w} × {h}")
+            row("Dimensions", f"{w} \u00d7 {h}")
         if media.is_video(path):
             dur = media.peek_duration(path)
             if dur:

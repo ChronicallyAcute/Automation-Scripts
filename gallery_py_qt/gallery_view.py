@@ -93,7 +93,7 @@ class GalleryView(QListView):
         self._hide_timer.setInterval(120)
         self._hide_timer.timeout.connect(self._overlay.hide)
 
-    # ── columns / cell sizing ────────────────────────────────────────────────
+    # -- columns / cell sizing ------------------------------------------------
     def set_columns(self, n: int) -> None:
         self._cols = max(config.MIN_COLS, min(config.MAX_COLS, n))
         self._last_cell = -1
@@ -123,7 +123,7 @@ class GalleryView(QListView):
         super().resizeEvent(e)
         self._recompute_cell()
 
-    # ── hover overlay ─────────────────────────────────────────────────────────
+    # -- hover overlay ---------------------------------------------------------
     def _on_entered(self, index: QModelIndex) -> None:
         if not index.isValid():
             return

@@ -1,12 +1,12 @@
 """Main application window: toolbar, gallery, scanning, wiring, persistence.
 
 Fork improvements over gallery_qt.main_window:
-  • Streaming scan — _StreamScanJob emits path batches incrementally via a
+  \u2022 Streaming scan \u2014 _StreamScanJob emits path batches incrementally via a
     batch signal so the gallery populates as files are discovered, rather than
     waiting for a full-folder enumeration to complete before showing anything.
     A generation counter (_scan_gen) ensures stale batches from a superseded
     scan are silently dropped when the user opens a new folder mid-scan.
-  • ThumbnailLoader is constructed without an explicit max_threads so it uses
+  \u2022 ThumbnailLoader is constructed without an explicit max_threads so it uses
     the auto-detected CPU count instead of the hard-coded 4.
 """
 from __future__ import annotations
@@ -33,7 +33,7 @@ from .multiview import MultiView
 from .exif_panel import InfoDialog
 
 
-# ── Streaming scan ────────────────────────────────────────────────────────────
+# -- Streaming scan ------------------------------------------------------------
 
 class _StreamSignals(QObject):
     batch = Signal(int, object)   # (gen, list[str])
@@ -60,7 +60,7 @@ class _StreamScanJob(QRunnable):
         self._signals.done.emit(self._gen, last_result or SR())
 
 
-# ── Dimension pre-fetch ───────────────────────────────────────────────────────
+# -- Dimension pre-fetch -------------------------------------------------------
 
 class _DimsSignals(QObject):
     done = Signal(dict)        # {path: (w, h)}
@@ -84,7 +84,7 @@ class _DimsJob(QRunnable):
         self._signals.done.emit(out)
 
 
-# ── Main window ───────────────────────────────────────────────────────────────
+# -- Main window ---------------------------------------------------------------
 
 class MainWindow(QMainWindow):
     def __init__(self):
@@ -97,7 +97,7 @@ class MainWindow(QMainWindow):
         self._prefs = prefs.load_prefs()
         self._recents = prefs.load_recent()
         self._favs = Favorites()
-        # No explicit max_threads — ThumbnailLoader auto-sizes to CPU count.
+        # No explicit max_threads -- ThumbnailLoader auto-sizes to CPU count.
         self._loader = ThumbnailLoader(self)
         self._model = GalleryModel(self._favs, self._loader, self)
         self._current_folder: str | None = None
@@ -123,7 +123,7 @@ class MainWindow(QMainWindow):
         self._autoscroll_timer.setInterval(20)
         self._autoscroll_timer.timeout.connect(self._autoscroll_tick)
 
-    # ── UI ────────────────────────────────────────────────────────────────────
+    # -- UI --------------------------------------------------------------------
     def _build_ui(self) -> None:
         central = QWidget()
         root = QVBoxLayout(central)
@@ -139,7 +139,7 @@ class MainWindow(QMainWindow):
         self._view.trashItem.connect(self._on_grid_trash)
         root.addWidget(self._view, 1)
 
-        # ── Floating control bar ─────────────────────────────────────────────
+        # -- Floating control bar ---------------------------------------------
         self._bar = QFrame(central)
         self._bar.setObjectName("OverlayBar")
         self._bar.setStyleSheet(
@@ -150,7 +150,7 @@ class MainWindow(QMainWindow):
         h.setSpacing(4)
 
         h.addWidget(self._btn(f"{config.ICON_FOLDER} Open", self._pick_folders))
-        self._recent_btn = self._btn("Recent ▾", None)
+        self._recent_btn = self._btn("Recent \u25be", None)
         self._recent_menu = QMenu(self._recent_btn)
         self._recent_btn.setMenu(self._recent_menu)
         self._recent_btn.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
@@ -171,13 +171,13 @@ class MainWindow(QMainWindow):
         self._sort.addItem("Images first", "img_first")
         self._sort.addItem("Videos first", "vid_first")
         self._sort.addItem("Favourites", "favorites")
-        self._sort.addItem("Dimensions · area", "area")
-        self._sort.addItem("Dimensions · width", "width")
-        self._sort.addItem("Dimensions · height", "height")
+        self._sort.addItem("Dimensions \u00b7 area", "area")
+        self._sort.addItem("Dimensions \u00b7 width", "width")
+        self._sort.addItem("Dimensions \u00b7 height", "height")
         self._sort.currentIndexChanged.connect(lambda _: self._on_sort_changed())
         h.addWidget(self._sort)
-        self._dir_btn = self._btn("↑", self._toggle_sort_dir)
-        self._dir_btn.setToolTip("Ascending — click for descending")
+        self._dir_btn = self._btn("\u2191", self._toggle_sort_dir)
+        self._dir_btn.setToolTip("Ascending \u2014 click for descending")
         h.addWidget(self._dir_btn)
 
         h.addWidget(self._sep())
@@ -188,7 +188,7 @@ class MainWindow(QMainWindow):
         h.addWidget(self._img_btn); h.addWidget(self._vid_btn)
 
         self._search = QLineEdit()
-        self._search.setPlaceholderText("search…")
+        self._search.setPlaceholderText("search\u2026")
         self._search.setFixedWidth(150)
         self._search.textChanged.connect(lambda _: self._apply_filter())
         h.addWidget(self._search)
@@ -205,7 +205,7 @@ class MainWindow(QMainWindow):
         h.addWidget(self._status)
         h.addWidget(self._btn(config.ICON_FULLSCREEN, self._toggle_fs))
 
-        # ── Floating undo bar ────────────────────────────────────────────────
+        # -- Floating undo bar ------------------------------------------------
         self._undo_bar = QFrame(central)
         self._undo_bar.setStyleSheet(
             "QFrame { background: rgba(26,8,8,235); border-radius: 8px; }")
@@ -240,7 +240,7 @@ class MainWindow(QMainWindow):
                   activated=self._toggle_autoscroll)
         QShortcut(QKeySequence(Qt.Key.Key_H), self, activated=self._toggle_bar)
 
-    # ── Floating-bar overlay management ───────────────────────────────────────
+    # -- Floating-bar overlay management ---------------------------------------
     def _position_overlays(self) -> None:
         c = self.centralWidget()
         if c is None:
@@ -321,10 +321,10 @@ class MainWindow(QMainWindow):
         f.setStyleSheet("color:#262626;")
         return f
 
-    # ── folder / scan ─────────────────────────────────────────────────────────
+    # -- folder / scan ---------------------------------------------------------
     def _pick_folders(self) -> None:
         """Folder chooser that allows MULTIPLE folders and previews their media."""
-        dlg = QFileDialog(self, "Select folder(s)  —  Ctrl/Shift-click for multiple")
+        dlg = QFileDialog(self, "Select folder(s)  \u2014  Ctrl/Shift-click for multiple")
         dlg.setFileMode(QFileDialog.FileMode.Directory)
         dlg.setOption(QFileDialog.Option.DontUseNativeDialog, True)
         dlg.setOption(QFileDialog.Option.ShowDirsOnly, True)
@@ -399,9 +399,9 @@ class MainWindow(QMainWindow):
         self._current_folder = folders[0]
         if len(folders) == 1:
             self.setWindowTitle(
-                f"Gallery — {os.path.basename(os.path.normpath(folders[0]))}")
+                f"Gallery \u2014 {os.path.basename(os.path.normpath(folders[0]))}")
         else:
-            self.setWindowTitle(f"Gallery — {len(folders)} folders")
+            self.setWindowTitle(f"Gallery \u2014 {len(folders)} folders")
         for f in folders:
             self._recents = [f] + [r for r in self._recents if r != f]
         self._recents = self._recents[:10]
@@ -411,7 +411,7 @@ class MainWindow(QMainWindow):
         # Bump generation to discard batches from any in-progress scan.
         self._scan_gen += 1
         self._model.set_paths([])    # clear immediately
-        self._status.setText(f"Scanning {len(folders)} folder(s)…")
+        self._status.setText(f"Scanning {len(folders)} folder(s)\u2026")
         self._scan_pool.start(
             _StreamScanJob(folders, self._scan_gen, self._stream_sig))
 
@@ -420,7 +420,7 @@ class MainWindow(QMainWindow):
             return
         self._model.add_paths_batch(paths)
         n = self._model.rowCount()
-        self._status.setText(f"Scanning…  {n} found")
+        self._status.setText(f"Scanning\u2026  {n} found")
 
     def _on_scan_done(self, gen: int, result) -> None:
         if gen != self._scan_gen:
@@ -443,7 +443,7 @@ class MainWindow(QMainWindow):
             act.triggered.connect(lambda _=False, f=folder: self.open_folder(f))
             self._recent_menu.addAction(act)
 
-    # ── filters / columns ─────────────────────────────────────────────────────
+    # -- filters / columns -----------------------------------------------------
     def _apply_filter(self) -> None:
         self._model.set_filter(self._img_btn.isChecked(),
                                self._vid_btn.isChecked(),
@@ -452,7 +452,7 @@ class MainWindow(QMainWindow):
     def _on_cols(self, n: int) -> None:
         self._view.set_columns(n)
 
-    # ── sorting ───────────────────────────────────────────────────────────────
+    # -- sorting ---------------------------------------------------------------
     def _on_sort_changed(self) -> None:
         self._model.set_sort(self._sort.currentData())
         if self._model.needs_dimensions():
@@ -461,16 +461,16 @@ class MainWindow(QMainWindow):
     def _toggle_sort_dir(self) -> None:
         desc = not self._model.descending()
         self._model.set_descending(desc)
-        self._dir_btn.setText("↓" if desc else "↑")
-        self._dir_btn.setToolTip("Descending — click for ascending" if desc
-                                 else "Ascending — click for descending")
+        self._dir_btn.setText("\u2193" if desc else "\u2191")
+        self._dir_btn.setToolTip("Descending \u2014 click for ascending" if desc
+                                 else "Ascending \u2014 click for descending")
 
     def _ensure_dims(self) -> None:
         paths = [p for p in self._model.all_paths()
                  if p not in self._dims_done_for]
         if not paths:
             return
-        self._status.setText("Computing dimensions…")
+        self._status.setText("Computing dimensions\u2026")
         self._scan_pool.start(_DimsJob(paths, self._dims_sig))
 
     def _on_dims_done(self, dims: dict) -> None:
@@ -480,7 +480,7 @@ class MainWindow(QMainWindow):
             self._status.setText(
                 f"Sorted by {self._sort.currentText().lower()}")
 
-    # ── favourites / rotate / trash ───────────────────────────────────────────
+    # -- favourites / rotate / trash -------------------------------------------
     def _on_grid_fav(self, row: int) -> None:
         path = self._model.path_at(row)
         if not path:
@@ -527,7 +527,7 @@ class MainWindow(QMainWindow):
             self._model.add_path(orig)
             self._status.setText(f"Restored {os.path.basename(orig)}")
 
-    # ── lightbox / multiview ──────────────────────────────────────────────────
+    # -- lightbox / multiview --------------------------------------------------
     def _open_lightbox(self, row: int) -> None:
         lb = Lightbox(self._model, self._favs, self)
         lb.favToggled.connect(self._toggle_fav_path)
@@ -544,7 +544,7 @@ class MainWindow(QMainWindow):
         mv.openLightbox.connect(self._open_lightbox)
         mv.showFullScreen()
 
-    # ── autoscroll / fullscreen ───────────────────────────────────────────────
+    # -- autoscroll / fullscreen -----------------------------------------------
     def _toggle_autoscroll(self) -> None:
         self._autoscroll = not self._autoscroll
         self._scroll_btn.setChecked(self._autoscroll)
@@ -563,7 +563,7 @@ class MainWindow(QMainWindow):
     def _toggle_fs(self) -> None:
         self.showNormal() if self.isFullScreen() else self.showFullScreen()
 
-    # ── session persistence ───────────────────────────────────────────────────
+    # -- session persistence ---------------------------------------------------
     def _restore_session(self) -> None:
         g = self._prefs.get("geometry")
         if isinstance(g, list) and len(g) == 4:
@@ -578,8 +578,8 @@ class MainWindow(QMainWindow):
                 self._sort.setCurrentIndex(i)
         if self._prefs.get("sort_desc"):
             self._model.set_descending(True)
-            self._dir_btn.setText("↓")
-            self._dir_btn.setToolTip("Descending — click for ascending")
+            self._dir_btn.setText("\u2193")
+            self._dir_btn.setToolTip("Descending \u2014 click for ascending")
 
     def closeEvent(self, e) -> None:
         try:

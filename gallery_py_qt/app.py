@@ -8,7 +8,7 @@ import sys
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         prog="gallery_py_qt",
-        description="Vertical media gallery (PySide6) — image/video viewer.")
+        description="Vertical media gallery (PySide6) \u2014 image/video viewer.")
     parser.add_argument("folder", nargs="?", default=None,
                         help="folder to open on launch (overrides session restore)")
     parser.add_argument("--no-restore", action="store_true",

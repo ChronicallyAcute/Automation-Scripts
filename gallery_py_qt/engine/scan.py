@@ -1,10 +1,10 @@
-"""Folder scanning — faithfully includes hidden files / OneDrive reparse points.
+"""Folder scanning \u2014 faithfully includes hidden files / OneDrive reparse points.
 
 Fork improvements over gallery_qt.engine.scan:
-  • scan_iter() — a generator that yields (batch, running_ScanResult) pairs so
+  \u2022 scan_iter() \u2014 a generator that yields (batch, running_ScanResult) pairs so
     the UI can populate progressively while the scan is still running, rather
     than blocking until every file is enumerated.
-  • Optional recursive scanning (off by default; matches original behaviour).
+  \u2022 Optional recursive scanning (off by default; matches original behaviour).
 """
 from __future__ import annotations
 import os
@@ -27,17 +27,17 @@ class ScanResult:
     def summary(self) -> str:
         msg = f"{len(self.paths)} media file(s) from {self.total} entries"
         if self.hidden:
-            msg += f"  ·  {self.hidden} hidden included"
+            msg += f"  \u00b7  {self.hidden} hidden included"
         if self.skipped:
-            msg += f"  ·  {self.skipped} skipped (access denied)"
+            msg += f"  \u00b7  {self.skipped} skipped (access denied)"
         if self.videos_no_cv2:
-            msg += f"  ·  {self.videos_no_cv2} video(s) skipped (no opencv)"
+            msg += f"  \u00b7  {self.videos_no_cv2} video(s) skipped (no opencv)"
         return msg
 
 
 def _iter_folder(folder: str, result: ScanResult,
                  recursive: bool = False) -> Generator[str, None, None]:
-    """Internal generator — yields accepted file paths, mutates *result* stats."""
+    """Internal generator \u2014 yields accepted file paths, mutates *result* stats."""
     try:
         it = os.scandir(folder)
     except OSError as exc:
@@ -82,7 +82,7 @@ def scan_iter(folders: list[str], batch_size: int = 200,
     """Scan *folders* incrementally, yielding (batch, running_result) pairs.
 
     Each batch contains up to *batch_size* accepted paths.  The caller receives
-    the first batch — and can begin populating the UI — before scanning of
+    the first batch \u2014 and can begin populating the UI \u2014 before scanning of
     remaining folders is complete.
 
     The yielded *result* object is shared and mutated in place; do not store it

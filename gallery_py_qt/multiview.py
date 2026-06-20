@@ -1,4 +1,4 @@
-"""Multi-view: adaptive 3-up (portrait) / 2×2 (landscape) grid of slots.
+"""Multi-view: adaptive 3-up (portrait) / 2\u00d72 (landscape) grid of slots.
 
 Each slot shows an image or a native-playback video with its own scrubber and
 a hover overlay (pin, enlarge, rotate, favourite, trash).  Pinned slots keep
@@ -281,9 +281,9 @@ class MultiView(QDialog):
         chrome.setContentsMargins(8, 6, 8, 6)
         chrome.setSpacing(6)
         self._prev_btn = self._chrome_btn(config.ICON_PREV, self.prev_page,
-                                          "Previous page (←)", big=True)
+                                          "Previous page (\u2190)", big=True)
         self._next_btn = self._chrome_btn(config.ICON_NEXT, self.next_page,
-                                          "Next page (→)", big=True)
+                                          "Next page (\u2192)", big=True)
         self._counter = QLabel("")
         self._counter.setStyleSheet(f"color:{config.FG_MID};")
         self._fs_btn = self._chrome_btn(config.ICON_FULLSCREEN, self._toggle_fs,
@@ -388,7 +388,7 @@ class MultiView(QDialog):
             else:
                 slot.clear()
         self._counter.setText(
-            f"{self._start + 1}–{min(row, total)} of {total}")
+            f"{self._start + 1}\u2013{min(row, total)} of {total}")
 
     def next_page(self) -> None:
         step = sum(1 for s in self._slots if not s.is_pinned) or 1

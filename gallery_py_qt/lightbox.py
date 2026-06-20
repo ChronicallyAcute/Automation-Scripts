@@ -165,7 +165,7 @@ class Lightbox(QDialog):
         if not path:
             return
         n, total = row + 1, self._model.rowCount()
-        self._counter.setText(f"{n} / {total}   ·   {os.path.basename(path)}")
+        self._counter.setText(f"{n} / {total}   \u00b7   {os.path.basename(path)}")
         self._fav_btn.setText(config.ICON_HEART_FULL if self._favs.is_fav(path)
                               else config.ICON_HEART_EMPTY)
         self._fav_btn.setStyleSheet(

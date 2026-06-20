@@ -1,4 +1,4 @@
-"""SeekBar — a click-to-seek time tracker for video objects."""
+"""SeekBar \u2014 a click-to-seek time tracker for video objects."""
 from __future__ import annotations
 
 from PySide6.QtCore import Qt, Signal, QPoint
