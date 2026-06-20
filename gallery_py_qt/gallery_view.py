@@ -156,7 +156,7 @@ class GalleryView(QListView):
         self.setFlow(QListView.Flow.LeftToRight)
         self.setWrapping(True)
         self.setUniformItemSizes(True)
-        self.setSpacing(config.GAP)
+        self.setSpacing(0)
         self.setMouseTracking(True)
         self.setSelectionMode(QListView.SelectionMode.SingleSelection)
         self.setVerticalScrollMode(QListView.ScrollMode.ScrollPerPixel)
@@ -211,13 +211,12 @@ class GalleryView(QListView):
         vw = self.viewport().width()
         if vw <= 0:
             return
-        gap = config.GAP
-        cell = max(120, (vw - gap * (self._cols + 1)) // self._cols)
+        cell = max(120, vw // self._cols)
         if cell == self._last_cell:
             return
         self._last_cell = cell
         self._delegate.cell = QSize(cell, cell)
-        self.setGridSize(QSize(cell + gap, cell + gap))
+        self.setGridSize(QSize(cell, cell))
         m = self.model()
         if m is not None and hasattr(m, "set_thumb_px"):
             thumb = min(config.MAX_THUMB_PX, (cell // 32) * 32)

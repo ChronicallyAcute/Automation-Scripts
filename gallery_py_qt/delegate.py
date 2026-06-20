@@ -1,8 +1,8 @@
 """Item delegate: paints each gallery cell (thumbnail, video badge, fav heart)."""
 from __future__ import annotations
 
-from PySide6.QtCore import QSize, Qt, QRectF, QPointF
-from PySide6.QtGui import QColor, QPainter, QPen, QBrush, QPolygonF, QPixmap
+from PySide6.QtCore import QSize, Qt, QPointF
+from PySide6.QtGui import QColor, QPainter, QPen, QPolygonF, QPixmap
 from PySide6.QtWidgets import QStyledItemDelegate, QStyle
 
 from . import config
@@ -19,22 +19,22 @@ class CardDelegate(QStyledItemDelegate):
 
     def paint(self, painter: QPainter, option, index) -> None:
         painter.save()
-        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
         painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform, True)
-        rect = option.rect.adjusted(2, 2, -2, -2)
-
-        painter.setPen(Qt.PenStyle.NoPen)
-        painter.setBrush(QBrush(QColor(config.CARD_BG)))
-        painter.drawRoundedRect(rect, 6, 6)
+        rect = option.rect   # full cell \u2014 no padding, no card background
 
         pm = index.data(Qt.ItemDataRole.DecorationRole)
         if isinstance(pm, QPixmap) and not pm.isNull():
-            scaled = pm.scaled(rect.size(), Qt.AspectRatioMode.KeepAspectRatio,
+            # Crop-to-fill: scale up so the shorter axis fills the cell,
+            # then centre-crop the excess along the longer axis.
+            scaled = pm.scaled(rect.size(),
+                               Qt.AspectRatioMode.KeepAspectRatioByExpanding,
                                Qt.TransformationMode.SmoothTransformation)
-            x = rect.x() + (rect.width() - scaled.width()) // 2
-            y = rect.y() + (rect.height() - scaled.height()) // 2
-            painter.drawPixmap(x, y, scaled)
+            sx = (scaled.width()  - rect.width())  // 2
+            sy = (scaled.height() - rect.height()) // 2
+            painter.drawPixmap(rect.x(), rect.y(),
+                               scaled, sx, sy, rect.width(), rect.height())
         else:
+            painter.fillRect(rect, QColor(config.CARD_BG))
             painter.setPen(QPen(QColor(config.FG_DIM)))
             painter.drawText(rect, Qt.AlignmentFlag.AlignCenter, "\u2026")
 
@@ -52,7 +52,7 @@ class CardDelegate(QStyledItemDelegate):
         if option.state & QStyle.StateFlag.State_Selected:
             painter.setBrush(Qt.BrushStyle.NoBrush)
             painter.setPen(QPen(QColor(config.ACCENT), 2))
-            painter.drawRoundedRect(rect, 6, 6)
+            painter.drawRect(rect)
         painter.restore()
 
     def _draw_play_badge(self, painter: QPainter, rect) -> None:
