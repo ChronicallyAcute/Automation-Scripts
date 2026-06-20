@@ -51,9 +51,15 @@ def stylesheet() -> str:
         selection-background-color: {c.ACCENT_BG};
     }}
     QListView {{
-        background: {c.BG};
+        background: #000;
         border: none;
         outline: none;
+        padding: 0px;
+    }}
+    QListView::item {{
+        padding: 0px;
+        margin: 0px;
+        border: none;
     }}
     QListView::item:selected {{
         background: transparent;

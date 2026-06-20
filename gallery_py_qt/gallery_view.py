@@ -15,6 +15,7 @@ Changes vs original:
 from __future__ import annotations
 
 from PySide6.QtCore import Qt, QSize, Signal, QModelIndex, QTimer, QPoint, QUrl
+from PySide6.QtGui import QPalette, QColor
 from PySide6.QtWidgets import QListView, QFrame, QWidget, QToolButton, QHBoxLayout
 from PySide6.QtMultimedia import QMediaPlayer, QAudioOutput, QVideoSink
 
@@ -165,6 +166,12 @@ class GalleryView(QListView):
         self.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         self.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOn)
         self.viewport().setContentsMargins(0, 0, 0, 0)
+        # Force viewport background to pure black so any hairline between
+        # cells (sub-pixel rounding, HiDPI, etc.) is invisible.
+        p = self.viewport().palette()
+        p.setColor(QPalette.ColorRole.Base,   QColor("#000"))
+        p.setColor(QPalette.ColorRole.Window, QColor("#000"))
+        self.viewport().setPalette(p)
         self._last_cell = -1
 
         self._delegate = CardDelegate(self)

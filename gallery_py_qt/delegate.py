@@ -22,6 +22,8 @@ class CardDelegate(QStyledItemDelegate):
         painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform, True)
         rect = option.rect   # full cell \u2014 no padding, no card background
 
+        painter.fillRect(rect, QColor("#000"))   # black base \u2014 hides any sub-pixel seam
+
         pm = index.data(Qt.ItemDataRole.DecorationRole)
         if isinstance(pm, QPixmap) and not pm.isNull():
             # Crop-to-fill: scale up so the shorter axis fills the cell,
@@ -34,7 +36,6 @@ class CardDelegate(QStyledItemDelegate):
             painter.drawPixmap(rect.x(), rect.y(),
                                scaled, sx, sy, rect.width(), rect.height())
         else:
-            painter.fillRect(rect, QColor(config.CARD_BG))
             painter.setPen(QPen(QColor(config.FG_DIM)))
             painter.drawText(rect, Qt.AlignmentFlag.AlignCenter, "\u2026")
 
