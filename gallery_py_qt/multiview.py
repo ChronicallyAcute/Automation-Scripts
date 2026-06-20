@@ -74,13 +74,14 @@ class _Slot(QWidget):
     enlarge    = Signal(int)   # model row
     pinned     = Signal(int)   # slot index
 
-    # Stylesheet templates for the pin button (avoids :checked cascade issues)
-    _PIN_OFF = (f"QToolButton {{ color: {config.OVERLAY_FG};"
+    # Stylesheet templates for the pin button — same visual language as fav:
+    # OFF = dim / outline look, ON = highlighted red (matches filled heart).
+    _PIN_OFF = (f"QToolButton {{ color: {config.FG_DIM};"
                 " background: rgba(0,0,0,90);"
                 " border-radius: 4px; font-size: 15px; padding: 3px 6px; }}")
-    _PIN_ON  = (f"QToolButton {{ color: {config.ACCENT};"
-                " background: rgba(74,143,212,100);"
-                f" border: 1px solid {config.ACCENT};"
+    _PIN_ON  = (f"QToolButton {{ color: {config.RED};"
+                " background: rgba(180,40,40,110);"
+                f" border: 1px solid {config.RED};"
                 " border-radius: 4px; font-size: 15px; padding: 3px 6px; }}")
 
     def __init__(self, slot_index: int, favorites, parent=None):
@@ -151,7 +152,7 @@ class _Slot(QWidget):
         ol.setSpacing(4)
 
         self._pin_btn = QToolButton()
-        self._pin_btn.setText(config.ICON_PIN)
+        self._pin_btn.setText(config.ICON_PIN_OFF)
         self._pin_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         self._pin_btn.setStyleSheet(self._PIN_OFF)
         self._pin_btn.clicked.connect(self._toggle_pin)
@@ -278,6 +279,8 @@ class _Slot(QWidget):
 
     def _toggle_pin(self) -> None:
         self._is_pinned = not self._is_pinned
+        self._pin_btn.setText(
+            config.ICON_PIN_ON if self._is_pinned else config.ICON_PIN_OFF)
         self._pin_btn.setStyleSheet(
             self._PIN_ON if self._is_pinned else self._PIN_OFF)
         self.pinned.emit(self._idx)

@@ -66,6 +66,8 @@ ICON_PAUSE       = "\u23f8"
 ICON_INFO        = "\u2139\ufe0e"
 ICON_TRASH       = "\U0001f5d1\ufe0e"
 ICON_PIN         = "\U0001f4cc\ufe0e"
+ICON_PIN_OFF     = "\U0001f4cd\ufe0e"   # round pushpin  \u2014 outline / inactive state
+ICON_PIN_ON      = "\U0001f4cc\ufe0e"   # filled pushpin \u2014 active / pinned state
 ICON_FULLSCREEN  = "\u26f6"
 ICON_FOLDER      = "\U0001f4c1\ufe0e"
 
