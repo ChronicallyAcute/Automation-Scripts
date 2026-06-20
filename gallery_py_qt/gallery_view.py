@@ -15,7 +15,7 @@ Changes vs original:
 from __future__ import annotations
 
 from PySide6.QtCore import Qt, QSize, Signal, QModelIndex, QTimer, QPoint, QUrl
-from PySide6.QtWidgets import QListView, QWidget, QToolButton, QHBoxLayout
+from PySide6.QtWidgets import QListView, QFrame, QWidget, QToolButton, QHBoxLayout
 from PySide6.QtMultimedia import QMediaPlayer, QAudioOutput, QVideoSink
 
 from . import config
@@ -157,11 +157,14 @@ class GalleryView(QListView):
         self.setWrapping(True)
         self.setUniformItemSizes(True)
         self.setSpacing(0)
+        self.setContentsMargins(0, 0, 0, 0)
+        self.setFrameShape(QFrame.Shape.NoFrame)
         self.setMouseTracking(True)
         self.setSelectionMode(QListView.SelectionMode.SingleSelection)
         self.setVerticalScrollMode(QListView.ScrollMode.ScrollPerPixel)
         self.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         self.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOn)
+        self.viewport().setContentsMargins(0, 0, 0, 0)
         self._last_cell = -1
 
         self._delegate = CardDelegate(self)
@@ -211,7 +214,7 @@ class GalleryView(QListView):
         vw = self.viewport().width()
         if vw <= 0:
             return
-        cell = max(120, vw // self._cols)
+        cell = max(120, -(-vw // self._cols))   # ceiling div fills viewport exactly
         if cell == self._last_cell:
             return
         self._last_cell = cell
