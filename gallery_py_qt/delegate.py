@@ -1,0 +1,70 @@
+"""Item delegate: paints each gallery cell (thumbnail, video badge, fav heart)."""
+from __future__ import annotations
+
+from PySide6.QtCore import QSize, Qt, QRectF, QPointF
+from PySide6.QtGui import QColor, QPainter, QPen, QBrush, QPolygonF, QPixmap
+from PySide6.QtWidgets import QStyledItemDelegate, QStyle
+
+from . import config
+from .model import IsVideoRole, FavRole
+
+
+class CardDelegate(QStyledItemDelegate):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.cell = QSize(320, 320)
+
+    def sizeHint(self, option, index) -> QSize:
+        return self.cell
+
+    def paint(self, painter: QPainter, option, index) -> None:
+        painter.save()
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform, True)
+        rect = option.rect.adjusted(2, 2, -2, -2)
+
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(QBrush(QColor(config.CARD_BG)))
+        painter.drawRoundedRect(rect, 6, 6)
+
+        pm = index.data(Qt.ItemDataRole.DecorationRole)
+        if isinstance(pm, QPixmap) and not pm.isNull():
+            scaled = pm.scaled(rect.size(), Qt.AspectRatioMode.KeepAspectRatio,
+                               Qt.TransformationMode.SmoothTransformation)
+            x = rect.x() + (rect.width() - scaled.width()) // 2
+            y = rect.y() + (rect.height() - scaled.height()) // 2
+            painter.drawPixmap(x, y, scaled)
+        else:
+            painter.setPen(QPen(QColor(config.FG_DIM)))
+            painter.drawText(rect, Qt.AlignmentFlag.AlignCenter, "…")
+
+        if index.data(IsVideoRole):
+            self._draw_play_badge(painter, rect)
+
+        if index.data(FavRole):
+            painter.setPen(QPen(QColor(config.RED)))
+            f = painter.font(); f.setPointSize(12); f.setBold(True)
+            painter.setFont(f)
+            painter.drawText(rect.adjusted(0, 4, -6, 0),
+                             Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignRight,
+                             config.ICON_HEART_FULL)
+
+        if option.state & QStyle.StateFlag.State_Selected:
+            painter.setBrush(Qt.BrushStyle.NoBrush)
+            painter.setPen(QPen(QColor(config.ACCENT), 2))
+            painter.drawRoundedRect(rect, 6, 6)
+        painter.restore()
+
+    def _draw_play_badge(self, painter: QPainter, rect) -> None:
+        cx, cy = rect.center().x(), rect.center().y()
+        r = max(14, min(rect.width(), rect.height()) // 10)
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(QColor(0, 0, 0, 130))
+        painter.drawEllipse(QPointF(cx, cy), r, r)
+        tri = QPolygonF([
+            QPointF(cx - r * 0.35, cy - r * 0.5),
+            QPointF(cx - r * 0.35, cy + r * 0.5),
+            QPointF(cx + r * 0.55, cy),
+        ])
+        painter.setBrush(QColor(255, 255, 255, 230))
+        painter.drawPolygon(tri)
