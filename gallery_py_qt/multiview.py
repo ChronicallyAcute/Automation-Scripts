@@ -184,11 +184,10 @@ class _Slot(QWidget):
 
     def resizeEvent(self, e):
         super().resizeEvent(e)
-        bh = self._btnbar.sizeHint().height()
-        self._btnbar.setGeometry(0, 0, self.width(), bh)
-        self._btnbar.raise_()
         if self._is_video:
             self._fit_video()
+        else:
+            self._position_overlays()
 
     def _fit_video(self) -> None:
         vw, vh = self._gview.width(), self._gview.height()
@@ -204,7 +203,37 @@ class _Slot(QWidget):
         self._video_item.setPos((vw - disp_w) / 2.0, (vh - disp_h) / 2.0)
         self._scene.setSceneRect(0, 0, vw, vh)
         self._disp = QSizeF(disp_w, disp_h)
-        self._position_seek()
+        self._position_overlays()
+
+    def _img_displayed_rect(self) -> tuple[int, int, int, int]:
+        """Pixel bounds (x, y, w, h) of the scaled image within the slot."""
+        cw = self._img.width() or self.width()
+        ch = self._img.height() or self.height()
+        if self._pm.isNull() or cw <= 0 or ch <= 0:
+            return 0, 0, max(cw, 1), max(ch, 1)
+        pw, ph = self._pm.width(), self._pm.height()
+        if pw <= 0 or ph <= 0:
+            return 0, 0, cw, ch
+        scale = min(cw / pw, ch / ph)
+        dw = max(1, int(pw * scale))
+        dh = max(1, int(ph * scale))
+        return (cw - dw) // 2, (ch - dh) // 2, dw, dh
+
+    def _position_overlays(self) -> None:
+        """Constrain btnbar (and seekbar for video) to displayed media bounds."""
+        sw, sh = self.width(), self.height()
+        bh = self._btnbar.sizeHint().height()
+        if self._is_video:
+            dw = int(self._disp.width()) or sw
+            dh = int(self._disp.height()) or sh
+            x = int((sw - dw) / 2)
+            y = int((sh - dh) / 2)
+        else:
+            x, y, dw, dh = self._img_displayed_rect()
+        self._btnbar.setGeometry(max(0, x), max(0, y), max(1, dw), bh)
+        self._btnbar.raise_()
+        if self._is_video:
+            self._position_seek()
 
     def _position_seek(self) -> None:
         if not self._is_video:
@@ -246,6 +275,7 @@ class _Slot(QWidget):
         self._row  = -1
         self._path = ""
         self._pm   = QPixmap()
+        self._position_overlays()
 
     def show_item(self, row: int, path: str) -> None:
         self._row  = row
@@ -276,6 +306,7 @@ class _Slot(QWidget):
             qim = media.load_full_qimage(path, max_px=2000)
             self._pm = QPixmap.fromImage(qim) if (qim and not qim.isNull()) else QPixmap()
             self._img.set_source(self._pm)
+            self._position_overlays()
 
     def _toggle_pin(self) -> None:
         self._is_pinned = not self._is_pinned

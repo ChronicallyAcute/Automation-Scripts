@@ -85,25 +85,7 @@ class Lightbox(QDialog):
         root.setContentsMargins(0, 0, 0, 0)
         root.setSpacing(0)
 
-        bar = QHBoxLayout()
-        bar.setContentsMargins(8, 6, 8, 6)
-        self._hold = self._tb("HOLD", self._toggle_hold, checkable=True)
-        bar.addWidget(self._hold)
-        bar.addStretch(1)
-        self._counter = QLabel("")
-        self._counter.setStyleSheet(f"color: {config.FG_MID};")
-        bar.addWidget(self._counter)
-        bar.addStretch(1)
-        self._fav_btn = self._tb(config.ICON_HEART_EMPTY, self._toggle_fav)
-        self._tb(config.ICON_ROTATE_CCW, lambda: self._img.rotate_by(-90), bar)
-        self._tb(config.ICON_ROTATE_CW,  lambda: self._img.rotate_by(90), bar)
-        self._tb(config.ICON_INFO, lambda: self.requestInfo.emit(self._path()), bar)
-        self._tb(config.ICON_GRID, lambda: self.openMulti.emit(self._row), bar)
-        self._tb(config.ICON_TRASH, self._trash, bar)
-        self._tb(config.ICON_CLOSE, self.close, bar)
-        bar.insertWidget(bar.count() - 6, self._fav_btn)
-        root.addLayout(bar)
-
+        # Media stack fills the full window — overlays are positioned on top.
         self._stack = QStackedWidget()
         self._img = _ImageView()
         self._video_panel = QWidget()
@@ -121,8 +103,33 @@ class Lightbox(QDialog):
         self._stack.addWidget(self._video_panel)
         root.addWidget(self._stack, 1)
 
-        # Transport bar (seek + volume)
-        self._transport = QWidget()
+        # Floating action bar — overlays the top edge of the media.
+        self._bar_widget = QWidget(self)
+        self._bar_widget.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
+        bar = QHBoxLayout(self._bar_widget)
+        bar.setContentsMargins(8, 6, 8, 6)
+        self._hold = self._tb("HOLD", self._toggle_hold, checkable=True)
+        bar.addWidget(self._hold)
+        bar.addStretch(1)
+        self._counter = QLabel("")
+        self._counter.setStyleSheet(
+            f"color: {config.FG_MID}; background: rgba(0,0,0,90);"
+            " border-radius: 4px; padding: 2px 8px;")
+        bar.addWidget(self._counter)
+        bar.addStretch(1)
+        self._fav_btn = self._tb(config.ICON_HEART_EMPTY, self._toggle_fav)
+        self._tb(config.ICON_ROTATE_CCW, lambda: self._img.rotate_by(-90), bar)
+        self._tb(config.ICON_ROTATE_CW,  lambda: self._img.rotate_by(90), bar)
+        self._tb(config.ICON_INFO, lambda: self.requestInfo.emit(self._path()), bar)
+        self._tb(config.ICON_GRID, lambda: self.openMulti.emit(self._row), bar)
+        self._tb(config.ICON_TRASH, self._trash, bar)
+        self._tb(config.ICON_CLOSE, self.close, bar)
+        bar.insertWidget(bar.count() - 6, self._fav_btn)
+
+        # Floating transport bar (seek + volume) — overlays the bottom edge of the media.
+        self._transport = QWidget(self)
+        self._transport.setStyleSheet(f"background: {config.BAR_BG};")
+        self._transport.hide()
         tlay = QHBoxLayout(self._transport)
         tlay.setContentsMargins(10, 4, 10, 8)
         tlay.setSpacing(8)
@@ -153,8 +160,6 @@ class Lightbox(QDialog):
         self._set_volume_pct(self._vol_slider.value())
         tlay.addWidget(self._vol_slider)
 
-        root.addWidget(self._transport)
-
         self._player.positionChanged.connect(self._on_pos)
         self._player.durationChanged.connect(self._on_dur)
         self._scrub.seeked.connect(self._on_seek)
@@ -166,8 +171,10 @@ class Lightbox(QDialog):
         b.setText(glyph)
         b.setCheckable(checkable)
         b.setCursor(Qt.CursorShape.PointingHandCursor)
-        b.setStyleSheet(f"color: {config.FG_MID}; font-size: 15px; border: none;"
-                        " padding: 4px 8px;")
+        b.setStyleSheet(
+            f"QToolButton {{ color: {config.FG_MID}; font-size: 15px; border: none;"
+            " background: rgba(0,0,0,90); border-radius: 4px; padding: 4px 8px; }}"
+            " QToolButton:hover { color: #ffffff; background: rgba(0,0,0,160); }")
         b.clicked.connect(cb)
         if layout is not None:
             layout.addWidget(b)
@@ -212,9 +219,11 @@ class Lightbox(QDialog):
         self._fav_btn.setText(
             config.ICON_HEART_FULL if is_fav else config.ICON_HEART_EMPTY)
         self._fav_btn.setStyleSheet(
-            f"color: {config.RED}; font-size: 15px; border: none; padding: 4px 8px;"
+            f"QToolButton {{ color: {config.RED}; font-size: 15px; border: none;"
+            " background: rgba(0,0,0,90); border-radius: 4px; padding: 4px 8px; }}"
             if is_fav else
-            f"color: {config.FG_MID}; font-size: 15px; border: none; padding: 4px 8px;")
+            f"QToolButton {{ color: {config.FG_MID}; font-size: 15px; border: none;"
+            " background: rgba(0,0,0,90); border-radius: 4px; padding: 4px 8px; }}")
         if media.is_video(path):
             self._stack.setCurrentIndex(1)
             self._transport.setVisible(True)
@@ -228,6 +237,21 @@ class Lightbox(QDialog):
             qim = media.load_full_qimage(path)
             if qim is not None:
                 self._img.set_pixmap(QPixmap.fromImage(qim))
+        self._position_overlays()
+
+    def resizeEvent(self, e) -> None:
+        super().resizeEvent(e)
+        self._position_overlays()
+
+    def _position_overlays(self) -> None:
+        w, h = self.width(), self.height()
+        bh = self._bar_widget.sizeHint().height()
+        self._bar_widget.setGeometry(0, 0, w, max(bh, 1))
+        self._bar_widget.raise_()
+        if self._transport.isVisible():
+            th = self._transport.sizeHint().height()
+            self._transport.setGeometry(0, h - th, w, max(th, 1))
+            self._transport.raise_()
 
     def _path(self) -> str | None:
         return self._model.path_at(self._row)
