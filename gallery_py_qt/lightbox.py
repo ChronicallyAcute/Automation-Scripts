@@ -158,9 +158,9 @@ class Lightbox(QDialog):
         self._vol_slider.setFixedWidth(80)
         self._vol_slider.setStyleSheet(
             f"QSlider::groove:horizontal {{ height:3px; background:{config.FG_DIM};"
-            " border-radius:2px; }}"
+            " border-radius:2px; }"
             f"QSlider::sub-page:horizontal {{ background:{config.ACCENT};"
-            " border-radius:2px; }}"
+            " border-radius:2px; }"
             f"QSlider::handle:horizontal {{ width:10px; margin:-4px 0;"
             f" border-radius:5px; background:{config.FG_BRIGHT}; }}")
         self._vol_slider.valueChanged.connect(self._set_volume_pct)
@@ -180,7 +180,7 @@ class Lightbox(QDialog):
         b.setCursor(Qt.CursorShape.PointingHandCursor)
         b.setStyleSheet(
             f"QToolButton {{ color: {config.FG_MID}; font-size: 15px; border: none;"
-            " background: rgba(0,0,0,90); border-radius: 4px; padding: 4px 8px; }}"
+            " background: rgba(0,0,0,90); border-radius: 4px; padding: 4px 8px; }"
             " QToolButton:hover { color: #ffffff; background: rgba(0,0,0,160); }")
         b.clicked.connect(cb)
         if layout is not None:
@@ -227,10 +227,10 @@ class Lightbox(QDialog):
             config.ICON_HEART_FULL if is_fav else config.ICON_HEART_EMPTY)
         self._fav_btn.setStyleSheet(
             f"QToolButton {{ color: {config.RED}; font-size: 15px; border: none;"
-            " background: rgba(0,0,0,90); border-radius: 4px; padding: 4px 8px; }}"
+            " background: rgba(0,0,0,90); border-radius: 4px; padding: 4px 8px; }"
             if is_fav else
             f"QToolButton {{ color: {config.FG_MID}; font-size: 15px; border: none;"
-            " background: rgba(0,0,0,90); border-radius: 4px; padding: 4px 8px; }}")
+            " background: rgba(0,0,0,90); border-radius: 4px; padding: 4px 8px; }")
         if media.is_video(path):
             self._stack.setCurrentIndex(1)
             self._transport.setVisible(True)

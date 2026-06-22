@@ -110,7 +110,7 @@ class _Slot(QWidget):
                 " border-radius: 4px; padding: 3px 5px; }")
     _PIN_ON  = (f"QToolButton {{ background: rgba(180,40,40,120);"
                 f" border: 1px solid {config.RED};"
-                " border-radius: 4px; padding: 3px 5px; }}")
+                " border-radius: 4px; padding: 3px 5px; }")
 
     def __init__(self, slot_index: int, favorites, parent=None):
         super().__init__(parent)
@@ -176,7 +176,7 @@ class _Slot(QWidget):
         self._btnbar = QWidget(self)
         self._btnbar.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
         ol = QHBoxLayout(self._btnbar)
-        ol.setContentsMargins(6, 6, 6, 6)
+        ol.setContentsMargins(4, 3, 4, 3)   # slim strip flush to media top edge
         ol.setSpacing(4)
 
         # Painted pause icons: transparent white when idle, solid red when held.
@@ -308,7 +308,7 @@ class _Slot(QWidget):
         b.setCursor(Qt.CursorShape.PointingHandCursor)
         b.setStyleSheet(
             f"QToolButton {{ color: {config.OVERLAY_FG}; background: rgba(0,0,0,90);"
-            " border-radius: 4px; font-size: 15px; padding: 3px 6px; }}")
+            " border-radius: 4px; font-size: 15px; padding: 3px 6px; }")
         b.clicked.connect(cb)
         if layout is not None:
             layout.addWidget(b)
@@ -342,9 +342,9 @@ class _Slot(QWidget):
             config.ICON_HEART_FULL if is_fav else config.ICON_HEART_EMPTY)
         self._fav_btn.setStyleSheet(
             f"QToolButton {{ color: {config.RED}; background: rgba(0,0,0,90);"
-            " border-radius:4px; font-size:15px; padding:3px 6px; }}" if is_fav else
+            " border-radius:4px; font-size:15px; padding:3px 6px; }" if is_fav else
             f"QToolButton {{ color: {config.OVERLAY_FG}; background: rgba(0,0,0,90);"
-            " border-radius:4px; font-size:15px; padding:3px 6px; }}")
+            " border-radius:4px; font-size:15px; padding:3px 6px; }")
         if media.is_video(path):
             self._is_video = True
             self._pm = QPixmap()
@@ -472,7 +472,7 @@ class MultiView(QDialog):
         self._autoscroll_spin.setStyleSheet(
             f"QSpinBox {{ color: {config.FG_BRIGHT}; background: rgba(0,0,0,90);"
             f" border: 1px solid {config.FG_DIM}; border-radius: 4px;"
-            " padding: 2px 4px; font-size: 12px; }}"
+            " padding: 2px 4px; font-size: 12px; }"
             " QSpinBox::up-button, QSpinBox::down-button"
             " { background: rgba(0,0,0,60); border: none; width: 14px; }")
         self._autoscroll_spin.valueChanged.connect(self._on_autoscroll_duration_changed)
@@ -485,13 +485,25 @@ class MultiView(QDialog):
         close_btn = self._chrome_btn(config.ICON_CLOSE, self.close, "Close (Esc)")
         chrome.addWidget(self._prev_btn)
         chrome.addWidget(self._next_btn)
-        chrome.addWidget(self._autoscroll_btn)
-        chrome.addWidget(self._autoscroll_spin)
         chrome.addStretch(1)
         chrome.addWidget(self._counter)
         chrome.addStretch(1)
         chrome.addWidget(self._fs_btn)
         chrome.addWidget(close_btn)
+
+        # Auto-scroll controls live in their own bar pinned to the bottom-centre
+        # of the window (see _position_autoscroll), keeping the top edge clear
+        # for each tile's media icons.
+        self._autoscroll_widget = QWidget(self)
+        self._autoscroll_widget.setAttribute(
+            Qt.WidgetAttribute.WA_TranslucentBackground)
+        asl = QHBoxLayout(self._autoscroll_widget)
+        asl.setContentsMargins(8, 6, 8, 6)
+        asl.setSpacing(6)
+        asl.addStretch(1)
+        asl.addWidget(self._autoscroll_btn)
+        asl.addWidget(self._autoscroll_spin)
+        asl.addStretch(1)
 
         QShortcut(QKeySequence(Qt.Key.Key_Escape), self, activated=self.close)
         QShortcut(QKeySequence(Qt.Key.Key_Left),   self, activated=self.prev_page)
@@ -511,7 +523,7 @@ class MultiView(QDialog):
         b.setStyleSheet(
             f"QToolButton {{ color: {config.OVERLAY_FG}; font-size: {size}px;"
             f" font-weight: {weight}; background: rgba(0,0,0,90); border: none;"
-            " border-radius: 4px; padding: 2px 10px; }}"
+            " border-radius: 4px; padding: 2px 10px; }"
             " QToolButton:hover { color: #ffffff;"
             " background: rgba(0,0,0,160); border-radius: 4px; }")
         b.clicked.connect(cb)
@@ -528,12 +540,19 @@ class MultiView(QDialog):
     def resizeEvent(self, e) -> None:
         super().resizeEvent(e)
         self._position_chrome()
+        self._position_autoscroll()
 
     def _position_chrome(self) -> None:
         w = self.width()
         ch = self._chrome_widget.sizeHint().height()
         self._chrome_widget.setGeometry(0, 0, w, max(ch, 1))
         self._chrome_widget.raise_()
+
+    def _position_autoscroll(self) -> None:
+        w, h = self.width(), self.height()
+        bh = self._autoscroll_widget.sizeHint().height()
+        self._autoscroll_widget.setGeometry(0, max(0, h - bh), w, max(bh, 1))
+        self._autoscroll_widget.raise_()
 
     def _toggle_autoscroll(self) -> None:
         if self._autoscroll_timer.isActive():
