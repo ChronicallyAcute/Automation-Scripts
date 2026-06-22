@@ -75,11 +75,11 @@ class _Slot(QWidget):
     enlarge    = Signal(int)   # model row
     pinned     = Signal(int)   # slot index
 
-    # Stylesheet templates for the pin button — same visual language as fav:
-    # OFF = dim / outline look, ON = highlighted red (matches filled heart).
-    _PIN_OFF = (f"QToolButton {{ color: {config.OVERLAY_FG};"
-                " background: rgba(0,0,0,90);"
-                " border-radius: 4px; font-size: 15px; padding: 3px 6px; }}")
+    # Stylesheet templates for the pause/hold button:
+    # OFF = ghost (nearly invisible until hovered), ON = red highlight.
+    _PIN_OFF = ("QToolButton { color: rgba(255,255,255,80);"
+                " background: rgba(0,0,0,50);"
+                " border: none; border-radius: 4px; font-size: 15px; padding: 3px 6px; }")
     _PIN_ON  = (f"QToolButton {{ color: {config.RED};"
                 " background: rgba(180,40,40,110);"
                 f" border: 1px solid {config.RED};"
@@ -153,7 +153,7 @@ class _Slot(QWidget):
         ol.setSpacing(4)
 
         self._pin_btn = QToolButton()
-        self._pin_btn.setText(config.ICON_PIN_OFF)
+        self._pin_btn.setText(config.ICON_PAUSE)
         self._pin_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         self._pin_btn.setStyleSheet(self._PIN_OFF)
         self._pin_btn.clicked.connect(self._toggle_pin)
@@ -165,7 +165,13 @@ class _Slot(QWidget):
         self._mk(config.ICON_ENLARGE,    lambda: self.enlarge.emit(self._row), ol)
         self._mk(config.ICON_ROTATE_CW,  self._rotate, ol)
         self._mk(config.ICON_TRASH,      self._trash, ol)
-        self._btnbar.raise_()
+
+        # Auto-hide: bar stays invisible until the user hovers the slot.
+        self._bar_hide_timer = QTimer(self)
+        self._bar_hide_timer.setSingleShot(True)
+        self._bar_hide_timer.setInterval(400)
+        self._bar_hide_timer.timeout.connect(self._maybe_hide_bar)
+        self._btnbar.hide()
 
         # Seek bar (floating, shown only for video)
         self._seekwrap = QWidget(self)
@@ -189,6 +195,20 @@ class _Slot(QWidget):
             self._fit_video()
         else:
             self._position_overlays()
+
+    def enterEvent(self, e):
+        super().enterEvent(e)
+        self._bar_hide_timer.stop()
+        self._btnbar.show()
+        self._btnbar.raise_()
+
+    def leaveEvent(self, e):
+        super().leaveEvent(e)
+        self._bar_hide_timer.start()
+
+    def _maybe_hide_bar(self) -> None:
+        if not self._is_pinned:
+            self._btnbar.hide()
 
     def _fit_video(self) -> None:
         vw, vh = self._gview.width(), self._gview.height()
@@ -311,10 +331,14 @@ class _Slot(QWidget):
 
     def _toggle_pin(self) -> None:
         self._is_pinned = not self._is_pinned
-        self._pin_btn.setText(
-            config.ICON_PIN_ON if self._is_pinned else config.ICON_PIN_OFF)
         self._pin_btn.setStyleSheet(
             self._PIN_ON if self._is_pinned else self._PIN_OFF)
+        if self._is_pinned:
+            self._bar_hide_timer.stop()
+            self._btnbar.show()
+            self._btnbar.raise_()
+        else:
+            self._bar_hide_timer.start()
         self.pinned.emit(self._idx)
 
     def _rotate(self) -> None:
@@ -533,7 +557,7 @@ class MultiView(QDialog):
         if total == 0:
             return
         want = self._detect_layout(start)
-        if want != self._layout_slots and not any(s.is_pinned for s in self._slots):
+        if want != self._layout_slots and all(s.row < 0 for s in self._slots):
             self._build_slots(want)
         self._start = max(0, min(start, total - 1))
         row = self._start
