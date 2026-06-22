@@ -17,18 +17,46 @@ Fixes vs previous version:
 from __future__ import annotations
 import os
 
-from PySide6.QtCore import Qt, QUrl, Signal, QSizeF, QTimer
+from PySide6.QtCore import Qt, QUrl, Signal, QSizeF, QSize, QRectF, QTimer
 from PySide6.QtWidgets import (QDialog, QWidget, QGridLayout, QVBoxLayout,
                                QHBoxLayout, QLabel, QToolButton, QStackedWidget,
                                QGraphicsScene, QGraphicsView, QSizePolicy,
                                QSpinBox)
-from PySide6.QtGui import QPixmap, QKeySequence, QShortcut, QPalette, QColor
+from PySide6.QtGui import (QPixmap, QKeySequence, QShortcut, QPalette, QColor,
+                           QPainter, QIcon)
 from PySide6.QtMultimedia import QMediaPlayer
 from PySide6.QtMultimediaWidgets import QGraphicsVideoItem
 
 from . import config
 from .engine import media
 from .seekbar import SeekBar, fmt_time
+
+
+def _make_pause_icon(color: QColor, px: int = 32) -> QIcon:
+    """Render a two-bar pause glyph as a QIcon.
+
+    Drawn with QPainter rather than a font codepoint (U+23F8 ⏸) because that
+    codepoint renders inconsistently across platforms — a colour emoji on some,
+    a tofu box on others.  A painted icon always displays, and its alpha gives
+    us the requested transparent / minimally-obstructing look directly.
+    """
+    pm = QPixmap(px, px)
+    pm.fill(Qt.GlobalColor.transparent)
+    p = QPainter(pm)
+    p.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+    p.setPen(Qt.PenStyle.NoPen)
+    p.setBrush(color)
+    bar_w = px * 0.24
+    gap   = px * 0.16
+    bar_h = px * 0.66
+    y     = (px - bar_h) / 2.0
+    x1    = px / 2.0 - gap / 2.0 - bar_w
+    x2    = px / 2.0 + gap / 2.0
+    rad   = bar_w * 0.35
+    p.drawRoundedRect(QRectF(x1, y, bar_w, bar_h), rad, rad)
+    p.drawRoundedRect(QRectF(x2, y, bar_w, bar_h), rad, rad)
+    p.end()
+    return QIcon(pm)
 
 
 class _AspectLabel(QLabel):
@@ -75,15 +103,14 @@ class _Slot(QWidget):
     enlarge    = Signal(int)   # model row
     pinned     = Signal(int)   # slot index
 
-    # Stylesheet templates for the pause/hold button:
-    # OFF = ghost (nearly invisible until hovered), ON = red highlight.
-    _PIN_OFF = ("QToolButton { color: rgba(255,255,255,80);"
-                " background: rgba(0,0,0,50);"
-                " border: none; border-radius: 4px; font-size: 15px; padding: 3px 6px; }")
-    _PIN_ON  = (f"QToolButton {{ color: {config.RED};"
-                " background: rgba(180,40,40,110);"
+    # Background/border for the pause/hold button — the painted icon carries
+    # the colour, so these only set the subtle backing so the bars stay legible
+    # over bright media.  OFF = barely-there ghost; ON = red highlight.
+    _PIN_OFF = ("QToolButton { background: rgba(0,0,0,55); border: none;"
+                " border-radius: 4px; padding: 3px 5px; }")
+    _PIN_ON  = (f"QToolButton {{ background: rgba(180,40,40,120);"
                 f" border: 1px solid {config.RED};"
-                " border-radius: 4px; font-size: 15px; padding: 3px 6px; }}")
+                " border-radius: 4px; padding: 3px 5px; }}")
 
     def __init__(self, slot_index: int, favorites, parent=None):
         super().__init__(parent)
@@ -152,8 +179,15 @@ class _Slot(QWidget):
         ol.setContentsMargins(6, 6, 6, 6)
         ol.setSpacing(4)
 
+        # Painted pause icons: transparent white when idle, solid red when held.
+        red = QColor(config.RED)
+        self._pause_icon_off = _make_pause_icon(QColor(255, 255, 255, 120))
+        self._pause_icon_on  = _make_pause_icon(QColor(red.red(), red.green(),
+                                                       red.blue(), 255))
         self._pin_btn = QToolButton()
-        self._pin_btn.setText(config.ICON_PAUSE)
+        self._pin_btn.setIcon(self._pause_icon_off)
+        self._pin_btn.setIconSize(QSize(16, 16))
+        self._pin_btn.setToolTip("Hold this tile (pause paging)")
         self._pin_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         self._pin_btn.setStyleSheet(self._PIN_OFF)
         self._pin_btn.clicked.connect(self._toggle_pin)
@@ -331,6 +365,8 @@ class _Slot(QWidget):
 
     def _toggle_pin(self) -> None:
         self._is_pinned = not self._is_pinned
+        self._pin_btn.setIcon(
+            self._pause_icon_on if self._is_pinned else self._pause_icon_off)
         self._pin_btn.setStyleSheet(
             self._PIN_ON if self._is_pinned else self._PIN_OFF)
         if self._is_pinned:
