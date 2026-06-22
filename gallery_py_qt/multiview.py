@@ -17,10 +17,11 @@ Fixes vs previous version:
 from __future__ import annotations
 import os
 
-from PySide6.QtCore import Qt, QUrl, Signal, QSizeF
+from PySide6.QtCore import Qt, QUrl, Signal, QSizeF, QTimer
 from PySide6.QtWidgets import (QDialog, QWidget, QGridLayout, QVBoxLayout,
                                QHBoxLayout, QLabel, QToolButton, QStackedWidget,
-                               QGraphicsScene, QGraphicsView, QSizePolicy)
+                               QGraphicsScene, QGraphicsView, QSizePolicy,
+                               QSpinBox)
 from PySide6.QtGui import QPixmap, QKeySequence, QShortcut, QPalette, QColor
 from PySide6.QtMultimedia import QMediaPlayer
 from PySide6.QtMultimediaWidgets import QGraphicsVideoItem
@@ -76,7 +77,7 @@ class _Slot(QWidget):
 
     # Stylesheet templates for the pin button — same visual language as fav:
     # OFF = dim / outline look, ON = highlighted red (matches filled heart).
-    _PIN_OFF = (f"QToolButton {{ color: {config.FG_DIM};"
+    _PIN_OFF = (f"QToolButton {{ color: {config.OVERLAY_FG};"
                 " background: rgba(0,0,0,90);"
                 " border-radius: 4px; font-size: 15px; padding: 3px 6px; }}")
     _PIN_ON  = (f"QToolButton {{ color: {config.RED};"
@@ -376,40 +377,67 @@ class MultiView(QDialog):
         self._root.setContentsMargins(0, 0, 0, 0)
         self._root.setSpacing(0)
 
-        chrome = QHBoxLayout()
+        self._grid_host = QWidget()
+        self._grid = QGridLayout(self._grid_host)
+        self._grid.setContentsMargins(0, 0, 0, 0)
+        self._grid.setSpacing(1)        # 1 px hairline between slots
+        self._root.addWidget(self._grid_host, 1)
+
+        self._slots: list[_Slot] = []
+        self._build_slots(3)
+
+        # Auto-scroll timer — fires next_page() on each tick.
+        self._autoscroll_timer = QTimer(self)
+        self._autoscroll_timer.timeout.connect(self.next_page)
+
+        # Floating chrome overlay — no dedicated header row consumes screen space.
+        self._chrome_widget = QWidget(self)
+        self._chrome_widget.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
+        chrome = QHBoxLayout(self._chrome_widget)
         chrome.setContentsMargins(8, 6, 8, 6)
         chrome.setSpacing(6)
         self._prev_btn = self._chrome_btn(config.ICON_PREV, self.prev_page,
                                           "Previous page (←)", big=True)
         self._next_btn = self._chrome_btn(config.ICON_NEXT, self.next_page,
                                           "Next page (→)", big=True)
+        self._autoscroll_btn = self._chrome_btn(config.ICON_PLAY,
+                                                self._toggle_autoscroll,
+                                                "Toggle auto-scroll (A)")
+        self._autoscroll_spin = QSpinBox()
+        self._autoscroll_spin.setRange(1, 60)
+        self._autoscroll_spin.setValue(5)
+        self._autoscroll_spin.setSuffix(" s")
+        self._autoscroll_spin.setFixedWidth(62)
+        self._autoscroll_spin.setToolTip("Auto-scroll interval in seconds")
+        self._autoscroll_spin.setStyleSheet(
+            f"QSpinBox {{ color: {config.FG_BRIGHT}; background: rgba(0,0,0,90);"
+            f" border: 1px solid {config.FG_DIM}; border-radius: 4px;"
+            " padding: 2px 4px; font-size: 12px; }}"
+            " QSpinBox::up-button, QSpinBox::down-button"
+            " { background: rgba(0,0,0,60); border: none; width: 14px; }")
+        self._autoscroll_spin.valueChanged.connect(self._on_autoscroll_duration_changed)
         self._counter = QLabel("")
-        self._counter.setStyleSheet(f"color:{config.FG_MID};")
+        self._counter.setStyleSheet(
+            f"color: {config.FG_MID}; background: rgba(0,0,0,90);"
+            " border-radius: 4px; padding: 2px 8px;")
         self._fs_btn = self._chrome_btn(config.ICON_FULLSCREEN, self._toggle_fs,
                                         "Toggle full screen (F11)")
         close_btn = self._chrome_btn(config.ICON_CLOSE, self.close, "Close (Esc)")
         chrome.addWidget(self._prev_btn)
         chrome.addWidget(self._next_btn)
+        chrome.addWidget(self._autoscroll_btn)
+        chrome.addWidget(self._autoscroll_spin)
         chrome.addStretch(1)
         chrome.addWidget(self._counter)
         chrome.addStretch(1)
         chrome.addWidget(self._fs_btn)
         chrome.addWidget(close_btn)
-        self._root.addLayout(chrome)
-
-        self._grid_host = QWidget()
-        self._grid = QGridLayout(self._grid_host)
-        self._grid.setContentsMargins(0, 0, 0, 0)
-        self._grid.setSpacing(2)        # 2 px hairline between slots
-        self._root.addWidget(self._grid_host, 1)
-
-        self._slots: list[_Slot] = []
-        self._build_slots(3)
 
         QShortcut(QKeySequence(Qt.Key.Key_Escape), self, activated=self.close)
         QShortcut(QKeySequence(Qt.Key.Key_Left),   self, activated=self.prev_page)
         QShortcut(QKeySequence(Qt.Key.Key_Right),  self, activated=self.next_page)
         QShortcut(QKeySequence(Qt.Key.Key_F11),    self, activated=self._toggle_fs)
+        QShortcut(QKeySequence(Qt.Key.Key_A),      self, activated=self._toggle_autoscroll)
 
         self._render(start_row)
 
@@ -422,10 +450,10 @@ class MultiView(QDialog):
         weight = "bold" if big else "normal"
         b.setStyleSheet(
             f"QToolButton {{ color: {config.OVERLAY_FG}; font-size: {size}px;"
-            f" font-weight: {weight}; background: transparent; border: none;"
-            " padding: 2px 10px; }}"
+            f" font-weight: {weight}; background: rgba(0,0,0,90); border: none;"
+            " border-radius: 4px; padding: 2px 10px; }}"
             " QToolButton:hover { color: #ffffff;"
-            " background: rgba(255,255,255,30); border-radius: 5px; }")
+            " background: rgba(0,0,0,160); border-radius: 4px; }")
         b.clicked.connect(cb)
         return b
 
@@ -436,6 +464,32 @@ class MultiView(QDialog):
             self.showFullScreen()
             self.raise_()
             self.activateWindow()
+
+    def resizeEvent(self, e) -> None:
+        super().resizeEvent(e)
+        self._position_chrome()
+
+    def _position_chrome(self) -> None:
+        w = self.width()
+        ch = self._chrome_widget.sizeHint().height()
+        self._chrome_widget.setGeometry(0, 0, w, max(ch, 1))
+        self._chrome_widget.raise_()
+
+    def _toggle_autoscroll(self) -> None:
+        if self._autoscroll_timer.isActive():
+            self._autoscroll_timer.stop()
+            self._autoscroll_btn.setText(config.ICON_PLAY)
+        else:
+            self._autoscroll_timer.start(self._autoscroll_spin.value() * 1000)
+            self._autoscroll_btn.setText(config.ICON_PAUSE)
+
+    def _on_autoscroll_duration_changed(self, secs: int) -> None:
+        if self._autoscroll_timer.isActive():
+            self._autoscroll_timer.start(secs * 1000)
+
+    def closeEvent(self, e) -> None:
+        self._autoscroll_timer.stop()
+        super().closeEvent(e)
 
     def _build_slots(self, n: int) -> None:
         for s in self._slots:

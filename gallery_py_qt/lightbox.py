@@ -70,6 +70,8 @@ class Lightbox(QDialog):
     requestInfo = Signal(str)
     openMulti   = Signal(int)
 
+    _SPEEDS = (0.25, 0.5, 1.0, 1.25, 1.5, 1.75, 2.0)
+
     def __init__(self, model, favorites, parent=None):
         # Qt.WindowType.Window is required so showFullScreen() covers the OS
         # taskbar on Windows (QDialog is otherwise constrained by parent geometry).
@@ -140,6 +142,11 @@ class Lightbox(QDialog):
         self._time = QLabel("0:00 / 0:00")
         self._time.setStyleSheet(f"color: {config.FG_MID};")
         tlay.addWidget(self._time)
+
+        self._speed_idx = 2   # 1.0x
+        self._speed_btn = self._tb("1×", self._cycle_speed)
+        self._speed_btn.setFixedWidth(46)
+        tlay.addWidget(self._speed_btn)
 
         # Volume control
         vol_icon = QLabel("\U0001f50a︎")
@@ -229,6 +236,7 @@ class Lightbox(QDialog):
             self._transport.setVisible(True)
             self._player.setSource(QUrl.fromLocalFile(path))
             self._player.play()
+            self._player.setPlaybackRate(self._SPEEDS[self._speed_idx])
             self._play_btn.setText(config.ICON_PAUSE)
         else:
             self._player.stop()
@@ -290,6 +298,12 @@ class Lightbox(QDialog):
             self.showFullScreen()
             self.raise_()
             self.activateWindow()
+
+    def _cycle_speed(self) -> None:
+        self._speed_idx = (self._speed_idx + 1) % len(self._SPEEDS)
+        rate = self._SPEEDS[self._speed_idx]
+        self._player.setPlaybackRate(rate)
+        self._speed_btn.setText(f"{rate:g}×")
 
     def _set_volume_pct(self, pct: int) -> None:
         """Apply the slider position as a perceptually-even volume.
