@@ -106,7 +106,7 @@ class _Slot(QWidget):
     # Background/border for the pause/hold button — the painted icon carries
     # the colour, so these only set the subtle backing so the bars stay legible
     # over bright media.  OFF = barely-there ghost; ON = red highlight.
-    _PIN_OFF = ("QToolButton { background: rgba(0,0,0,55); border: none;"
+    _PIN_OFF = ("QToolButton { background: transparent; border: none;"
                 " border-radius: 4px; padding: 3px 5px; }")
     _PIN_ON  = (f"QToolButton {{ background: rgba(180,40,40,120);"
                 f" border: 1px solid {config.RED};"
@@ -181,7 +181,7 @@ class _Slot(QWidget):
 
         # Painted pause icons: transparent white when idle, solid red when held.
         red = QColor(config.RED)
-        self._pause_icon_off = _make_pause_icon(QColor(255, 255, 255, 120))
+        self._pause_icon_off = _make_pause_icon(QColor(255, 255, 255, 70))
         self._pause_icon_on  = _make_pause_icon(QColor(red.red(), red.green(),
                                                        red.blue(), 255))
         self._pin_btn = QToolButton()
