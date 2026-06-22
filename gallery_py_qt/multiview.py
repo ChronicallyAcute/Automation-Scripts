@@ -486,14 +486,12 @@ class MultiView(QDialog):
         chrome.addWidget(self._prev_btn)
         chrome.addWidget(self._next_btn)
         chrome.addStretch(1)
-        chrome.addWidget(self._counter)
-        chrome.addStretch(1)
         chrome.addWidget(self._fs_btn)
         chrome.addWidget(close_btn)
 
-        # Auto-scroll controls live in their own bar pinned to the bottom-centre
-        # of the window (see _position_autoscroll), keeping the top edge clear
-        # for each tile's media icons.
+        # Auto-scroll controls + page counter live in their own bar pinned to
+        # the bottom-centre of the window (see _position_autoscroll), keeping
+        # the top edge clear for each tile's media icons.
         self._autoscroll_widget = QWidget(self)
         self._autoscroll_widget.setAttribute(
             Qt.WidgetAttribute.WA_TranslucentBackground)
@@ -503,6 +501,7 @@ class MultiView(QDialog):
         asl.addStretch(1)
         asl.addWidget(self._autoscroll_btn)
         asl.addWidget(self._autoscroll_spin)
+        asl.addWidget(self._counter)
         asl.addStretch(1)
 
         QShortcut(QKeySequence(Qt.Key.Key_Escape), self, activated=self.close)
