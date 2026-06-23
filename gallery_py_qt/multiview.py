@@ -17,19 +17,23 @@ Fixes vs previous version:
 from __future__ import annotations
 import os
 
-from PySide6.QtCore import Qt, QUrl, Signal, QSizeF, QSize, QRectF, QTimer
+from PySide6.QtCore import (Qt, QUrl, Signal, QSizeF, QSize, QRectF, QTimer,
+                            QMimeData)
 from PySide6.QtWidgets import (QDialog, QWidget, QGridLayout, QVBoxLayout,
                                QHBoxLayout, QLabel, QToolButton, QStackedWidget,
                                QGraphicsScene, QGraphicsView, QSizePolicy,
-                               QSpinBox)
+                               QSpinBox, QApplication)
 from PySide6.QtGui import (QPixmap, QKeySequence, QShortcut, QPalette, QColor,
-                           QPainter, QIcon)
+                           QPainter, QIcon, QDrag)
 from PySide6.QtMultimedia import QMediaPlayer
 from PySide6.QtMultimediaWidgets import QGraphicsVideoItem
 
 from . import config
 from .engine import media
 from .seekbar import SeekBar, fmt_time
+
+# MIME type carrying a dragged tile's file path between slots.
+_SLOT_MIME = "application/x-gallery-slot-path"
 
 
 def _make_pause_icon(color: QColor, px: int = 32) -> QIcon:
@@ -98,10 +102,14 @@ class _Slot(QWidget):
     Signals emit the file *path* (not a row index) so callers never need a
     second model lookup that could race with a concurrent remove_path.
     """
-    favToggled = Signal(str)   # path
-    trashed    = Signal(str)   # path
-    enlarge    = Signal(int)   # model row
-    pinned     = Signal(int)   # slot index
+    favToggled = Signal(str)        # path
+    trashed    = Signal(str)        # path
+    enlarge    = Signal(int)        # model row
+    pinned     = Signal(int)        # slot index
+    reordered  = Signal(str, str)   # (dragged path, drop-target path)
+
+    # Video playback-speed multipliers (shared with the lightbox transport).
+    _SPEEDS = (0.25, 0.5, 1.0, 1.25, 1.5, 1.75, 2.0)
 
     # Background/border for the pause/hold button — the painted icon carries
     # the colour, so these only set the subtle backing so the bars stay legible
@@ -121,6 +129,9 @@ class _Slot(QWidget):
         self._rotation = 0
         self._dur_ms = 0
         self._is_pinned = False
+        self._speed_idx = 2          # index into _SPEEDS -> 1.0x
+        self._drag_start = None      # press origin for drag-threshold tracking
+        self.setAcceptDrops(True)    # tiles are drop targets for reordering
 
         # Use QPalette for background so child widget stylesheets aren't
         # shadowed by an inherited background: #000 from setStyleSheet.
@@ -145,6 +156,12 @@ class _Slot(QWidget):
             Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         self._gview.setVerticalScrollBarPolicy(
             Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+
+        # Let mouse gestures on the bare media body fall through to the slot so
+        # it can start a reorder drag; the floating overlays (btnbar, seekbar)
+        # are separate children that keep their own clicks.
+        for w in (self._img, self._gview, self._gview.viewport()):
+            w.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
         self._video_item = QGraphicsVideoItem()
         self._video_item.setAspectRatioMode(Qt.AspectRatioMode.KeepAspectRatio)
         self._scene.addItem(self._video_item)
@@ -214,6 +231,15 @@ class _Slot(QWidget):
         sl = QHBoxLayout(self._seekwrap)
         sl.setContentsMargins(8, 1, 8, 1)
         sl.setSpacing(6)
+        self._speed_btn = QToolButton()
+        self._speed_btn.setText("1×")
+        self._speed_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._speed_btn.setToolTip("Playback speed")
+        self._speed_btn.setStyleSheet(
+            f"QToolButton {{ color: {config.FG_BRIGHT}; background: transparent;"
+            " border: none; font-size: 10px; font-weight: bold; padding: 0 2px; }")
+        self._speed_btn.clicked.connect(self._cycle_speed)
+        sl.addWidget(self._speed_btn)
         self._scrub = SeekBar()
         sl.addWidget(self._scrub, 1)
         self._time = QLabel("0:00")
@@ -352,6 +378,7 @@ class _Slot(QWidget):
             self._seekwrap.show()
             self._player.setSource(QUrl.fromLocalFile(path))
             self._player.play()
+            self._player.setPlaybackRate(self._SPEEDS[self._speed_idx])
             self._fit_video()
         else:
             self._is_video = False
@@ -413,6 +440,64 @@ class _Slot(QWidget):
         dur = self._dur_ms or self._player.duration()
         if dur > 0:
             self._player.setPosition(int(frac * dur))
+
+    def _cycle_speed(self) -> None:
+        self._speed_idx = (self._speed_idx + 1) % len(self._SPEEDS)
+        rate = self._SPEEDS[self._speed_idx]
+        self._player.setPlaybackRate(rate)
+        self._speed_btn.setText(f"{rate:g}×")
+
+    # -- drag-and-drop reordering ---------------------------------------------
+    def mousePressEvent(self, e):
+        if e.button() == Qt.MouseButton.LeftButton and self._path:
+            self._drag_start = e.position().toPoint()
+        super().mousePressEvent(e)
+
+    def mouseMoveEvent(self, e):
+        if (self._drag_start is not None
+                and (e.buttons() & Qt.MouseButton.LeftButton)
+                and self._path
+                and (e.position().toPoint() - self._drag_start).manhattanLength()
+                >= QApplication.startDragDistance()):
+            self._begin_drag()
+        super().mouseMoveEvent(e)
+
+    def mouseReleaseEvent(self, e):
+        self._drag_start = None
+        super().mouseReleaseEvent(e)
+
+    def _begin_drag(self) -> None:
+        self._drag_start = None
+        drag = QDrag(self)
+        mime = QMimeData()
+        mime.setData(_SLOT_MIME, self._path.encode("utf-8"))
+        drag.setMimeData(mime)
+        if not self._pm.isNull():
+            drag.setPixmap(self._pm.scaled(
+                160, 160, Qt.AspectRatioMode.KeepAspectRatio,
+                Qt.TransformationMode.SmoothTransformation))
+        drag.exec(Qt.DropAction.MoveAction)
+
+    def dragEnterEvent(self, e):
+        if e.mimeData().hasFormat(_SLOT_MIME) and self._path:
+            e.acceptProposedAction()
+        else:
+            e.ignore()
+
+    def dragMoveEvent(self, e):
+        if e.mimeData().hasFormat(_SLOT_MIME) and self._path:
+            e.acceptProposedAction()
+        else:
+            e.ignore()
+
+    def dropEvent(self, e):
+        if not e.mimeData().hasFormat(_SLOT_MIME):
+            e.ignore()
+            return
+        src = bytes(e.mimeData().data(_SLOT_MIME)).decode("utf-8")
+        if src and self._path and src != self._path:
+            self.reordered.emit(src, self._path)
+        e.acceptProposedAction()
 
 
 class MultiView(QDialog):
@@ -589,6 +674,7 @@ class MultiView(QDialog):
             slot.enlarge.connect(self._on_enlarge)
             slot.favToggled.connect(self._on_slot_fav)
             slot.trashed.connect(self._on_slot_trash)
+            slot.reordered.connect(self._on_reorder)
             slot.pinned.connect(lambda *_: None)     # visual-only; is_pinned drives nav
             self._grid.addWidget(slot, r, c)
             self._slots.append(slot)
@@ -651,3 +737,9 @@ class MultiView(QDialog):
             self.trashed.emit(path)
             # Re-render after model has been updated by the trash signal handler.
             self._render(self._start)
+
+    def _on_reorder(self, src_path: str, dst_path: str) -> None:
+        """Swap two items in the model (switches it to manual order) and redraw
+        the current page so the tiles trade places in-place."""
+        self._model.swap_paths(src_path, dst_path)
+        self._render(self._start)

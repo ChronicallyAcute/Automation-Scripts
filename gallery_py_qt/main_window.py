@@ -268,6 +268,7 @@ class MainWindow(QMainWindow):
         # No explicit max_threads -- ThumbnailLoader auto-sizes to CPU count.
         self._loader = ThumbnailLoader(self)
         self._model = GalleryModel(self._favs, self._loader, self)
+        self._model.sortChanged.connect(self._sync_sort_combo)
         self._current_folder: str | None = None
         self._current_folders: list[str] = []
         self._trash_stack: list[tuple[str, str]] = []
@@ -343,6 +344,7 @@ class MainWindow(QMainWindow):
         self._sort.addItem("Dimensions \u00b7 area", "area")
         self._sort.addItem("Dimensions \u00b7 width", "width")
         self._sort.addItem("Dimensions \u00b7 height", "height")
+        self._sort.addItem("Manual order", "manual")
         self._sort.currentIndexChanged.connect(lambda _: self._on_sort_changed())
         h.addWidget(self._sort)
         self._dir_btn = self._btn("\u2191", self._toggle_sort_dir)
@@ -571,6 +573,15 @@ class MainWindow(QMainWindow):
         self._model.set_sort(self._sort.currentData())
         if self._model.needs_dimensions():
             self._ensure_dims()
+
+    def _sync_sort_combo(self, mode: str) -> None:
+        """Reflect a model-driven sort change (e.g. drag-reorder -> manual)
+        in the combo without re-triggering _on_sort_changed."""
+        i = self._sort.findData(mode)
+        if i >= 0 and self._sort.currentIndex() != i:
+            self._sort.blockSignals(True)
+            self._sort.setCurrentIndex(i)
+            self._sort.blockSignals(False)
 
     def _toggle_sort_dir(self) -> None:
         desc = not self._model.descending()

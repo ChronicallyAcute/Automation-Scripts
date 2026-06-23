@@ -56,6 +56,9 @@ class GalleryModel(QAbstractListModel):
     # Emitted when per-path (w, h) dimensions are updated without a re-sort.
     # The masonry view listens to this to recompute cell heights.
     dimsChanged = Signal()
+    # Emitted when the model changes its own sort mode (e.g. a drag-reorder
+    # switches to "manual"), so the toolbar's sort combo can stay in sync.
+    sortChanged = Signal(str)
 
     def __init__(self, favorites: Favorites, loader: ThumbnailLoader,
                  parent=None):
@@ -176,6 +179,28 @@ class GalleryModel(QAbstractListModel):
         w, h = self._dims.get(p, (0, 0))
         return w * h
 
+    def swap_paths(self, a: str, b: str) -> None:
+        """Swap two items' positions and switch to manual ordering.
+
+        The first manual reorder freezes the *currently displayed* order into
+        the master list (so the gallery doesn't snap back to scan order), then
+        exchanges the two items.  Emits sortChanged("manual") so the toolbar
+        combo can follow.
+        """
+        if a == b or a not in self._all_set or b not in self._all_set:
+            return
+        if self._sort != "manual":
+            # Capture the visible order as the new manual baseline; append any
+            # currently filtered-out items so they survive a later filter change.
+            visible = list(self._rows)
+            hidden = [p for p in self._all if p not in self._path_to_row]
+            self._all = visible + hidden
+            self._sort = "manual"
+            self.sortChanged.emit("manual")
+        ia, ib = self._all.index(a), self._all.index(b)
+        self._all[ia], self._all[ib] = self._all[ib], self._all[ia]
+        self._reindex()
+
     def _like_dims_key(self, p: str) -> tuple:
         """Sort key that groups media by like dimensions.
 
@@ -219,6 +244,8 @@ class GalleryModel(QAbstractListModel):
             rows.sort(key=lambda p: (self._dims.get(p, (0, 0))[1], name(p)))
         elif self._sort == "like_dims":
             rows.sort(key=self._like_dims_key)
+        elif self._sort == "manual":
+            pass    # preserve the current _all order (set by swap_paths)
         if self._descending:
             rows.reverse()
         self._rows = rows
