@@ -335,6 +335,7 @@ class MainWindow(QMainWindow):
 
         h.addWidget(QLabel("sort"))
         self._sort = QComboBox()
+        self._sort.addItem("Dimensions \u00b7 like sizes", "like_dims")
         self._sort.addItem("Name", "name")
         self._sort.addItem("Images first", "img_first")
         self._sort.addItem("Videos first", "vid_first")

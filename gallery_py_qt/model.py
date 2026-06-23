@@ -75,7 +75,7 @@ class GalleryModel(QAbstractListModel):
         self._show_images = True
         self._show_videos = True
         self._query = ""
-        self._sort = "name"
+        self._sort = "like_dims"
         self._descending = False
         self._loader.ready.connect(self._on_thumb_ready)
 
@@ -162,7 +162,7 @@ class GalleryModel(QAbstractListModel):
         return self._sort
 
     def needs_dimensions(self) -> bool:
-        return self._sort in ("area", "width", "height")
+        return self._sort in ("area", "width", "height", "like_dims")
 
     def set_dims(self, dims: dict[str, tuple[int, int]]) -> None:
         """Supply (w, h) per path (from a background scan); re-sort if needed."""
@@ -175,6 +175,29 @@ class GalleryModel(QAbstractListModel):
     def _dim_area(self, p: str) -> int:
         w, h = self._dims.get(p, (0, 0))
         return w * h
+
+    def _like_dims_key(self, p: str) -> tuple:
+        """Sort key that groups media by like dimensions.
+
+        Primary:   orientation bucket (0=portrait, 1=square, 2=landscape)
+        Secondary: quantized aspect ratio (groups e.g. all 9:16 together)
+        Tertiary:  pixel area (larger media last within same ratio group)
+        Fallback:  items with unknown dims sort to the end
+        """
+        w, h = self._dims.get(p, (0, 0))
+        if w <= 0 or h <= 0:
+            return (3, 0, 0, os.path.basename(p).lower())
+        ratio = w / h
+        if ratio < 0.95:
+            bucket = 0      # portrait
+        elif ratio > 1.05:
+            bucket = 2      # landscape
+        else:
+            bucket = 1      # square / near-square
+        # Quantize the aspect ratio to 0.05 steps so very-similar ratios
+        # (e.g. 1920×1080 and 3840×2160) land in the same bucket.
+        ar_q = round(max(w, h) / min(w, h) / 0.05) * 0.05
+        return (bucket, ar_q, w * h, os.path.basename(p).lower())
 
     def _reindex(self) -> None:
         self.beginResetModel()
@@ -194,6 +217,8 @@ class GalleryModel(QAbstractListModel):
             rows.sort(key=lambda p: (self._dims.get(p, (0, 0))[0], name(p)))
         elif self._sort == "height":
             rows.sort(key=lambda p: (self._dims.get(p, (0, 0))[1], name(p)))
+        elif self._sort == "like_dims":
+            rows.sort(key=self._like_dims_key)
         if self._descending:
             rows.reverse()
         self._rows = rows
