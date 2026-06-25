@@ -744,8 +744,6 @@ class MainWindow(QMainWindow):
             self._prefs["cols"] = self._cols_spin.value()
             self._prefs["sort"] = self._sort.currentData()
             self._prefs["sort_desc"] = self._model.descending()
-            if self._current_folder:
-                self._prefs["last_folder"] = self._current_folder
             prefs.save_prefs(self._prefs)
         except Exception:
             pass

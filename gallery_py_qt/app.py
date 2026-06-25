@@ -10,9 +10,7 @@ def main(argv: list[str] | None = None) -> int:
         prog="gallery_py_qt",
         description="Vertical media gallery (PySide6) \u2014 image/video viewer.")
     parser.add_argument("folder", nargs="?", default=None,
-                        help="folder to open on launch (overrides session restore)")
-    parser.add_argument("--no-restore", action="store_true",
-                        help="don't auto-reopen the last folder")
+                        help="folder to open on launch")
     args = parser.parse_args(argv)
 
     if __package__ in (None, ""):
@@ -35,10 +33,6 @@ def main(argv: list[str] | None = None) -> int:
     target = None
     if args.folder and os.path.isdir(args.folder):
         target = args.folder
-    elif not args.no_restore:
-        last = prefs.load_prefs().get("last_folder")
-        if isinstance(last, str) and os.path.isdir(last):
-            target = last
     if target:
         from PySide6.QtCore import QTimer
         QTimer.singleShot(150, lambda: win.open_folder(target))
