@@ -124,9 +124,13 @@ class Lightbox(QDialog):
         self._tb(config.ICON_ROTATE_CW,  lambda: self._img.rotate_by(90), bar)
         self._tb(config.ICON_INFO, lambda: self.requestInfo.emit(self._path()), bar)
         self._tb(config.ICON_GRID, lambda: self.openMulti.emit(self._row), bar)
+        self._tb("?", self._toggle_help, bar).setToolTip("Keyboard shortcuts (?)")
         self._tb(config.ICON_TRASH, self._trash, bar)
         self._tb(config.ICON_CLOSE, self.close, bar)
-        bar.insertWidget(bar.count() - 6, self._fav_btn)
+        bar.insertWidget(bar.count() - 7, self._fav_btn)
+
+        # Keyboard-shortcuts help overlay (hidden until toggled).
+        self._help = self._build_help_overlay()
 
         # Floating transport bar (seek + volume) — overlays the bottom edge of the media.
         self._transport = QWidget(self)
@@ -187,9 +191,67 @@ class Lightbox(QDialog):
             layout.addWidget(b)
         return b
 
+    _HELP_ROWS = [
+        ("←  /  →", "Previous / next item"),
+        ("Space", "Play / pause video"),
+        ("+  /  −", "Zoom in / out (image)"),
+        (",  /  .", "Step 1 s back / forward"),
+        ("Shift+← / →", "Skip 5 s"),
+        ("Ctrl+← / →", "Skip 15 s"),
+        ("[  /  ]", "Volume down / up"),
+        ("F", "Toggle favourite"),
+        ("Delete", "Move to trash"),
+        ("F11", "Toggle full screen"),
+        ("?  /  F1", "Show / hide this help"),
+        ("Esc", "Close help, then viewer"),
+    ]
+
+    def _build_help_overlay(self) -> QWidget:
+        panel = QWidget(self)
+        panel.setStyleSheet(
+            "background: rgba(0,0,0,235); border: 1px solid #333;"
+            " border-radius: 10px;")
+        lay = QVBoxLayout(panel)
+        lay.setContentsMargins(22, 18, 22, 18)
+        lay.setSpacing(4)
+        title = QLabel("Keyboard shortcuts")
+        title.setStyleSheet(
+            f"color: {config.FG_BRIGHT}; font-size: 15px; font-weight: bold;"
+            " background: transparent;")
+        lay.addWidget(title)
+        rows = "".join(
+            f"<tr><td style='color:{config.ACCENT};padding:2px 16px 2px 0;"
+            f"white-space:nowrap;'>{k}</td>"
+            f"<td style='color:{config.FG_MID};'>{v}</td></tr>"
+            for k, v in self._HELP_ROWS)
+        body = QLabel(f"<table>{rows}</table>")
+        body.setTextFormat(Qt.TextFormat.RichText)
+        body.setStyleSheet("background: transparent;")
+        lay.addWidget(body)
+        panel.hide()
+        return panel
+
+    def _toggle_help(self) -> None:
+        if self._help.isVisible():
+            self._help.hide()
+        else:
+            self._help.adjustSize()
+            self._position_overlays()
+            self._help.show()
+            self._help.raise_()
+
+    def _on_escape(self) -> None:
+        """Esc dismisses the help overlay first, then closes the viewer."""
+        if self._help.isVisible():
+            self._help.hide()
+        else:
+            self.close()
+
     def _install_shortcuts(self) -> None:
         for keys, fn in [
-            (QKeySequence(Qt.Key.Key_Escape), self.close),
+            (QKeySequence(Qt.Key.Key_Escape), self._on_escape),
+            (QKeySequence(Qt.Key.Key_Question), self._toggle_help),
+            (QKeySequence(Qt.Key.Key_F1),     self._toggle_help),
             (QKeySequence(Qt.Key.Key_Left),   self.prev),
             (QKeySequence(Qt.Key.Key_Right),  self.next),
             (QKeySequence(Qt.Key.Key_Plus),   lambda: self._img.zoom_by(1.25)),
@@ -260,6 +322,11 @@ class Lightbox(QDialog):
             th = self._transport.sizeHint().height()
             self._transport.setGeometry(0, h - th, w, max(th, 1))
             self._transport.raise_()
+        if self._help.isVisible():
+            self._help.adjustSize()
+            hw, hh = self._help.width(), self._help.height()
+            self._help.move(max(0, (w - hw) // 2), max(0, (h - hh) // 2))
+            self._help.raise_()
 
     def _path(self) -> str | None:
         return self._model.path_at(self._row)
