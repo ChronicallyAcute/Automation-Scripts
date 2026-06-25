@@ -111,6 +111,18 @@ class GalleryModel(QAbstractListModel):
             self._path_to_row[p] = first + i
         self.endInsertRows()
 
+    def add_paths_silent(self, paths: list[str]) -> None:
+        """Stage paths into _all without updating visible rows.
+
+        Use during scans when a dimension-based sort is active: the view stays
+        empty until all dimensions are known, then _reindex() reveals everything
+        in correct order — no mid-scan reorder flash.
+        """
+        new = [p for p in paths if p not in self._all_set]
+        if new:
+            self._all.extend(new)
+            self._all_set.update(new)
+
     def finalize_scan(self) -> None:
         """Sort and deduplicate after a streaming scan completes."""
         self._reindex()

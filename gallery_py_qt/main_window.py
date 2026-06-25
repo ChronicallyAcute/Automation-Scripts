@@ -537,19 +537,31 @@ class MainWindow(QMainWindow):
     def _on_scan_batch(self, gen: int, paths: list) -> None:
         if gen != self._scan_gen:
             return
-        self._model.add_paths_batch(paths)
-        n = self._model.rowCount()
+        if self._model.needs_dimensions():
+            # Buffer silently — view stays empty until dims arrive and sort can
+            # be applied correctly, avoiding the mid-scan reorder flash.
+            self._model.add_paths_silent(paths)
+            n = len(self._model.all_paths())
+        else:
+            self._model.add_paths_batch(paths)
+            n = self._model.rowCount()
         self._status.setText(f"Scanning\u2026  {n} found")
 
     def _on_scan_done(self, gen: int, result) -> None:
         if gen != self._scan_gen:
             return
         self._dims_done_for.clear()
-        self._model.finalize_scan()
-        self._status.setText(result.summary())
-        # Always compute true (w, h) for every item — the masonry grid needs
-        # real aspect ratios to size cells, not just when a dimension sort is
-        # active.  peek_size() is a fast header-only read run off the GUI thread.
+        if not self._model.needs_dimensions():
+            # Non-dimension sort: reveal everything now, then compute dims for
+            # the masonry aspect-ratio reflow.
+            self._model.finalize_scan()
+            self._status.setText(result.summary())
+        else:
+            # Dimension sort: paths are staged in _all via add_paths_silent.
+            # _on_dims_done -> set_dims -> _reindex() will reveal them sorted once
+            # dimensions are known — no unsorted flash.
+            self._status.setText(
+                f"Computing dimensions\u2026  {len(self._model.all_paths())} items")
         self._ensure_dims()
         self._bar_hide_timer.start(BAR_HIDE_MS)
 
@@ -723,11 +735,6 @@ class MainWindow(QMainWindow):
         cols = self._prefs.get("cols")
         if isinstance(cols, int) and config.MIN_COLS <= cols <= config.MAX_COLS:
             self._cols_spin.setValue(cols)
-        srt = self._prefs.get("sort")
-        if srt:
-            i = self._sort.findData(srt)
-            if i >= 0:
-                self._sort.setCurrentIndex(i)
         if self._prefs.get("sort_desc"):
             self._model.set_descending(True)
             self._dir_btn.setText("\u2193")
@@ -742,7 +749,6 @@ class MainWindow(QMainWindow):
                 self._prefs["geometry"] = [
                     geo.x(), geo.y(), geo.width(), geo.height()]
             self._prefs["cols"] = self._cols_spin.value()
-            self._prefs["sort"] = self._sort.currentData()
             self._prefs["sort_desc"] = self._model.descending()
             prefs.save_prefs(self._prefs)
         except Exception:
