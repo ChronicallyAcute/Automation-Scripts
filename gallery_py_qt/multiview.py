@@ -31,7 +31,7 @@ from PySide6.QtWidgets import (QWidget, QGridLayout, QVBoxLayout,
                                QSpinBox, QSlider, QApplication)
 from PySide6.QtGui import (QPixmap, QKeySequence, QShortcut, QPalette, QColor,
                            QPainter, QIcon, QDrag)
-from PySide6.QtMultimedia import QMediaPlayer, QAudioOutput
+from PySide6.QtMultimedia import QMediaPlayer, QAudioOutput, QtAudio
 from PySide6.QtMultimediaWidgets import QGraphicsVideoItem
 
 from . import config
@@ -515,7 +515,12 @@ class _Slot(QWidget):
 
     def _on_vol_changed(self, val: int) -> None:
         self._vol_label.setText(f"{val}%")
-        self._audio.setVolume((val / 100.0) ** 2)
+        # Standard log→linear remap so the slider feels uniform end to end
+        # (matches the lightbox transport's volume behaviour).
+        self._audio.setVolume(QtAudio.convertVolume(
+            val / 100.0,
+            QtAudio.VolumeScale.LogarithmicVolumeScale,
+            QtAudio.VolumeScale.LinearVolumeScale))
 
     def _show_vol_popup(self) -> None:
         btn_pos = self._mute_btn.mapTo(self, self._mute_btn.rect().topLeft())

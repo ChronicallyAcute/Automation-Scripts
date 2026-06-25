@@ -165,6 +165,9 @@ class GalleryView(QAbstractScrollArea):
         # Masonry layout: (x, y, w, h) per model row, in screen coords before scroll.
         self._cells: list[tuple[int, int, int, int]] = []
         self._total_h = 0
+        # Centred hint shown when the grid is empty (no folder / scanning / none found).
+        self._empty_primary = "Open a folder to begin"
+        self._empty_secondary = "Click ➕ Open in the bar, or press Ctrl+O"
         # Pixmap-derived dims: populated as thumbnails arrive.
         self._pm_dims: dict[str, tuple[int, int]] = {}
         self._cur_row = -1
@@ -208,6 +211,13 @@ class GalleryView(QAbstractScrollArea):
 
     def columns(self) -> int:
         return self._cols
+
+    def set_empty_hint(self, primary: str, secondary: str = "") -> None:
+        """Set the message shown in the centre of an empty gallery."""
+        self._empty_primary = primary
+        self._empty_secondary = secondary
+        if not self._cells:
+            self.viewport().update()
 
     # -- model wiring ----------------------------------------------------------
     def setModel(self, model) -> None:
@@ -363,6 +373,7 @@ class GalleryView(QAbstractScrollArea):
 
         m = self._model
         if m is None or not self._cells:
+            self._paint_empty_hint(painter, vp_rect)
             return
 
         painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform, True)
@@ -409,6 +420,29 @@ class GalleryView(QAbstractScrollArea):
                 painter.setBrush(Qt.BrushStyle.NoBrush)
                 painter.setPen(QPen(QColor(config.ACCENT), 2))
                 painter.drawRect(rect)
+
+    def _paint_empty_hint(self, painter: QPainter, vp_rect: QRect) -> None:
+        """Centred guidance text for an empty gallery."""
+        if not self._empty_primary:
+            return
+        cx = vp_rect.center().x()
+        cy = vp_rect.center().y()
+        painter.setPen(QPen(QColor(config.FG_MID)))
+        f = painter.font()
+        f.setPointSize(16)
+        f.setBold(True)
+        painter.setFont(f)
+        primary_rect = QRect(vp_rect.x(), cy - 36, vp_rect.width(), 32)
+        painter.drawText(primary_rect, Qt.AlignmentFlag.AlignCenter,
+                         self._empty_primary)
+        if self._empty_secondary:
+            painter.setPen(QPen(QColor(config.FG_DIM)))
+            f.setPointSize(11)
+            f.setBold(False)
+            painter.setFont(f)
+            secondary_rect = QRect(vp_rect.x(), cy + 4, vp_rect.width(), 24)
+            painter.drawText(secondary_rect, Qt.AlignmentFlag.AlignCenter,
+                             self._empty_secondary)
 
     def _draw_badge(self, painter: QPainter, rect: QRect) -> None:
         cx = rect.center().x()

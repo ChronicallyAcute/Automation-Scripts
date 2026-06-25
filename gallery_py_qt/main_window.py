@@ -530,7 +530,11 @@ class MainWindow(QMainWindow):
         # Bump generation to discard batches from any in-progress scan.
         self._scan_gen += 1
         self._model.set_paths([])    # clear immediately
+        scanning = (os.path.basename(os.path.normpath(folders[0]))
+                    if len(folders) == 1 else f"{len(folders)} folders")
         self._status.setText(f"Scanning {len(folders)} folder(s)\u2026")
+        self._view.set_empty_hint(f"Scanning {scanning}\u2026",
+                                  "Media appears once dimensions are read")
         self._scan_pool.start(
             _StreamScanJob(folders, self._scan_gen, self._stream_sig))
 
@@ -551,6 +555,10 @@ class MainWindow(QMainWindow):
         if gen != self._scan_gen:
             return
         self._dims_done_for.clear()
+        if not self._model.all_paths():
+            self._view.set_empty_hint(
+                "No media found in this folder",
+                "Try another folder, or check the Images / Videos filters")
         if not self._model.needs_dimensions():
             # Non-dimension sort: reveal everything now, then compute dims for
             # the masonry aspect-ratio reflow.
@@ -581,6 +589,12 @@ class MainWindow(QMainWindow):
         self._model.set_filter(self._img_btn.isChecked(),
                                self._vid_btn.isChecked(),
                                self._search.text())
+        # If a folder is loaded but the filter hides everything, explain why
+        # the grid is blank rather than leaving a bare black screen.
+        if self._model.all_paths() and self._model.rowCount() == 0:
+            self._view.set_empty_hint(
+                "Nothing matches the current filter",
+                "Adjust the Images / Videos toggles or clear the search box")
 
     def _on_cols(self, n: int) -> None:
         self._view.set_columns(n)

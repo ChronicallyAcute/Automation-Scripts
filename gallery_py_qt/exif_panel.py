@@ -10,27 +10,45 @@ from . import config
 from .engine import media
 
 
+def _fmt_size(nbytes: int) -> str:
+    """Human-readable file size (B / KB / MB / GB)."""
+    if nbytes < 1024:
+        return f"{nbytes} B"
+    kb = nbytes / 1024
+    if kb < 1024:
+        return f"{kb:.0f} KB"
+    mb = kb / 1024
+    if mb < 1024:
+        return f"{mb:.1f} MB"
+    return f"{mb / 1024:.2f} GB"
+
+
 class InfoDialog(QDialog):
     def __init__(self, path: str, parent=None):
         super().__init__(parent)
         self.setWindowTitle("File info")
-        self.setMinimumWidth(360)
+        self.setMinimumWidth(380)
+        if parent is not None:
+            self.setStyleSheet(parent.styleSheet())
         form = QFormLayout(self)
         form.setLabelAlignment(Qt.AlignmentFlag.AlignRight)
 
         def row(k, v):
             lbl = QLabel(str(v))
-            lbl.setTextInteractionByMouse = None
+            # Let the user select and copy any value (path, dimensions, EXIF).
+            lbl.setTextInteractionFlags(
+                Qt.TextInteractionFlag.TextSelectableByMouse)
+            lbl.setWordWrap(True)
             lbl.setStyleSheet(f"color: {config.FG_BRIGHT};")
             kl = QLabel(k + ":")
             kl.setStyleSheet(f"color: {config.FG_DIM};")
             form.addRow(kl, lbl)
 
         row("Name", os.path.basename(path))
+        row("Path", path)
         try:
             st = os.stat(path)
-            kb = st.st_size / 1024
-            row("Size", f"{kb:.0f} KB" if kb < 1024 else f"{kb/1024:.1f} MB")
+            row("Size", _fmt_size(st.st_size))
             row("Modified", datetime.datetime.fromtimestamp(
                 st.st_mtime).strftime("%Y-%m-%d %H:%M"))
         except OSError:
@@ -42,7 +60,8 @@ class InfoDialog(QDialog):
         if media.is_video(path):
             dur = media.peek_duration(path)
             if dur:
-                row("Duration", f"{dur:.1f}s")
+                m, s = divmod(int(round(dur)), 60)
+                row("Duration", f"{m}:{s:02d}  ({dur:.1f}s)")
         else:
             self._exif_rows(path, row)
 
