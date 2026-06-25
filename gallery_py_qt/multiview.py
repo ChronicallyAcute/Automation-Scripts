@@ -1,31 +1,34 @@
-"""Multi-view: adaptive 3-up (portrait) / 2x2 (landscape) grid of slots.
+"""Multi-view: adaptive 3×1 (portrait) / 2×2 (landscape) grid of slots.
 
-Each slot shows an image or a native-playback video with its own scrubber and
-a hover overlay (pin, enlarge, rotate, favourite, trash).  Pinned slots keep
-their content while paging through the rest of the collection.
+Embedded as a panel inside the main window — not a separate dialog.  Shown via
+MainWindow._open_multiview(), hidden via the closeRequested signal.
 
-Fixes vs previous version:
-  - _Slot stores _path directly and emits it from signals -- no second
-    path_at(row) lookup that could race with a model update mid-trash.
-  - _Slot uses QStackedWidget for img/video; each page fills the full slot
-    geometry so _AspectLabel.scaled() never sees a zero or half height.
-  - Pin button visual driven by an explicit stylesheet swap on click rather
-    than relying on QSS :checked, which was silently overridden by the
-    parent widget's background: #000 cascade.
-  - Grid margins/spacing zeroed so media fills the window edge-to-edge.
+Layout rules
+  • Portrait content  → 3 tiles in a single row (3×1)
+  • Landscape / square → 2×2 grid
+  • Media orientation groups never mix in the same view.  If the current group
+    has fewer items than the number of slots, remaining slots duplicate from the
+    start of the group rather than pulling in a different orientation.
+  • Switching layout (3×1 ↔ 2×2) preserves pinned media — pinned content is
+    snapshotted before the rebuild and restored to the first N slots afterwards.
+
+Audio
+  • Each slot has its own QAudioOutput, muted by default (multiple tiles run
+    simultaneously).  The mute/unmute button in each seek-bar lets the user
+    enable audio per tile.  A pop-out vertical volume slider appears on unmute.
 """
 from __future__ import annotations
 import os
 
 from PySide6.QtCore import (Qt, QUrl, Signal, QSizeF, QSize, QRectF, QTimer,
                             QMimeData)
-from PySide6.QtWidgets import (QDialog, QWidget, QGridLayout, QVBoxLayout,
+from PySide6.QtWidgets import (QWidget, QGridLayout, QVBoxLayout,
                                QHBoxLayout, QLabel, QToolButton, QStackedWidget,
                                QGraphicsScene, QGraphicsView, QSizePolicy,
-                               QSpinBox, QApplication)
+                               QSpinBox, QSlider, QApplication)
 from PySide6.QtGui import (QPixmap, QKeySequence, QShortcut, QPalette, QColor,
                            QPainter, QIcon, QDrag)
-from PySide6.QtMultimedia import QMediaPlayer
+from PySide6.QtMultimedia import QMediaPlayer, QAudioOutput
 from PySide6.QtMultimediaWidgets import QGraphicsVideoItem
 
 from . import config
@@ -40,9 +43,7 @@ def _make_pause_icon(color: QColor, px: int = 32) -> QIcon:
     """Render a two-bar pause glyph as a QIcon.
 
     Drawn with QPainter rather than a font codepoint (U+23F8 ⏸) because that
-    codepoint renders inconsistently across platforms — a colour emoji on some,
-    a tofu box on others.  A painted icon always displays, and its alpha gives
-    us the requested transparent / minimally-obstructing look directly.
+    codepoint renders inconsistently across platforms.
     """
     pm = QPixmap(px, px)
     pm.fill(Qt.GlobalColor.transparent)
@@ -108,12 +109,8 @@ class _Slot(QWidget):
     pinned     = Signal(int)        # slot index
     reordered  = Signal(str, str)   # (dragged path, drop-target path)
 
-    # Video playback-speed multipliers (shared with the lightbox transport).
     _SPEEDS = (0.25, 0.5, 1.0, 1.25, 1.5, 1.75, 2.0)
 
-    # Background/border for the pause/hold button — the painted icon carries
-    # the colour, so these only set the subtle backing so the bars stay legible
-    # over bright media.  OFF = barely-there ghost; ON = red highlight.
     _PIN_OFF = ("QToolButton { background: transparent; border: none;"
                 " border-radius: 4px; padding: 3px 5px; }")
     _PIN_ON  = (f"QToolButton {{ background: rgba(180,40,40,120);"
@@ -129,12 +126,10 @@ class _Slot(QWidget):
         self._rotation = 0
         self._dur_ms = 0
         self._is_pinned = False
-        self._speed_idx = 2          # index into _SPEEDS -> 1.0x
-        self._drag_start = None      # press origin for drag-threshold tracking
-        self.setAcceptDrops(True)    # tiles are drop targets for reordering
+        self._speed_idx = 2          # index into _SPEEDS → 1.0×
+        self._drag_start = None
+        self.setAcceptDrops(True)
 
-        # Use QPalette for background so child widget stylesheets aren't
-        # shadowed by an inherited background: #000 from setStyleSheet.
         p = self.palette()
         p.setColor(QPalette.ColorRole.Window, QColor("#000"))
         self.setPalette(p)
@@ -157,9 +152,8 @@ class _Slot(QWidget):
         self._gview.setVerticalScrollBarPolicy(
             Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
 
-        # Let mouse gestures on the bare media body fall through to the slot so
-        # it can start a reorder drag; the floating overlays (btnbar, seekbar)
-        # are separate children that keep their own clicks.
+        # Let mouse gestures on the media body fall through to the slot widget
+        # so it can start a reorder drag.
         for w in (self._img, self._gview, self._gview.viewport()):
             w.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
         self._video_item = QGraphicsVideoItem()
@@ -168,17 +162,20 @@ class _Slot(QWidget):
         self._video_item.nativeSizeChanged.connect(lambda *_: self._fit_video())
 
         self._player = QMediaPlayer(self)
-        # Multi-view tiles play silently by design (several tiles run at once),
-        # so no audio output is attached — this skips audio-stream decoding
-        # rather than decoding into a muted sink.
         self._player.setVideoOutput(self._video_item)
         self._player.setLoops(QMediaPlayer.Loops.Infinite)
         self._player.mediaStatusChanged.connect(self._on_status)
         self._player.positionChanged.connect(self._on_pos)
         self._player.durationChanged.connect(self._on_dur)
 
-        # Stack: page 0 = image, page 1 = video.  QStackedWidget gives each
-        # page the full slot geometry, fixing the half-height bug from a VBox.
+        # Per-tile audio output — muted by default; user enables per tile.
+        self._audio = QAudioOutput(self)
+        self._audio.setMuted(True)
+        self._audio.setVolume(1.0)
+        self._player.setAudioOutput(self._audio)
+        self._muted = True
+
+        # Stack: page 0 = image, page 1 = video.
         self._stack = QStackedWidget()
         self._stack.addWidget(self._img)
         self._stack.addWidget(self._gview)
@@ -193,10 +190,9 @@ class _Slot(QWidget):
         self._btnbar = QWidget(self)
         self._btnbar.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
         ol = QHBoxLayout(self._btnbar)
-        ol.setContentsMargins(4, 3, 4, 3)   # slim strip flush to media top edge
+        ol.setContentsMargins(4, 3, 4, 3)
         ol.setSpacing(4)
 
-        # Painted pause icons: transparent white when idle, solid red when held.
         red = QColor(config.RED)
         self._pause_icon_off = _make_pause_icon(QColor(255, 255, 255, 70))
         self._pause_icon_on  = _make_pause_icon(QColor(red.red(), red.green(),
@@ -213,24 +209,24 @@ class _Slot(QWidget):
 
         self._fav_btn = self._mk(config.ICON_HEART_EMPTY, self._toggle_fav)
         ol.addWidget(self._fav_btn)
-        self._mk(config.ICON_ENLARGE,    lambda: self.enlarge.emit(self._row), ol)
-        self._mk(config.ICON_ROTATE_CW,  self._rotate, ol)
-        self._mk(config.ICON_TRASH,      self._trash, ol)
+        self._mk(config.ICON_ENLARGE,   lambda: self.enlarge.emit(self._row), ol)
+        self._mk(config.ICON_ROTATE_CW, self._rotate, ol)
+        self._mk(config.ICON_TRASH,     self._trash, ol)
 
-        # Auto-hide: bar stays invisible until the user hovers the slot.
         self._bar_hide_timer = QTimer(self)
         self._bar_hide_timer.setSingleShot(True)
         self._bar_hide_timer.setInterval(400)
         self._bar_hide_timer.timeout.connect(self._maybe_hide_bar)
         self._btnbar.hide()
 
-        # Seek bar (floating, shown only for video)
+        # Seek bar (floating, video only)
         self._seekwrap = QWidget(self)
         self._seekwrap.setStyleSheet(
             "background: rgba(0,0,0,90); border-radius: 4px;")
         sl = QHBoxLayout(self._seekwrap)
         sl.setContentsMargins(8, 1, 8, 1)
         sl.setSpacing(6)
+
         self._speed_btn = QToolButton()
         self._speed_btn.setText("1×")
         self._speed_btn.setCursor(Qt.CursorShape.PointingHandCursor)
@@ -240,15 +236,51 @@ class _Slot(QWidget):
             " border: none; font-size: 10px; font-weight: bold; padding: 0 2px; }")
         self._speed_btn.clicked.connect(self._cycle_speed)
         sl.addWidget(self._speed_btn)
+
         self._scrub = SeekBar()
         sl.addWidget(self._scrub, 1)
+
         self._time = QLabel("0:00")
         self._time.setStyleSheet(
             f"color: {config.FG_BRIGHT}; font-size: 10px;")
         sl.addWidget(self._time)
+
+        # Mute / unmute toggle
+        self._mute_btn = QToolButton()
+        self._mute_btn.setText(config.ICON_MUTE)
+        self._mute_btn.setToolTip("Unmute / mute (click); volume slider appears on unmute")
+        self._mute_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._mute_btn.setStyleSheet(
+            f"QToolButton {{ color: {config.FG_DIM}; background: transparent;"
+            " border: none; font-size: 13px; padding: 0 2px; }")
+        self._mute_btn.clicked.connect(self._toggle_mute)
+        sl.addWidget(self._mute_btn)
+
         self._scrub.seeked.connect(self._on_seek)
         self._seekwrap.hide()
 
+        # Volume popup — floating child, shown when unmuted
+        self._vol_popup = QWidget(self)
+        self._vol_popup.setStyleSheet(
+            "QWidget { background: rgba(0,0,0,210); border-radius: 4px; }")
+        vl = QVBoxLayout(self._vol_popup)
+        vl.setContentsMargins(4, 8, 4, 4)
+        vl.setSpacing(2)
+        self._vol_slider = QSlider(Qt.Orientation.Vertical)
+        self._vol_slider.setRange(0, 100)
+        self._vol_slider.setValue(100)
+        self._vol_slider.setToolTip("Volume")
+        self._vol_slider.valueChanged.connect(self._on_vol_changed)
+        self._vol_label = QLabel("100%")
+        self._vol_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._vol_label.setStyleSheet(
+            f"color: {config.FG_BRIGHT}; font-size: 9px; background: transparent;")
+        vl.addWidget(self._vol_slider, 1)
+        vl.addWidget(self._vol_label)
+        self._vol_popup.setFixedSize(32, 96)
+        self._vol_popup.hide()
+
+    # -- event handling --------------------------------------------------------
     def resizeEvent(self, e):
         super().resizeEvent(e)
         if self._is_video:
@@ -270,6 +302,7 @@ class _Slot(QWidget):
         if not self._is_pinned:
             self._btnbar.hide()
 
+    # -- video sizing ----------------------------------------------------------
     def _fit_video(self) -> None:
         vw, vh = self._gview.width(), self._gview.height()
         if vw <= 0 or vh <= 0:
@@ -301,7 +334,7 @@ class _Slot(QWidget):
         return (cw - dw) // 2, (ch - dh) // 2, dw, dh
 
     def _position_overlays(self) -> None:
-        """Constrain btnbar (and seekbar for video) to displayed media bounds."""
+        """Constrain btnbar (and seekbar for video) to displayed-media bounds."""
         sw, sh = self.width(), self.height()
         bh = self._btnbar.sizeHint().height()
         if self._is_video:
@@ -328,6 +361,7 @@ class _Slot(QWidget):
         self._seekwrap.setGeometry(max(0, x), max(0, y), int(disp_w), barh)
         self._seekwrap.raise_()
 
+    # -- helper ----------------------------------------------------------------
     def _mk(self, glyph, cb, layout=None):
         b = QToolButton()
         b.setText(glyph)
@@ -340,6 +374,7 @@ class _Slot(QWidget):
             layout.addWidget(b)
         return b
 
+    # -- properties ------------------------------------------------------------
     @property
     def is_pinned(self) -> bool:
         return self._is_pinned
@@ -348,14 +383,17 @@ class _Slot(QWidget):
     def row(self) -> int:
         return self._row
 
+    # -- content ---------------------------------------------------------------
     def clear(self) -> None:
         self._player.stop()
         self._img.clear_source()
         self._seekwrap.hide()
+        self._vol_popup.hide()
         self._is_video = False
         self._row  = -1
         self._path = ""
         self._pm   = QPixmap()
+        self._reset_audio()
         self._position_overlays()
 
     def show_item(self, row: int, path: str) -> None:
@@ -363,6 +401,7 @@ class _Slot(QWidget):
         self._path = path
         self._rotation = 0
         self._dur_ms   = 0
+        self._reset_audio()
         is_fav = self._favs.is_fav(path)
         self._fav_btn.setText(
             config.ICON_HEART_FULL if is_fav else config.ICON_HEART_EMPTY)
@@ -390,6 +429,16 @@ class _Slot(QWidget):
             self._img.set_source(self._pm)
             self._position_overlays()
 
+    def _reset_audio(self) -> None:
+        self._muted = True
+        self._audio.setMuted(True)
+        self._vol_popup.hide()
+        self._mute_btn.setText(config.ICON_MUTE)
+        self._mute_btn.setStyleSheet(
+            f"QToolButton {{ color: {config.FG_DIM}; background: transparent;"
+            " border: none; font-size: 13px; padding: 0 2px; }")
+
+    # -- overlay button actions ------------------------------------------------
     def _toggle_pin(self) -> None:
         self._is_pinned = not self._is_pinned
         self._pin_btn.setIcon(
@@ -423,6 +472,7 @@ class _Slot(QWidget):
             self._player.stop()
             self.trashed.emit(self._path)
 
+    # -- media player callbacks ------------------------------------------------
     def _on_status(self, status):
         if status == QMediaPlayer.MediaStatus.EndOfMedia:
             self._player.setPosition(0)
@@ -447,7 +497,41 @@ class _Slot(QWidget):
         self._player.setPlaybackRate(rate)
         self._speed_btn.setText(f"{rate:g}×")
 
-    # -- drag-and-drop reordering ---------------------------------------------
+    # -- audio -----------------------------------------------------------------
+    def _toggle_mute(self) -> None:
+        self._muted = not self._muted
+        self._audio.setMuted(self._muted)
+        if self._muted:
+            self._mute_btn.setText(config.ICON_MUTE)
+            self._mute_btn.setStyleSheet(
+                f"QToolButton {{ color: {config.FG_DIM}; background: transparent;"
+                " border: none; font-size: 13px; padding: 0 2px; }")
+            self._vol_popup.hide()
+        else:
+            self._mute_btn.setText(config.ICON_UNMUTE)
+            self._mute_btn.setStyleSheet(
+                f"QToolButton {{ color: {config.FG_BRIGHT}; background: transparent;"
+                " border: none; font-size: 13px; padding: 0 2px; }")
+            self._show_vol_popup()
+
+    def _on_vol_changed(self, val: int) -> None:
+        self._vol_label.setText(f"{val}%")
+        # Quadratic curve for perceptual loudness mapping
+        self._audio.setVolume((val / 100.0) ** 2)
+
+    def _show_vol_popup(self) -> None:
+        btn_pos = self._mute_btn.mapTo(self, self._mute_btn.rect().topLeft())
+        pw = self._vol_popup.width()
+        ph = self._vol_popup.height()
+        x = btn_pos.x() + (self._mute_btn.width() - pw) // 2
+        y = btn_pos.y() - ph - 4
+        x = max(0, min(x, self.width() - pw))
+        y = max(0, y)
+        self._vol_popup.setGeometry(x, y, pw, ph)
+        self._vol_popup.show()
+        self._vol_popup.raise_()
+
+    # -- drag-and-drop reordering ----------------------------------------------
     def mousePressEvent(self, e):
         if e.button() == Qt.MouseButton.LeftButton and self._path:
             self._drag_start = e.position().toPoint()
@@ -500,23 +584,34 @@ class _Slot(QWidget):
         e.acceptProposedAction()
 
 
-class MultiView(QDialog):
-    favToggled   = Signal(str)   # path
-    trashed      = Signal(str)   # path
-    openLightbox = Signal(int)   # row
+class MultiView(QWidget):
+    """Embedded multi-view panel (not a dialog).
 
-    def __init__(self, model, favorites, start_row=0, parent=None):
-        super().__init__(parent, Qt.WindowType.Window)
+    Shown/hidden by switching a QStackedWidget in MainWindow.  Communicates
+    back via signals rather than close().
+    """
+    favToggled     = Signal(str)   # path
+    trashed        = Signal(str)   # path
+    openLightbox   = Signal(int)   # row
+    closeRequested = Signal()      # user wants to go back to gallery
+
+    def __init__(self, model, favorites, parent=None):
+        super().__init__(parent)
         self._model = model
         self._favs  = favorites
-        self._start = start_row
         self._layout_slots = 3
+
+        # Orientation-partitioned path lists.  _current_paths is one of these
+        # two objects (identity comparison in _detect_layout).
+        self._portrait_paths:  list[str] = []
+        self._landscape_paths: list[str] = []
+        self._current_paths:   list[str] = []
+        self._start = 0
+
         p = self.palette()
         p.setColor(QPalette.ColorRole.Window, QColor("#000"))
         self.setPalette(p)
         self.setAutoFillBackground(True)
-        self.setWindowTitle("Multi-view")
-        self.resize(1200, 850)
 
         self._root = QVBoxLayout(self)
         self._root.setContentsMargins(0, 0, 0, 0)
@@ -525,29 +620,44 @@ class MultiView(QDialog):
         self._grid_host = QWidget()
         self._grid = QGridLayout(self._grid_host)
         self._grid.setContentsMargins(0, 0, 0, 0)
-        self._grid.setSpacing(1)        # 1 px hairline between slots
+        self._grid.setSpacing(1)
         self._root.addWidget(self._grid_host, 1)
 
         self._slots: list[_Slot] = []
         self._build_slots(3)
 
-        # Auto-scroll timer — fires next_page() on each tick.
+        # Auto-scroll timer
         self._autoscroll_timer = QTimer(self)
         self._autoscroll_timer.timeout.connect(self.next_page)
 
-        # Floating chrome overlay — no dedicated header row consumes screen space.
+        # Top chrome: back-to-gallery + fullscreen (floats over the grid)
         self._chrome_widget = QWidget(self)
         self._chrome_widget.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
         chrome = QHBoxLayout(self._chrome_widget)
         chrome.setContentsMargins(8, 6, 8, 6)
         chrome.setSpacing(6)
-        self._prev_btn = self._chrome_btn(config.ICON_PREV, self.prev_page,
-                                          "Previous page (←)", big=True)
-        self._next_btn = self._chrome_btn(config.ICON_NEXT, self.next_page,
-                                          "Next page (→)", big=True)
-        self._autoscroll_btn = self._chrome_btn(config.ICON_PLAY,
-                                                self._toggle_autoscroll,
-                                                "Toggle auto-scroll (A)")
+        back_btn = self._chrome_btn(
+            f"{config.ICON_BACK} Gallery",
+            self.closeRequested.emit,
+            "Back to gallery (Esc)")
+        self._fs_btn = self._chrome_btn(
+            config.ICON_FULLSCREEN, self._toggle_fs, "Toggle full screen")
+        chrome.addWidget(back_btn)
+        chrome.addStretch(1)
+        chrome.addWidget(self._fs_btn)
+
+        # Bottom bar: prev / autoscroll / next / counter (floats over the grid)
+        self._autoscroll_widget = QWidget(self)
+        self._autoscroll_widget.setAttribute(
+            Qt.WidgetAttribute.WA_TranslucentBackground)
+        asl = QHBoxLayout(self._autoscroll_widget)
+        asl.setContentsMargins(8, 6, 8, 6)
+        asl.setSpacing(6)
+
+        self._prev_btn = self._chrome_btn(
+            config.ICON_PREV, self.prev_page, "Previous page (←)", big=True)
+        self._autoscroll_btn = self._chrome_btn(
+            config.ICON_PLAY, self._toggle_autoscroll, "Toggle auto-scroll (A)")
         self._autoscroll_spin = QSpinBox()
         self._autoscroll_spin.setRange(1, 60)
         self._autoscroll_spin.setValue(5)
@@ -559,100 +669,101 @@ class MultiView(QDialog):
             f" border: 1px solid {config.FG_DIM}; border-radius: 4px;"
             " padding: 2px 4px; font-size: 12px; }"
             " QSpinBox::up-button, QSpinBox::down-button"
-            " { background: rgba(0,0,0,60); border: none; width: 14px; }")
+            f" {{ background: rgba(0,0,0,60); border: none; width: 14px; }}")
         self._autoscroll_spin.valueChanged.connect(self._on_autoscroll_duration_changed)
+        self._next_btn = self._chrome_btn(
+            config.ICON_NEXT, self.next_page, "Next page (→)", big=True)
         self._counter = QLabel("")
         self._counter.setStyleSheet(
             f"color: {config.FG_MID}; background: rgba(0,0,0,90);"
             " border-radius: 4px; padding: 2px 8px;")
-        self._fs_btn = self._chrome_btn(config.ICON_FULLSCREEN, self._toggle_fs,
-                                        "Toggle full screen (F11)")
-        close_btn = self._chrome_btn(config.ICON_CLOSE, self.close, "Close (Esc)")
-        chrome.addWidget(self._prev_btn)
-        chrome.addWidget(self._next_btn)
-        chrome.addStretch(1)
-        chrome.addWidget(self._fs_btn)
-        chrome.addWidget(close_btn)
 
-        # Auto-scroll controls + page counter live in their own bar pinned to
-        # the bottom-centre of the window (see _position_autoscroll), keeping
-        # the top edge clear for each tile's media icons.
-        self._autoscroll_widget = QWidget(self)
-        self._autoscroll_widget.setAttribute(
-            Qt.WidgetAttribute.WA_TranslucentBackground)
-        asl = QHBoxLayout(self._autoscroll_widget)
-        asl.setContentsMargins(8, 6, 8, 6)
-        asl.setSpacing(6)
         asl.addStretch(1)
+        asl.addWidget(self._prev_btn)
         asl.addWidget(self._autoscroll_btn)
         asl.addWidget(self._autoscroll_spin)
+        asl.addWidget(self._next_btn)
         asl.addWidget(self._counter)
         asl.addStretch(1)
 
-        QShortcut(QKeySequence(Qt.Key.Key_Escape), self, activated=self.close)
-        QShortcut(QKeySequence(Qt.Key.Key_Left),   self, activated=self.prev_page)
-        QShortcut(QKeySequence(Qt.Key.Key_Right),  self, activated=self.next_page)
-        QShortcut(QKeySequence(Qt.Key.Key_F11),    self, activated=self._toggle_fs)
-        QShortcut(QKeySequence(Qt.Key.Key_A),      self, activated=self._toggle_autoscroll)
+        QShortcut(QKeySequence(Qt.Key.Key_Escape), self,
+                  activated=self.closeRequested.emit)
+        QShortcut(QKeySequence(Qt.Key.Key_Left),  self, activated=self.prev_page)
+        QShortcut(QKeySequence(Qt.Key.Key_Right), self, activated=self.next_page)
+        QShortcut(QKeySequence(Qt.Key.Key_A),     self,
+                  activated=self._toggle_autoscroll)
 
-        self._render(start_row)
+    # -- public API ------------------------------------------------------------
 
-    def _chrome_btn(self, glyph, cb, tip="", big=False) -> QToolButton:
-        b = QToolButton()
-        b.setText(glyph)
-        b.setToolTip(tip)
-        b.setCursor(Qt.CursorShape.PointingHandCursor)
-        size   = 26 if big else 18
-        weight = "bold" if big else "normal"
-        b.setStyleSheet(
-            f"QToolButton {{ color: {config.OVERLAY_FG}; font-size: {size}px;"
-            f" font-weight: {weight}; background: rgba(0,0,0,90); border: none;"
-            " border-radius: 4px; padding: 2px 10px; }"
-            " QToolButton:hover { color: #ffffff;"
-            " background: rgba(0,0,0,160); border-radius: 4px; }")
-        b.clicked.connect(cb)
-        return b
+    def open(self, start_row: int) -> None:
+        """Activate the panel from start_row's orientation group.
 
-    def _toggle_fs(self) -> None:
-        if self.isFullScreen():
-            self.showNormal()
+        Clears any previous pin state so each gallery→multiview transition
+        starts fresh.
+        """
+        # Reset all pins from any previous session
+        for s in self._slots:
+            if s.is_pinned:
+                s._is_pinned = False
+                s._pin_btn.setIcon(s._pause_icon_off)
+                s._pin_btn.setStyleSheet(s._PIN_OFF)
+            s.clear()
+
+        self._refresh_orientation_lists()
+
+        path = self._model.path_at(start_row)
+        if path and path in self._portrait_paths:
+            self._current_paths = self._portrait_paths
+            start_in_list = self._portrait_paths.index(path)
+        elif path and path in self._landscape_paths:
+            self._current_paths = self._landscape_paths
+            start_in_list = self._landscape_paths.index(path)
         else:
-            self.showFullScreen()
-            self.raise_()
-            self.activateWindow()
+            # Fallback when dims are unknown or path not visible
+            self._current_paths = self._landscape_paths or self._portrait_paths
+            start_in_list = 0
 
-    def resizeEvent(self, e) -> None:
-        super().resizeEvent(e)
-        self._position_chrome()
-        self._position_autoscroll()
+        self._render(start_in_list)
 
-    def _position_chrome(self) -> None:
-        w = self.width()
-        ch = self._chrome_widget.sizeHint().height()
-        self._chrome_widget.setGeometry(0, 0, w, max(ch, 1))
-        self._chrome_widget.raise_()
-
-    def _position_autoscroll(self) -> None:
-        w, h = self.width(), self.height()
-        bh = self._autoscroll_widget.sizeHint().height()
-        self._autoscroll_widget.setGeometry(0, max(0, h - bh), w, max(bh, 1))
-        self._autoscroll_widget.raise_()
-
-    def _toggle_autoscroll(self) -> None:
-        if self._autoscroll_timer.isActive():
-            self._autoscroll_timer.stop()
-            self._autoscroll_btn.setText(config.ICON_PLAY)
-        else:
-            self._autoscroll_timer.start(self._autoscroll_spin.value() * 1000)
-            self._autoscroll_btn.setText(config.ICON_PAUSE)
-
-    def _on_autoscroll_duration_changed(self, secs: int) -> None:
-        if self._autoscroll_timer.isActive():
-            self._autoscroll_timer.start(secs * 1000)
-
-    def closeEvent(self, e) -> None:
+    def stop_autoscroll(self) -> None:
         self._autoscroll_timer.stop()
-        super().closeEvent(e)
+        self._autoscroll_btn.setText(config.ICON_PLAY)
+
+    # -- orientation lists -----------------------------------------------------
+
+    def _refresh_orientation_lists(self) -> None:
+        """Partition all model paths into portrait and landscape groups.
+
+        Uses cached dims from the model where available; falls back to a
+        synchronous header-only peek for paths not yet dimensioned.
+        The current_paths reference is updated to point at the new list object.
+        """
+        was_portrait = self._current_paths is self._portrait_paths
+        portrait, landscape = [], []
+        for i in range(self._model.rowCount()):
+            path = self._model.path_at(i)
+            if not path:
+                continue
+            w, h = self._model.dim_at(path)
+            if w <= 0 or h <= 0:
+                try:
+                    w, h = media.peek_size(path)
+                except Exception:
+                    w, h = 0, 0
+            if w > 0 and h > 0 and w / h < 0.95:
+                portrait.append(path)
+            else:
+                landscape.append(path)
+        self._portrait_paths  = portrait
+        self._landscape_paths = landscape
+        # Re-point current_paths to the newly constructed list object.
+        self._current_paths = portrait if was_portrait else landscape
+
+    def _detect_layout(self) -> int:
+        """Return 3 for portrait 3×1, 4 for landscape 2×2."""
+        return 3 if (self._current_paths is self._portrait_paths) else 4
+
+    # -- layout / slot management ----------------------------------------------
 
     def _build_slots(self, n: int) -> None:
         for s in self._slots:
@@ -675,7 +786,7 @@ class MultiView(QDialog):
             slot.favToggled.connect(self._on_slot_fav)
             slot.trashed.connect(self._on_slot_trash)
             slot.reordered.connect(self._on_reorder)
-            slot.pinned.connect(lambda *_: None)     # visual-only; is_pinned drives nav
+            slot.pinned.connect(lambda *_: None)
             self._grid.addWidget(slot, r, c)
             self._slots.append(slot)
         used_cols = 3 if n == 3 else 2
@@ -685,48 +796,146 @@ class MultiView(QDialog):
         for rr in range(used_rows):
             self._grid.setRowStretch(rr, 1)
 
-    def _detect_layout(self, row: int) -> int:
-        path = self._model.path_at(row)
-        if not path:
-            return 3
-        w, h = media.peek_size(path)
-        return 4 if (w and h and w > h) else 3
+    def _switch_layout(self, n: int) -> None:
+        """Rebuild grid for n slots, restoring pinned media to first slots."""
+        saved = [(s._path, s._row, s._speed_idx)
+                 for s in self._slots if s.is_pinned]
+        self._build_slots(n)
+        for (path, row, speed), slot in zip(saved[:n], self._slots):
+            if path:
+                # Set speed before show_item so it uses the restored rate.
+                slot._speed_idx = speed
+                slot._speed_btn.setText(f"{slot._SPEEDS[speed]:g}×")
+                slot.show_item(row if row >= 0 else 0, path)
+                slot._is_pinned = True
+                slot._pin_btn.setIcon(slot._pause_icon_on)
+                slot._pin_btn.setStyleSheet(slot._PIN_ON)
+                slot._bar_hide_timer.stop()
+                slot._btnbar.show()
+
+    # -- rendering -------------------------------------------------------------
 
     def _render(self, start: int) -> None:
-        total = self._model.rowCount()
-        if total == 0:
+        paths = self._current_paths
+        if not paths:
+            for s in self._slots:
+                if not s.is_pinned:
+                    s.clear()
+            self._counter.setText("0 of 0")
             return
-        want = self._detect_layout(start)
-        if want != self._layout_slots and all(s.row < 0 for s in self._slots):
-            self._build_slots(want)
-        self._start = max(0, min(start, total - 1))
-        row = self._start
+
+        want = self._detect_layout()
+        if want != self._layout_slots:
+            self._switch_layout(want)
+
+        self._start = max(0, min(start, len(paths) - 1))
+        pinned_set = {s._path for s in self._slots if s.is_pinned and s._path}
+
+        idx = self._start
+        shown_end = self._start
         for slot in self._slots:
-            if slot.is_pinned and slot.row >= 0:
+            if slot.is_pinned:
                 continue
-            if row < total:
-                slot.show_item(row, self._model.path_at(row))
-                row += 1
+            # Skip paths that are currently occupying a pinned slot
+            while idx < len(paths) and paths[idx] in pinned_set:
+                idx += 1
+            if idx < len(paths):
+                path = paths[idx]
+                row = self._model.row_for_path(path)
+                slot.show_item(row if row >= 0 else idx, path)
+                shown_end = idx + 1
+                idx += 1
+            elif paths:
+                # Wrap around the list to fill remaining slots with duplicates.
+                path = paths[idx % len(paths)]
+                row = self._model.row_for_path(path)
+                slot.show_item(row if row >= 0 else 0, path)
+                shown_end = len(paths)
+                idx += 1
             else:
                 slot.clear()
+
+        total = len(paths)
         self._counter.setText(
-            f"{self._start + 1}–{min(row, total)} of {total}")
+            f"{self._start + 1}–{min(shown_end, total)} of {total}")
+
+    # -- navigation ------------------------------------------------------------
 
     def next_page(self) -> None:
-        step  = sum(1 for s in self._slots if not s.is_pinned) or 1
-        total = self._model.rowCount()
-        nxt   = self._start + step
-        self._render(0 if nxt >= total else nxt)
+        if not self._current_paths:
+            return
+        step = sum(1 for s in self._slots if not s.is_pinned) or 1
+        nxt = self._start + step
+        self._render(0 if nxt >= len(self._current_paths) else nxt)
 
     def prev_page(self) -> None:
+        if not self._current_paths:
+            return
         step = sum(1 for s in self._slots if not s.is_pinned) or 1
         self._render(max(0, self._start - step))
 
+    # -- chrome / UI helpers ---------------------------------------------------
+
+    def _chrome_btn(self, glyph, cb, tip="", big=False) -> QToolButton:
+        b = QToolButton()
+        b.setText(glyph)
+        b.setToolTip(tip)
+        b.setCursor(Qt.CursorShape.PointingHandCursor)
+        size   = 26 if big else 18
+        weight = "bold" if big else "normal"
+        b.setStyleSheet(
+            f"QToolButton {{ color: {config.OVERLAY_FG}; font-size: {size}px;"
+            f" font-weight: {weight}; background: rgba(0,0,0,90); border: none;"
+            " border-radius: 4px; padding: 2px 10px; }"
+            " QToolButton:hover { color: #ffffff;"
+            " background: rgba(0,0,0,160); border-radius: 4px; }")
+        b.clicked.connect(cb)
+        return b
+
+    def _toggle_fs(self) -> None:
+        w = self.window()
+        if w.isFullScreen():
+            w.showNormal()
+        else:
+            w.showFullScreen()
+            w.raise_()
+            w.activateWindow()
+
+    def _toggle_autoscroll(self) -> None:
+        if self._autoscroll_timer.isActive():
+            self._autoscroll_timer.stop()
+            self._autoscroll_btn.setText(config.ICON_PLAY)
+        else:
+            self._autoscroll_timer.start(self._autoscroll_spin.value() * 1000)
+            self._autoscroll_btn.setText(config.ICON_PAUSE)
+
+    def _on_autoscroll_duration_changed(self, secs: int) -> None:
+        if self._autoscroll_timer.isActive():
+            self._autoscroll_timer.start(secs * 1000)
+
+    def resizeEvent(self, e) -> None:
+        super().resizeEvent(e)
+        self._position_chrome()
+        self._position_autoscroll()
+
+    def _position_chrome(self) -> None:
+        w = self.width()
+        ch = self._chrome_widget.sizeHint().height()
+        self._chrome_widget.setGeometry(0, 0, w, max(ch, 1))
+        self._chrome_widget.raise_()
+
+    def _position_autoscroll(self) -> None:
+        w, h = self.width(), self.height()
+        bh = self._autoscroll_widget.sizeHint().height()
+        self._autoscroll_widget.setGeometry(0, max(0, h - bh), w, max(bh, 1))
+        self._autoscroll_widget.raise_()
+
+    # -- slot signal handlers --------------------------------------------------
+
     def _on_enlarge(self, row: int) -> None:
         self.openLightbox.emit(row)
-        self.close()
+        self.closeRequested.emit()
 
-    # Slots now emit PATH strings directly -- no model lookup needed here.
     def _on_slot_fav(self, path: str) -> None:
         if path:
             self.favToggled.emit(path)
@@ -735,11 +944,16 @@ class MultiView(QDialog):
     def _on_slot_trash(self, path: str) -> None:
         if path:
             self.trashed.emit(path)
-            # Re-render after model has been updated by the trash signal handler.
-            self._render(self._start)
+            self._refresh_orientation_lists()
+            start = min(self._start, max(0, len(self._current_paths) - 1))
+            self._render(start)
 
     def _on_reorder(self, src_path: str, dst_path: str) -> None:
-        """Swap two items in the model (switches it to manual order) and redraw
-        the current page so the tiles trade places in-place."""
+        cur_path = (self._current_paths[self._start]
+                    if self._current_paths and self._start < len(self._current_paths)
+                    else None)
         self._model.swap_paths(src_path, dst_path)
+        self._refresh_orientation_lists()
+        if cur_path and cur_path in self._current_paths:
+            self._start = self._current_paths.index(cur_path)
         self._render(self._start)

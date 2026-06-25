@@ -70,6 +70,9 @@ ICON_PIN_OFF     = "\U0001f4cd\ufe0e"   # round pushpin  \u2014 outline / inacti
 ICON_PIN_ON      = "\U0001f4cc\ufe0e"   # filled pushpin \u2014 active / pinned state
 ICON_FULLSCREEN  = "\u26f6"
 ICON_FOLDER      = "\U0001f4c1\ufe0e"
+ICON_MUTE        = "\U0001f507\ufe0e"   # \ud83d\udd07 text variant
+ICON_UNMUTE      = "\U0001f50a\ufe0e"   # \ud83d\udd0a text variant
+ICON_BACK        = "\u2190"              # \u2190
 
 FONT_FAMILY = "Segoe UI"
 

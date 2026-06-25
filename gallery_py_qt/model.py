@@ -164,6 +164,14 @@ class GalleryModel(QAbstractListModel):
     def sort_mode(self) -> str:
         return self._sort
 
+    def dim_at(self, path: str) -> tuple[int, int]:
+        """Return cached (w, h) for path, or (0, 0) if not yet computed."""
+        return self._dims.get(path, (0, 0))
+
+    def row_for_path(self, path: str) -> int:
+        """Return current visible row index for path, or -1 if not visible."""
+        return self._path_to_row.get(path, -1)
+
     def needs_dimensions(self) -> bool:
         return self._sort in ("area", "width", "height", "like_dims")
 

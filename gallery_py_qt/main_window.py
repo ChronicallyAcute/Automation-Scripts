@@ -21,7 +21,7 @@ from PySide6.QtWidgets import (QMainWindow, QWidget, QFrame, QHBoxLayout,
                                QApplication, QListView, QTreeView,
                                QAbstractItemView, QGridLayout, QDialog,
                                QFileSystemModel, QDialogButtonBox,
-                               QSplitter, QSizePolicy)
+                               QSplitter, QSizePolicy, QStackedWidget)
 
 BAR_HIDE_MS = 2000
 
@@ -306,7 +306,12 @@ class MainWindow(QMainWindow):
         self._view.favToggled.connect(self._on_grid_fav)
         self._view.rotateItem.connect(self._on_grid_rotate)
         self._view.trashItem.connect(self._on_grid_trash)
-        root.addWidget(self._view, 1)
+
+        # QStackedWidget: page 0 = gallery, page 1 = embedded multiview panel.
+        self._content_stack = QStackedWidget()
+        self._content_stack.addWidget(self._view)
+        self._mv: "MultiView | None" = None   # created lazily on first open
+        root.addWidget(self._content_stack, 1)
 
         # -- Floating control bar ---------------------------------------------
         self._bar = QFrame(central)
@@ -658,20 +663,33 @@ class MainWindow(QMainWindow):
         lb.favToggled.connect(self._toggle_fav_path)
         lb.trashed.connect(self._trash_path)
         lb.requestInfo.connect(lambda p: InfoDialog(p, self).exec())
-        lb.openMulti.connect(self._open_multiview)
+        # Close the lightbox before switching to the embedded multiview panel.
+        lb.openMulti.connect(lambda r, _lb=lb: (_lb.close(), self._open_multiview(r)))
         lb.showFullScreen()
         lb.raise_()
         lb.activateWindow()
         lb.show_row(row)
 
     def _open_multiview(self, start_row: int) -> None:
-        mv = MultiView(self._model, self._favs, start_row, self)
-        mv.favToggled.connect(self._toggle_fav_path)
-        mv.trashed.connect(self._trash_path)
-        mv.openLightbox.connect(self._open_lightbox)
-        mv.showFullScreen()
-        mv.raise_()
-        mv.activateWindow()
+        if self._mv is None:
+            self._mv = MultiView(self._model, self._favs, self)
+            self._mv.favToggled.connect(self._toggle_fav_path)
+            self._mv.trashed.connect(self._trash_path)
+            self._mv.openLightbox.connect(self._open_lightbox)
+            self._mv.closeRequested.connect(self._close_multiview)
+            self._content_stack.addWidget(self._mv)
+        # Kick off dims computation so orientation lists are accurate.
+        self._ensure_dims()
+        self._mv.open(start_row)
+        self._content_stack.setCurrentWidget(self._mv)
+        self._bar.hide()
+
+    def _close_multiview(self) -> None:
+        if self._mv is not None:
+            self._mv.stop_autoscroll()
+        self._content_stack.setCurrentWidget(self._view)
+        self._bar.show()
+        self._position_overlays()
 
     # -- autoscroll / fullscreen -----------------------------------------------
     def _toggle_autoscroll(self) -> None:
