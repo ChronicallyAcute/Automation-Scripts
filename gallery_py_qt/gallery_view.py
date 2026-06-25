@@ -23,7 +23,7 @@ from PySide6.QtWidgets import (QAbstractScrollArea, QFrame, QWidget,
 from PySide6.QtMultimedia import QMediaPlayer, QVideoSink
 
 from . import config
-from .model import PathRole, IsVideoRole, FavRole, LoadedRole
+from .model import PathRole, IsVideoRole, FavRole, LoadedRole, FailedRole
 
 
 # ---------------------------------------------------------------------------
@@ -397,6 +397,11 @@ class GalleryView(QAbstractScrollArea):
                 ox = (cw - scaled.width())  // 2
                 oy = (ch - scaled.height()) // 2
                 painter.drawPixmap(rect.x() + ox, rect.y() + oy, scaled)
+            elif idx.data(FailedRole):
+                painter.fillRect(rect, QColor("#000"))
+                painter.setPen(QPen(QColor(config.RED_DIM)))
+                painter.drawText(rect, Qt.AlignmentFlag.AlignCenter,
+                                 "⚠\nunreadable")
             else:
                 painter.fillRect(rect, QColor("#000"))
                 painter.setPen(QPen(QColor(config.FG_DIM)))

@@ -39,6 +39,7 @@ PathRole    = Qt.ItemDataRole.UserRole + 1
 IsVideoRole = Qt.ItemDataRole.UserRole + 2
 FavRole     = Qt.ItemDataRole.UserRole + 3
 LoadedRole  = Qt.ItemDataRole.UserRole + 4
+FailedRole  = Qt.ItemDataRole.UserRole + 5   # thumbnail decode failed (corrupt/unreadable)
 
 # Target memory ceiling for the in-process pixmap LRU cache.
 # At 320 px thumbnails (? 400 KB RGBA each) this yields ~640 items ? 256 MB.
@@ -72,6 +73,7 @@ class GalleryModel(QAbstractListModel):
         self._pixmaps: "OrderedDict[str, QPixmap]" = OrderedDict()
         self._rotation: dict[str, int] = {}
         self._dims: dict[str, tuple[int, int]] = {}
+        self._failed: set[str] = set()       # paths whose thumbnail decode failed
         self._thumb_px = 320
         self._pixmap_cap = _pixmap_cap(self._thumb_px)
         # filters / sort
@@ -81,12 +83,14 @@ class GalleryModel(QAbstractListModel):
         self._sort = "like_dims"
         self._descending = False
         self._loader.ready.connect(self._on_thumb_ready)
+        self._loader.failed.connect(self._on_thumb_failed)
 
     # -- population ------------------------------------------------------------
     def set_paths(self, paths: list[str]) -> None:
         """Replace the full path list and re-index (non-streaming)."""
         self._all = list(paths)
         self._all_set = set(paths)
+        self._failed.clear()    # fresh folder — re-evaluate every file
         self._reindex()
 
     def add_paths_batch(self, paths: list[str]) -> None:
@@ -297,12 +301,17 @@ class GalleryModel(QAbstractListModel):
             return os.path.basename(path)
         if role == LoadedRole:
             return path in self._pixmaps
+        if role == FailedRole:
+            return path in self._failed
         if role == Qt.ItemDataRole.DecorationRole:
             pm = self._pixmaps.get(path)
             if pm is not None:
                 self._pixmaps.move_to_end(path)
                 return pm
-            self._loader.request(path, self._thumb_px)
+            # Don't re-queue files we already know are unreadable — otherwise
+            # every repaint/scroll re-submits a decode job that just fails again.
+            if path not in self._failed:
+                self._loader.request(path, self._thumb_px)
             return None
         return None
 
@@ -319,11 +328,24 @@ class GalleryModel(QAbstractListModel):
         self._pixmaps.move_to_end(path)
         while len(self._pixmaps) > self._pixmap_cap:
             self._pixmaps.popitem(last=False)
+        # A previously-failed file that now decodes (e.g. replaced on disk)
+        # should drop its failed flag.
+        self._failed.discard(path)
         # O(1) row lookup via reverse index -- was O(n) in the original.
         row = self._path_to_row.get(path)
         if row is not None:
             idx = self.index(row)
             self.dataChanged.emit(idx, idx, [Qt.ItemDataRole.DecorationRole])
+
+    def _on_thumb_failed(self, path: str) -> None:
+        """Record a decode failure so the file isn't re-requested forever."""
+        if path not in self._all_set or path in self._failed:
+            return
+        self._failed.add(path)
+        row = self._path_to_row.get(path)
+        if row is not None:
+            idx = self.index(row)
+            self.dataChanged.emit(idx, idx, [FailedRole])
 
     def rotate_path(self, path: str) -> None:
         """Rotate display 90\u00b0 CW (display-only; persists for this session)."""
@@ -351,6 +373,7 @@ class GalleryModel(QAbstractListModel):
         self._all.remove(path)       # O(n) list remove, but this is rare
         self._all_set.discard(path)
         self._pixmaps.pop(path, None)
+        self._failed.discard(path)
         row = self._path_to_row.pop(path, None)
         if row is None:
             return
