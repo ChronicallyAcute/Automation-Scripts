@@ -1,6 +1,7 @@
 """Central configuration: paths, palette, fonts, icon glyphs, file types."""
 from __future__ import annotations
 import os
+import sys
 
 os.environ.setdefault(
     "QT_LOGGING_RULES",
@@ -17,7 +18,6 @@ FAVORITES_DIR = os.path.join(HOME, "Downloads", "Gallery Favorites")# shared
 CACHE_DIR     = os.path.join(HOME, ".gallery_py_qt_cache")          # own
 PREFS_FILE    = os.path.join(HOME, ".gallery_py_qt_prefs.json")     # own
 RECENT_FILE   = os.path.join(HOME, ".gallery_py_qt_recent.json")    # own
-URL_CACHE_DIR = os.path.join(HOME, ".gallery_py_qt_url_cache")      # own
 CRASH_LOG     = os.path.join(HOME, ".gallery_py_qt_crash.log")
 
 # -- File types --------------------------------------------------------------
@@ -74,11 +74,23 @@ ICON_MUTE        = "\U0001f507\ufe0e"   # \ud83d\udd07 text variant
 ICON_UNMUTE      = "\U0001f50a\ufe0e"   # \ud83d\udd0a text variant
 ICON_BACK        = "\u2190"              # \u2190
 
-FONT_FAMILY = "Segoe UI"
+# Platform-aware UI font.  "Segoe UI" only exists on Windows; on Linux/macOS
+# Qt silently fell back to an ugly default.  Pick a native family per platform,
+# with a comma-separated fallback stack for the Qt stylesheet (FONT_STACK).
+if sys.platform == "darwin":
+    FONT_FAMILY = "SF Pro Text"
+    FONT_STACK  = '"SF Pro Text", "Helvetica Neue", Arial, sans-serif'
+elif sys.platform.startswith("win"):
+    FONT_FAMILY = "Segoe UI"
+    FONT_STACK  = '"Segoe UI", "Segoe UI Variable", Arial, sans-serif'
+else:
+    FONT_FAMILY = "Noto Sans"
+    FONT_STACK  = ('"Inter", "Noto Sans", "DejaVu Sans", Cantarell,'
+                   ' "Liberation Sans", sans-serif')
 
 
 def ensure_dirs() -> None:
-    for d in (CACHE_DIR, TRASH_DIR, URL_CACHE_DIR):
+    for d in (CACHE_DIR, TRASH_DIR):
         try:
             os.makedirs(d, exist_ok=True)
         except OSError:

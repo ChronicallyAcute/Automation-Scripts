@@ -8,7 +8,7 @@ def stylesheet() -> str:
     QMainWindow, QWidget {{
         background: {c.BG};
         color: {c.FG_BRIGHT};
-        font-family: "{c.FONT_FAMILY}";
+        font-family: {c.FONT_STACK};
         font-size: 12px;
     }}
     QFrame#Toolbar {{

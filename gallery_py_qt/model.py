@@ -79,6 +79,7 @@ class GalleryModel(QAbstractListModel):
         # filters / sort
         self._show_images = True
         self._show_videos = True
+        self._favs_only = False
         self._query = ""
         self._sort = "like_dims"
         self._descending = False
@@ -156,13 +157,17 @@ class GalleryModel(QAbstractListModel):
             return False
         if (not vid) and not self._show_images:
             return False
+        if self._favs_only and not self._favs.is_fav(p):
+            return False
         if self._query and self._query not in os.path.basename(p).lower():
             return False
         return True
 
     # -- filtering / sorting --------------------------------------------------
-    def set_filter(self, images: bool, videos: bool, query: str) -> None:
+    def set_filter(self, images: bool, videos: bool, query: str,
+                   favs_only: bool = False) -> None:
         self._show_images, self._show_videos = images, videos
+        self._favs_only = favs_only
         self._query = query.strip().lower()
         self._reindex()
 

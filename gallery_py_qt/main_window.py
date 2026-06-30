@@ -21,7 +21,8 @@ from PySide6.QtWidgets import (QMainWindow, QWidget, QFrame, QHBoxLayout,
                                QApplication, QListView, QTreeView,
                                QAbstractItemView, QGridLayout, QDialog,
                                QFileSystemModel, QDialogButtonBox,
-                               QSplitter, QSizePolicy, QStackedWidget)
+                               QSplitter, QSizePolicy, QStackedWidget,
+                               QCheckBox)
 
 BAR_HIDE_MS = 2000
 
@@ -142,15 +143,24 @@ class _FolderPickDlg(QDialog):
         splitter.addWidget(right_panel)
         splitter.setSizes([580, 300])
 
+        self._recursive_cb = QCheckBox("Include subfolders (scan recursively)")
+        self._recursive_cb.setToolTip(
+            "Also scan every folder nested inside the selected one(s)")
+
         buttons = QDialogButtonBox(
             QDialogButtonBox.StandardButton.Open |
             QDialogButtonBox.StandardButton.Cancel)
         buttons.accepted.connect(self.accept)
         buttons.rejected.connect(self.reject)
 
+        bottom = QHBoxLayout()
+        bottom.addWidget(self._recursive_cb)
+        bottom.addStretch(1)
+        bottom.addWidget(buttons)
+
         root = QVBoxLayout(self)
         root.addWidget(splitter, 1)
-        root.addWidget(buttons)
+        root.addLayout(bottom)
 
         # Keep checked-list in sync with checkbox changes
         self._fs.dataChanged.connect(self._refresh_list)
@@ -190,6 +200,9 @@ class _FolderPickDlg(QDialog):
                     selected.append(p)
         return selected
 
+    def recursive(self) -> bool:
+        return self._recursive_cb.isChecked()
+
 from . import config, theme
 from .engine import scan, prefs, favorites, cache
 from .engine.favorites import Favorites
@@ -212,16 +225,19 @@ class _StreamScanJob(QRunnable):
     """Scan one or more folders off the GUI thread, emitting path batches."""
     BATCH = 200
 
-    def __init__(self, folders: list[str], gen: int, signals: _StreamSignals):
+    def __init__(self, folders: list[str], gen: int, signals: _StreamSignals,
+                 recursive: bool = False):
         super().__init__()
         self._folders = list(folders)
         self._gen = gen
         self._signals = signals
+        self._recursive = recursive
 
     def run(self) -> None:
         from .engine.scan import scan_iter, ScanResult
         last_result = None
-        for batch, result in scan_iter(self._folders, batch_size=self.BATCH):
+        for batch, result in scan_iter(self._folders, batch_size=self.BATCH,
+                                       recursive=self._recursive):
             last_result = result
             self._signals.batch.emit(self._gen, list(batch))
         from .engine.scan import ScanResult as SR
@@ -361,7 +377,11 @@ class MainWindow(QMainWindow):
         self._img_btn.setChecked(True)
         self._vid_btn = self._btn("Videos", self._apply_filter, checkable=True)
         self._vid_btn.setChecked(True)
+        self._favs_btn = self._btn(f"{config.ICON_HEART_FULL} Favs",
+                                   self._apply_filter, checkable=True)
+        self._favs_btn.setToolTip("Show only favourites")
         h.addWidget(self._img_btn); h.addWidget(self._vid_btn)
+        h.addWidget(self._favs_btn)
 
         self._search = QLineEdit()
         self._search.setPlaceholderText("search\u2026")
@@ -504,13 +524,13 @@ class MainWindow(QMainWindow):
         if dlg.exec() == QDialog.DialogCode.Accepted:
             folders = dlg.selected_folders()
             if folders:
-                self.open_folders(folders)
+                self.open_folders(folders, recursive=dlg.recursive())
 
 
     def open_folder(self, folder: str) -> None:
         self.open_folders([folder])
 
-    def open_folders(self, folders: list[str]) -> None:
+    def open_folders(self, folders: list[str], recursive: bool = False) -> None:
         folders = [f for f in folders if os.path.isdir(f)]
         if not folders:
             return
@@ -536,7 +556,8 @@ class MainWindow(QMainWindow):
         self._view.set_empty_hint(f"Scanning {scanning}\u2026",
                                   "Media appears once dimensions are read")
         self._scan_pool.start(
-            _StreamScanJob(folders, self._scan_gen, self._stream_sig))
+            _StreamScanJob(folders, self._scan_gen, self._stream_sig,
+                           recursive=recursive))
 
     def _on_scan_batch(self, gen: int, paths: list) -> None:
         if gen != self._scan_gen:
@@ -588,13 +609,19 @@ class MainWindow(QMainWindow):
     def _apply_filter(self) -> None:
         self._model.set_filter(self._img_btn.isChecked(),
                                self._vid_btn.isChecked(),
-                               self._search.text())
+                               self._search.text(),
+                               self._favs_btn.isChecked())
         # If a folder is loaded but the filter hides everything, explain why
         # the grid is blank rather than leaving a bare black screen.
         if self._model.all_paths() and self._model.rowCount() == 0:
-            self._view.set_empty_hint(
-                "Nothing matches the current filter",
-                "Adjust the Images / Videos toggles or clear the search box")
+            if self._favs_btn.isChecked():
+                self._view.set_empty_hint(
+                    "No favourites here",
+                    "Tap the heart on items, or turn off the Favs filter")
+            else:
+                self._view.set_empty_hint(
+                    "Nothing matches the current filter",
+                    "Adjust the Images / Videos toggles or clear the search box")
 
     def _on_cols(self, n: int) -> None:
         self._view.set_columns(n)
@@ -644,10 +671,14 @@ class MainWindow(QMainWindow):
         new = self._favs.toggle(path)
         self._model.refresh_fav(path)
         self._view.refresh_overlay_fav(row, new)
+        if self._favs_btn.isChecked():
+            self._apply_filter()    # un-favourited item leaves the filtered view
 
     def _toggle_fav_path(self, path: str) -> None:
         self._favs.toggle(path)
         self._model.refresh_fav(path)
+        if self._favs_btn.isChecked():
+            self._apply_filter()
 
     def _on_grid_rotate(self, row: int) -> None:
         path = self._model.path_at(row)
