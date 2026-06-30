@@ -287,7 +287,9 @@ class MainWindow(QMainWindow):
         self._model.sortChanged.connect(self._sync_sort_combo)
         self._current_folder: str | None = None
         self._current_folders: list[str] = []
-        self._trash_stack: list[tuple[str, str]] = []
+        # Stack of trash batches; each batch is a list of (orig, trash) pairs
+        # so a single Undo restores all files deleted together.
+        self._trash_stack: list[list[tuple[str, str]]] = []
 
         # Streaming scan infrastructure.
         self._scan_gen = 0
@@ -322,6 +324,9 @@ class MainWindow(QMainWindow):
         self._view.favToggled.connect(self._on_grid_fav)
         self._view.rotateItem.connect(self._on_grid_rotate)
         self._view.trashItem.connect(self._on_grid_trash)
+        self._view.favBatch.connect(self._on_grid_fav_batch)
+        self._view.trashBatch.connect(self._on_grid_trash_batch)
+        self._view.selectionChanged.connect(self._on_selection_changed)
 
         # QStackedWidget: page 0 = gallery, page 1 = embedded multiview panel.
         self._content_stack = QStackedWidget()
@@ -690,16 +695,55 @@ class MainWindow(QMainWindow):
         if path:
             self._trash_path(path)
 
-    def _trash_path(self, path: str) -> None:
-        dest = favorites.trash_file(path)
-        if not dest:
-            self._status.setText(f"Delete failed: {os.path.basename(path)}")
+    # -- batch actions on a multi-selection ------------------------------------
+    def _on_grid_fav_batch(self, rows: list) -> None:
+        """Favourite all selected items if any is unfavourited, else clear all."""
+        paths = [p for p in (self._model.path_at(r) for r in rows) if p]
+        if not paths:
             return
-        self._favs.discard(path)
-        self._model.remove_path(path)
-        self._trash_stack.append((path, dest))
-        self._undo_label.setText(
-            f"{config.ICON_TRASH}  Deleted {os.path.basename(path)}")
+        make_fav = any(not self._favs.is_fav(p) for p in paths)
+        for p in paths:
+            if self._favs.is_fav(p) != make_fav:
+                self._favs.toggle(p)
+                self._model.refresh_fav(p)
+        verb = "Favourited" if make_fav else "Unfavourited"
+        self._status.setText(f"{verb} {len(paths)} item(s)")
+        if self._favs_btn.isChecked():
+            self._apply_filter()
+
+    def _on_grid_trash_batch(self, rows: list) -> None:
+        # Resolve paths up front — remove_path() shifts row indices as we go.
+        paths = [p for p in (self._model.path_at(r) for r in rows) if p]
+        if paths:
+            self._view.clear_selection()
+            self._trash_paths(paths)
+
+    def _on_selection_changed(self, count: int) -> None:
+        self._status.setText(f"{count} selected" if count else "")
+
+    def _trash_path(self, path: str) -> None:
+        self._trash_paths([path])
+
+    def _trash_paths(self, paths: list[str]) -> None:
+        """Trash one or more files as a single undoable batch."""
+        batch: list[tuple[str, str]] = []
+        for path in paths:
+            dest = favorites.trash_file(path)
+            if not dest:
+                continue
+            self._favs.discard(path)
+            self._model.remove_path(path)
+            batch.append((path, dest))
+        if not batch:
+            self._status.setText("Delete failed")
+            return
+        self._trash_stack.append(batch)
+        if len(batch) == 1:
+            self._undo_label.setText(
+                f"{config.ICON_TRASH}  Deleted {os.path.basename(batch[0][0])}")
+        else:
+            self._undo_label.setText(
+                f"{config.ICON_TRASH}  Deleted {len(batch)} items")
         self._undo_bar.show()
         self._undo_bar.raise_()
         self._position_overlays()
@@ -709,10 +753,16 @@ class MainWindow(QMainWindow):
         self._undo_bar.hide()
         if not self._trash_stack:
             return
-        orig, trash = self._trash_stack.pop()
-        if favorites.restore_file(orig, trash):
-            self._model.add_path(orig)
-            self._status.setText(f"Restored {os.path.basename(orig)}")
+        batch = self._trash_stack.pop()
+        restored = 0
+        for orig, trash in batch:
+            if favorites.restore_file(orig, trash):
+                self._model.add_path(orig)
+                restored += 1
+        if restored == 1:
+            self._status.setText(f"Restored {os.path.basename(batch[0][0])}")
+        elif restored:
+            self._status.setText(f"Restored {restored} items")
 
     # -- lightbox / multiview --------------------------------------------------
     def _open_lightbox(self, row: int) -> None:

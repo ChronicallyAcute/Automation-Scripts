@@ -140,6 +140,9 @@ class GalleryView(QAbstractScrollArea):
     favToggled   = Signal(int)
     rotateItem   = Signal(int)
     trashItem    = Signal(int)
+    favBatch     = Signal(list)   # rows — toggle favourite on a multi-selection
+    trashBatch   = Signal(list)   # rows — trash a multi-selection
+    selectionChanged = Signal(int)   # current selection count
 
     # A portrait image taller than this multiple of the column width is capped
     # so pathologically narrow images don't dominate the layout.
@@ -149,6 +152,9 @@ class GalleryView(QAbstractScrollArea):
         super().__init__(parent)
         self.setFrameShape(QFrame.Shape.NoFrame)
         self.setContentsMargins(0, 0, 0, 0)
+        # Accept keyboard focus so multi-select keys (Ctrl+A, F, Delete, Esc)
+        # reach keyPressEvent after the user clicks into the grid.
+        self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
         self.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         self.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOn)
         vp = self.viewport()
@@ -171,6 +177,9 @@ class GalleryView(QAbstractScrollArea):
         # Pixmap-derived dims: populated as thumbnails arrive.
         self._pm_dims: dict[str, tuple[int, int]] = {}
         self._cur_row = -1
+        # Multi-selection: set of selected rows + a shift-range anchor.
+        self._selection: set[int] = set()
+        self._anchor = -1
 
         self._overlay = _Overlay(vp)
         self._overlay.fav.connect(self.favToggled)
@@ -268,6 +277,11 @@ class GalleryView(QAbstractScrollArea):
         # _pm_dims is NOT cleared — path→aspect-ratio never changes for a given
         # file, so stale entries are always correct and save a re-layout cycle.
         self._cur_row = -1
+        # Row indices are invalidated by a reset (folder/filter/sort change).
+        if self._selection or self._anchor >= 0:
+            self._selection.clear()
+            self._anchor = -1
+            self.selectionChanged.emit(0)
         # Seed dims from thumbnails already in the model's in-memory pixmap cache
         # so the very first relayout after a modelReset uses the correct heights
         # instead of falling back to square cells.
@@ -421,7 +435,14 @@ class GalleryView(QAbstractScrollArea):
                     Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignRight,
                     config.ICON_HEART_FULL)
 
-            if i == self._cur_row:
+            if i in self._selection:
+                tint = QColor(config.ACCENT)
+                tint.setAlpha(70)
+                painter.fillRect(rect, tint)
+                painter.setBrush(Qt.BrushStyle.NoBrush)
+                painter.setPen(QPen(QColor(config.ACCENT), 3))
+                painter.drawRect(rect.adjusted(1, 1, -2, -2))
+            elif i == self._cur_row:
                 painter.setBrush(Qt.BrushStyle.NoBrush)
                 painter.setPen(QPen(QColor(config.ACCENT), 2))
                 painter.drawRect(rect)
@@ -480,7 +501,67 @@ class GalleryView(QAbstractScrollArea):
             return QRect(x, y - self.verticalScrollBar().value(), w, h)
         return None
 
+    # -- selection -------------------------------------------------------------
+    def selected_rows(self) -> list[int]:
+        """Sorted list of currently selected rows."""
+        return sorted(self._selection)
+
+    def clear_selection(self) -> None:
+        if self._selection:
+            self._selection.clear()
+            self._anchor = -1
+            self.selectionChanged.emit(0)
+            self.viewport().update()
+
+    def select_all(self) -> None:
+        m = self._model
+        if m and m.rowCount():
+            self._selection = set(range(m.rowCount()))
+            self.selectionChanged.emit(len(self._selection))
+            self.viewport().update()
+
+    def _set_single_selection(self, row: int) -> None:
+        self._selection = {row}
+        self._anchor = row
+        self.selectionChanged.emit(1)
+
+    def _toggle_in_selection(self, row: int) -> None:
+        if row in self._selection:
+            self._selection.discard(row)
+        else:
+            self._selection.add(row)
+        self._anchor = row
+        self.selectionChanged.emit(len(self._selection))
+
+    def _extend_selection_to(self, row: int) -> None:
+        if self._anchor < 0:
+            self._anchor = row
+        lo, hi = sorted((self._anchor, row))
+        self._selection |= set(range(lo, hi + 1))
+        self.selectionChanged.emit(len(self._selection))
+
     # -- mouse -----------------------------------------------------------------
+    def mousePressEvent(self, e) -> None:
+        if e.button() != Qt.MouseButton.LeftButton:
+            return super().mousePressEvent(e)
+        row = self._row_at(e.position().toPoint())
+        mods = e.modifiers()
+        ctrl = bool(mods & Qt.KeyboardModifier.ControlModifier)
+        shift = bool(mods & Qt.KeyboardModifier.ShiftModifier)
+        if row < 0:
+            if not (ctrl or shift):
+                self.clear_selection()
+            return super().mousePressEvent(e)
+        if shift:
+            self._extend_selection_to(row)
+        elif ctrl:
+            self._toggle_in_selection(row)
+        else:
+            self._set_single_selection(row)
+        self._cur_row = row
+        self.viewport().update()
+        super().mousePressEvent(e)
+
     def mouseMoveEvent(self, e) -> None:
         self._update_hover(e.position().toPoint())
         super().mouseMoveEvent(e)
@@ -524,24 +605,60 @@ class GalleryView(QAbstractScrollArea):
             return super().keyPressEvent(e)
         total = m.rowCount()
         row = self._cur_row
-        if e.key() in (Qt.Key.Key_Right, Qt.Key.Key_Down):
+        key = e.key()
+        ctrl = bool(e.modifiers() & Qt.KeyboardModifier.ControlModifier)
+        shift = bool(e.modifiers() & Qt.KeyboardModifier.ShiftModifier)
+        if ctrl and key == Qt.Key.Key_A:
+            self.select_all()
+            e.accept()
+        elif key == Qt.Key.Key_Escape:
+            self.clear_selection()
+            e.accept()
+        elif key in (Qt.Key.Key_Right, Qt.Key.Key_Down):
             if row + 1 < total:
                 self._cur_row = row + 1
+                self._move_selection(self._cur_row, shift)
                 self._scroll_to(self._cur_row)
                 self.viewport().update()
             e.accept()
-        elif e.key() in (Qt.Key.Key_Left, Qt.Key.Key_Up):
+        elif key in (Qt.Key.Key_Left, Qt.Key.Key_Up):
             if row > 0:
                 self._cur_row = row - 1
+                self._move_selection(self._cur_row, shift)
                 self._scroll_to(self._cur_row)
                 self.viewport().update()
             e.accept()
-        elif e.key() in (Qt.Key.Key_Return, Qt.Key.Key_Enter):
+        elif key in (Qt.Key.Key_Return, Qt.Key.Key_Enter):
             if 0 <= row < total:
                 self.openLightbox.emit(row)
             e.accept()
+        elif key == Qt.Key.Key_F:
+            rows = self._action_rows()
+            if rows:
+                self.favBatch.emit(rows)
+            e.accept()
+        elif key in (Qt.Key.Key_Delete, Qt.Key.Key_Backspace):
+            rows = self._action_rows()
+            if rows:
+                self.trashBatch.emit(rows)
+            e.accept()
         else:
             super().keyPressEvent(e)
+
+    def _move_selection(self, row: int, shift: bool) -> None:
+        """Arrow-key navigation: extend selection with Shift, else select one."""
+        if shift:
+            self._extend_selection_to(row)
+        else:
+            self._set_single_selection(row)
+
+    def _action_rows(self) -> list[int]:
+        """Rows a batch keyboard action targets: the selection, else the cursor."""
+        if self._selection:
+            return sorted(self._selection)
+        if 0 <= self._cur_row < (self._model.rowCount() if self._model else 0):
+            return [self._cur_row]
+        return []
 
     def _scroll_to(self, row: int) -> None:
         if 0 <= row < len(self._cells):
