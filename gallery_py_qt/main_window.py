@@ -212,6 +212,7 @@ from .gallery_view import GalleryView
 from .lightbox import Lightbox
 from .multiview import MultiView
 from .exif_panel import InfoDialog
+from .trash_dialog import TrashDialog
 
 
 # -- Streaming scan ------------------------------------------------------------
@@ -279,6 +280,10 @@ class MainWindow(QMainWindow):
 
         config.ensure_dirs()
         self._prefs = prefs.load_prefs()
+        # Opt-in housekeeping: drop trashed items older than the configured age.
+        purge_days = self._prefs.get("trash_purge_days", 0)
+        if isinstance(purge_days, int) and purge_days > 0:
+            favorites.purge_older_than(purge_days)
         self._recents = prefs.load_recent()
         self._favs = Favorites()
         # No explicit max_threads -- ThumbnailLoader auto-sizes to CPU count.
@@ -351,6 +356,10 @@ class MainWindow(QMainWindow):
         self._recent_btn.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
         self._rebuild_recent_menu()
         h.addWidget(self._recent_btn)
+        self._trash_btn = self._btn(f"{config.ICON_TRASH} Trash",
+                                    self._open_trash)
+        self._trash_btn.setToolTip("Browse, restore, or empty trashed items")
+        h.addWidget(self._trash_btn)
         h.addWidget(self._sep())
 
         h.addWidget(QLabel("cols"))
@@ -763,6 +772,15 @@ class MainWindow(QMainWindow):
             self._status.setText(f"Restored {os.path.basename(batch[0][0])}")
         elif restored:
             self._status.setText(f"Restored {restored} items")
+
+    # -- trash management ------------------------------------------------------
+    def _open_trash(self) -> None:
+        days = self._prefs.get("trash_purge_days", 0)
+        dlg = TrashDialog(self, days if isinstance(days, int) else 0)
+        dlg.exec()
+        if dlg.auto_purge_days != days:
+            self._prefs["trash_purge_days"] = dlg.auto_purge_days
+            prefs.save_prefs(self._prefs)
 
     # -- lightbox / multiview --------------------------------------------------
     def _open_lightbox(self, row: int) -> None:

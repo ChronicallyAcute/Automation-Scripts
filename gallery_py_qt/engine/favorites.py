@@ -97,6 +97,30 @@ class Favorites:
             print(f"[favs-unmirror] {exc}", file=sys.stderr)
 
 
+# -- Trash manifest --------------------------------------------------------
+# Maps each trashed filename -> {"orig": original_path, "ts": epoch} so the
+# trash browser can restore files to where they came from and show their age.
+_MANIFEST = os.path.join(config.TRASH_DIR, ".trash_manifest.json")
+
+
+def _load_manifest() -> dict:
+    try:
+        with open(_MANIFEST, encoding="utf-8") as f:
+            d = json.load(f)
+            return d if isinstance(d, dict) else {}
+    except Exception:
+        return {}
+
+
+def _save_manifest(man: dict) -> None:
+    try:
+        os.makedirs(config.TRASH_DIR, exist_ok=True)
+        with open(_MANIFEST, "w", encoding="utf-8") as f:
+            json.dump(man, f, indent=2)
+    except OSError as exc:
+        print(f"[trash-manifest] {exc}", file=sys.stderr)
+
+
 def trash_file(path: str) -> str | None:
     try:
         os.makedirs(config.TRASH_DIR, exist_ok=True)
@@ -106,6 +130,9 @@ def trash_file(path: str) -> str | None:
             stem, ext = os.path.splitext(base)
             dest = os.path.join(config.TRASH_DIR, f"{stem}_{int(time.time())}{ext}")
         shutil.move(path, dest)
+        man = _load_manifest()
+        man[os.path.basename(dest)] = {"orig": path, "ts": time.time()}
+        _save_manifest(man)
         return dest
     except Exception as exc:
         print(f"[trash] {exc}", file=sys.stderr)
@@ -115,7 +142,90 @@ def trash_file(path: str) -> str | None:
 def restore_file(orig: str, trash: str) -> bool:
     try:
         shutil.move(trash, orig)
-        return True
     except Exception as exc:
         print(f"[restore] {exc}", file=sys.stderr)
         return False
+    man = _load_manifest()
+    if man.pop(os.path.basename(trash), None) is not None:
+        _save_manifest(man)
+    return True
+
+
+def list_trash() -> list[dict]:
+    """Return trashed items, newest first: {name, path, size, mtime, orig}."""
+    man = _load_manifest()
+    out: list[dict] = []
+    try:
+        names = os.listdir(config.TRASH_DIR)
+    except OSError:
+        return out
+    for name in names:
+        if name == os.path.basename(_MANIFEST):
+            continue
+        full = os.path.join(config.TRASH_DIR, name)
+        if not os.path.isfile(full):
+            continue
+        try:
+            st = os.stat(full)
+        except OSError:
+            continue
+        out.append({"name": name, "path": full, "size": st.st_size,
+                    "mtime": st.st_mtime, "orig": man.get(name, {}).get("orig")})
+    out.sort(key=lambda d: d["mtime"], reverse=True)
+    return out
+
+
+def restore_from_trash(trashed_path: str) -> str | None:
+    """Move a trashed file back to its recorded original location."""
+    man = _load_manifest()
+    name = os.path.basename(trashed_path)
+    orig = man.get(name, {}).get("orig")
+    if not orig:
+        return None
+    dest = orig
+    if os.path.exists(dest):
+        stem, ext = os.path.splitext(orig)
+        dest = f"{stem}_restored_{int(time.time())}{ext}"
+    try:
+        os.makedirs(os.path.dirname(dest) or ".", exist_ok=True)
+        shutil.move(trashed_path, dest)
+    except Exception as exc:
+        print(f"[trash-restore] {exc}", file=sys.stderr)
+        return None
+    man.pop(name, None)
+    _save_manifest(man)
+    return dest
+
+
+def purge_item(trashed_path: str) -> bool:
+    """Permanently delete one trashed file."""
+    try:
+        os.remove(trashed_path)
+    except OSError as exc:
+        print(f"[trash-purge] {exc}", file=sys.stderr)
+        return False
+    man = _load_manifest()
+    if man.pop(os.path.basename(trashed_path), None) is not None:
+        _save_manifest(man)
+    return True
+
+
+def empty_trash() -> int:
+    """Permanently delete everything in the trash. Returns the count removed."""
+    n = 0
+    for item in list_trash():
+        if purge_item(item["path"]):
+            n += 1
+    return n
+
+
+def purge_older_than(days: int) -> int:
+    """Permanently delete trashed items older than *days* (0 disables)."""
+    if days <= 0:
+        return 0
+    cutoff = time.time() - days * 86400
+    n = 0
+    for item in list_trash():
+        if item["mtime"] < cutoff and purge_item(item["path"]):
+            n += 1
+    return n
