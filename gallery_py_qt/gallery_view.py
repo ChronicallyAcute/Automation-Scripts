@@ -160,11 +160,8 @@ class GalleryView(QAbstractScrollArea):
         vp = self.viewport()
         vp.setContentsMargins(0, 0, 0, 0)
         vp.setMouseTracking(True)
-        p = vp.palette()
-        p.setColor(QPalette.ColorRole.Window, QColor("#000"))
-        p.setColor(QPalette.ColorRole.Base,   QColor("#000"))
-        vp.setPalette(p)
         vp.setAutoFillBackground(True)
+        self._apply_canvas_palette()
 
         self._model = None
         self._cols = config.DEFAULT_COLS
@@ -220,6 +217,18 @@ class GalleryView(QAbstractScrollArea):
 
     def columns(self) -> int:
         return self._cols
+
+    def _apply_canvas_palette(self) -> None:
+        vp = self.viewport()
+        p = vp.palette()
+        p.setColor(QPalette.ColorRole.Window, QColor(config.CANVAS))
+        p.setColor(QPalette.ColorRole.Base,   QColor(config.CANVAS))
+        vp.setPalette(p)
+
+    def apply_theme(self) -> None:
+        """Re-read themed canvas colours and repaint (live theme switch)."""
+        self._apply_canvas_palette()
+        self.viewport().update()
 
     def set_empty_hint(self, primary: str, secondary: str = "") -> None:
         """Set the message shown in the centre of an empty gallery."""
@@ -383,7 +392,7 @@ class GalleryView(QAbstractScrollArea):
 
     def _paint(self, painter: QPainter) -> None:
         vp_rect = self.viewport().rect()
-        painter.fillRect(vp_rect, QColor("#000"))
+        painter.fillRect(vp_rect, QColor(config.CANVAS))
 
         m = self._model
         if m is None or not self._cells:
@@ -412,12 +421,12 @@ class GalleryView(QAbstractScrollArea):
                 oy = (ch - scaled.height()) // 2
                 painter.drawPixmap(rect.x() + ox, rect.y() + oy, scaled)
             elif idx.data(FailedRole):
-                painter.fillRect(rect, QColor("#000"))
+                painter.fillRect(rect, QColor(config.CELL_BG))
                 painter.setPen(QPen(QColor(config.RED_DIM)))
                 painter.drawText(rect, Qt.AlignmentFlag.AlignCenter,
                                  "⚠\nunreadable")
             else:
-                painter.fillRect(rect, QColor("#000"))
+                painter.fillRect(rect, QColor(config.CELL_BG))
                 painter.setPen(QPen(QColor(config.FG_DIM)))
                 painter.drawText(rect, Qt.AlignmentFlag.AlignCenter, "…")
 

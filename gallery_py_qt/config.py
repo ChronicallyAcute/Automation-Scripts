@@ -33,22 +33,71 @@ GAP          = 6
 MAX_THUMB_PX = 1600
 SCROLL_DEF   = 60
 
-# -- Palette -----------------------------------------------------------------
-BG        = "#0a0a0a"
-PANEL_BG  = "#141414"
-BAR_BG    = "#101010"
-CARD_BG   = "#000000"
-FG_DIM    = "#5a5a5a"
-FG_MID    = "#8a8a8a"
-FG_BRIGHT = "#e8e8e8"
-ACCENT    = "#4a8fd4"
-ACCENT_BG = "#13283d"
-RED       = "#cc4444"
+# -- Palette / themes --------------------------------------------------------
+# Themed colours are set by apply_theme() into module globals, so any code that
+# reads e.g. config.BG at runtime follows the active theme.  CANVAS / CELL_BG
+# drive the gallery grid background; the immersive lightbox / multiview stay
+# black regardless.  Semantic colours (RED*/GREEN/AMBER/OVERLAY_FG) are fixed.
+RED        = "#cc4444"
 RED_BRIGHT = "#ff6666"
-RED_DIM   = "#8a3030"
-GREEN_FG  = "#66bb44"
-AMBER_FG  = "#ccaa33"
+RED_DIM    = "#8a3030"
+GREEN_FG   = "#66bb44"
+AMBER_FG   = "#ccaa33"
 OVERLAY_FG = "#ffffff"
+
+THEMES: dict[str, dict] = {
+    "dark": {
+        "label": "Dark", "dark_ui": True,
+        "BG": "#0a0a0a", "PANEL_BG": "#141414", "BAR_BG": "#101010",
+        "CARD_BG": "#000000", "CANVAS": "#000000", "CELL_BG": "#000000",
+        "FG_DIM": "#5a5a5a", "FG_MID": "#8a8a8a", "FG_BRIGHT": "#e8e8e8",
+        "ACCENT": "#4a8fd4", "ACCENT_BG": "#13283d",
+        "OVERLAY_BAR_BG": "rgba(15,15,15,225)",
+    },
+    "midnight": {
+        "label": "Midnight", "dark_ui": True,
+        "BG": "#000000", "PANEL_BG": "#0a0a0a", "BAR_BG": "#050505",
+        "CARD_BG": "#000000", "CANVAS": "#000000", "CELL_BG": "#000000",
+        "FG_DIM": "#4a4a4a", "FG_MID": "#7a7a7a", "FG_BRIGHT": "#f0f0f0",
+        "ACCENT": "#5a9fe4", "ACCENT_BG": "#10243a",
+        "OVERLAY_BAR_BG": "rgba(0,0,0,235)",
+    },
+    "light": {
+        "label": "Light", "dark_ui": False,
+        "BG": "#ececed", "PANEL_BG": "#ffffff", "BAR_BG": "#e2e2e5",
+        "CARD_BG": "#d8d8dc", "CANVAS": "#e7e7ea", "CELL_BG": "#d6d6da",
+        "FG_DIM": "#9a9a9e", "FG_MID": "#55555a", "FG_BRIGHT": "#1a1a1c",
+        "ACCENT": "#2a6fc4", "ACCENT_BG": "#d3e4f7",
+        "OVERLAY_BAR_BG": "rgba(245,245,247,235)",
+    },
+}
+
+_current_theme = "dark"
+
+
+def theme_name() -> str:
+    return _current_theme
+
+
+def theme_label(name: str) -> str:
+    return THEMES.get(name, THEMES["dark"]).get("label", name)
+
+
+def apply_theme(name: str) -> None:
+    """Set the active theme's colours into module globals."""
+    global _current_theme, BG, PANEL_BG, BAR_BG, CARD_BG, CANVAS, CELL_BG
+    global FG_DIM, FG_MID, FG_BRIGHT, ACCENT, ACCENT_BG, OVERLAY_BAR_BG
+    t = THEMES.get(name) or THEMES["dark"]
+    _current_theme = name if name in THEMES else "dark"
+    BG, PANEL_BG, BAR_BG = t["BG"], t["PANEL_BG"], t["BAR_BG"]
+    CARD_BG, CANVAS, CELL_BG = t["CARD_BG"], t["CANVAS"], t["CELL_BG"]
+    FG_DIM, FG_MID, FG_BRIGHT = t["FG_DIM"], t["FG_MID"], t["FG_BRIGHT"]
+    ACCENT, ACCENT_BG = t["ACCENT"], t["ACCENT_BG"]
+    OVERLAY_BAR_BG = t["OVERLAY_BAR_BG"]
+
+
+# Establish the default palette at import time.
+apply_theme("dark")
 
 # -- Icon glyphs -------------------------------------------------------------
 ICON_HEART_FULL  = "\u2665"

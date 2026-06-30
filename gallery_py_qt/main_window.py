@@ -276,10 +276,11 @@ class MainWindow(QMainWindow):
         super().__init__()
         self.setWindowTitle("Gallery")
         self.resize(1280, 900)
-        self.setStyleSheet(theme.stylesheet())
 
         config.ensure_dirs()
         self._prefs = prefs.load_prefs()
+        config.apply_theme(self._prefs.get("theme", "dark"))
+        self.setStyleSheet(theme.stylesheet())
         # Opt-in housekeeping: drop trashed items older than the configured age.
         purge_days = self._prefs.get("trash_purge_days", 0)
         if isinstance(purge_days, int) and purge_days > 0:
@@ -342,9 +343,7 @@ class MainWindow(QMainWindow):
         # -- Floating control bar ---------------------------------------------
         self._bar = QFrame(central)
         self._bar.setObjectName("OverlayBar")
-        self._bar.setStyleSheet(
-            "QFrame#OverlayBar { background: rgba(15,15,15,225);"
-            " border-radius: 9px; }")
+        self._apply_bar_style()
         h = QHBoxLayout(self._bar)
         h.setContentsMargins(8, 4, 8, 4)
         h.setSpacing(4)
@@ -413,6 +412,20 @@ class MainWindow(QMainWindow):
         self._status = QLabel("Open a folder to begin")
         self._status.setObjectName("StatusBar")
         h.addWidget(self._status)
+
+        self._theme_btn = self._btn("Theme ▾", None)
+        self._theme_btn.setToolTip("Switch colour theme")
+        self._theme_menu = QMenu(self._theme_btn)
+        for name in config.THEMES:
+            act = self._theme_menu.addAction(config.theme_label(name))
+            act.setCheckable(True)
+            act.setData(name)
+            act.setChecked(name == config.theme_name())
+            act.triggered.connect(lambda _=False, n=name: self._set_theme(n))
+        self._theme_btn.setMenu(self._theme_menu)
+        self._theme_btn.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
+        h.addWidget(self._theme_btn)
+
         h.addWidget(self._btn(config.ICON_FULLSCREEN, self._toggle_fs))
 
         # -- Floating undo bar ------------------------------------------------
@@ -449,6 +462,23 @@ class MainWindow(QMainWindow):
         QShortcut(QKeySequence(Qt.Key.Key_Space), self,
                   activated=self._toggle_autoscroll)
         QShortcut(QKeySequence(Qt.Key.Key_H), self, activated=self._toggle_bar)
+
+    # -- theming ---------------------------------------------------------------
+    def _apply_bar_style(self) -> None:
+        self._bar.setStyleSheet(
+            f"QFrame#OverlayBar {{ background: {config.OVERLAY_BAR_BG};"
+            " border-radius: 9px; }")
+
+    def _set_theme(self, name: str) -> None:
+        config.apply_theme(name)
+        self.setStyleSheet(theme.stylesheet())
+        self._apply_bar_style()
+        self._view.apply_theme()
+        for act in self._theme_menu.actions():
+            act.setChecked(act.data() == config.theme_name())
+        self._position_overlays()
+        self._prefs["theme"] = config.theme_name()
+        prefs.save_prefs(self._prefs)
 
     # -- Floating-bar overlay management ---------------------------------------
     def _position_overlays(self) -> None:
