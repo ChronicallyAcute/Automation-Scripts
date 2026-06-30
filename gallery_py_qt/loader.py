@@ -70,8 +70,10 @@ class ThumbnailLoader(QObject):
     def __init__(self, parent: QObject | None = None,
                  max_threads: int | None = None):
         super().__init__(parent)
+        # Cap concurrency at 8: each worker can transiently hold a decoded
+        # image, so 16 threads on big-photo folders was a peak-memory hazard.
         n = (max_threads if max_threads is not None
-             else min(max(4, os.cpu_count() or 4), 16))
+             else min(max(4, os.cpu_count() or 4), 8))
         self._pool = QThreadPool(self)
         self._pool.setMaxThreadCount(n)
         self._inflight: set[tuple[str, int]] = set()

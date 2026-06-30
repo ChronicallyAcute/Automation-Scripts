@@ -14,6 +14,7 @@ Fork improvements over gallery_qt.engine.media:
 from __future__ import annotations
 import os
 import sys
+import threading
 
 os.environ.setdefault("OPENCV_LOG_LEVEL", "ERROR")
 os.environ.setdefault("OPENCV_FFMPEG_LOGLEVEL", "-8")
@@ -22,6 +23,10 @@ from PySide6.QtGui import QImage
 from PIL import Image, ImageSequence
 
 from .. import config
+
+# OpenCV's VideoCapture is not reliably thread-safe; decoding video frames from
+# several loader threads at once can segfault.  Serialise all cv2 access.
+_CV2_LOCK = threading.Lock()
 
 try:
     import cv2  # type: ignore
@@ -134,10 +139,11 @@ def peek_size(path: str) -> tuple[int, int]:
         if not HAS_CV2:
             return (0, 0)
         try:
-            cap = cv2.VideoCapture(path)
-            w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
-            h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-            cap.release()
+            with _CV2_LOCK:
+                cap = cv2.VideoCapture(path)
+                w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+                h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+                cap.release()
             return (w, h)
         except Exception:
             return (0, 0)
@@ -152,10 +158,11 @@ def peek_duration(path: str) -> float:
     if not (is_video(path) and HAS_CV2):
         return 0.0
     try:
-        cap = cv2.VideoCapture(path)
-        frames = cap.get(cv2.CAP_PROP_FRAME_COUNT)
-        fps = cap.get(cv2.CAP_PROP_FPS)
-        cap.release()
+        with _CV2_LOCK:
+            cap = cv2.VideoCapture(path)
+            frames = cap.get(cv2.CAP_PROP_FRAME_COUNT)
+            fps = cap.get(cv2.CAP_PROP_FPS)
+            cap.release()
         return frames / fps if fps > 0 else 0.0
     except Exception:
         return 0.0
@@ -166,29 +173,31 @@ def peek_duration(path: str) -> float:
 def _video_frame(path: str, frac: float = 0.1) -> QImage | None:
     if not HAS_CV2:
         return None
-    cap = cv2.VideoCapture(path)
-    try:
-        fps = cap.get(cv2.CAP_PROP_FPS)
-        total = max(1, int(cap.get(cv2.CAP_PROP_FRAME_COUNT)))
-        if fps and fps > 0:
-            cap.set(cv2.CAP_PROP_POS_MSEC,
-                    max(0.0, (total / fps) * 1000.0 * frac))
-        else:
-            cap.set(cv2.CAP_PROP_POS_FRAMES, max(0, int(total * frac)))
-        ok, frame = cap.read()
-        if not ok:
-            cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
+    # Serialise cv2 access across loader threads (VideoCapture isn't thread-safe).
+    with _CV2_LOCK:
+        cap = cv2.VideoCapture(path)
+        try:
+            fps = cap.get(cv2.CAP_PROP_FPS)
+            total = max(1, int(cap.get(cv2.CAP_PROP_FRAME_COUNT)))
+            if fps and fps > 0:
+                cap.set(cv2.CAP_PROP_POS_MSEC,
+                        max(0.0, (total / fps) * 1000.0 * frac))
+            else:
+                cap.set(cv2.CAP_PROP_POS_FRAMES, max(0, int(total * frac)))
             ok, frame = cap.read()
-        if not ok:
+            if not ok:
+                cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
+                ok, frame = cap.read()
+            if not ok:
+                return None
+            rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+            h, w, _ = rgb.shape
+            qim = QImage(rgb.data, w, h, 3 * w, QImage.Format.Format_RGB888)
+            return qim.copy()
+        except Exception:
             return None
-        rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-        h, w, _ = rgb.shape
-        qim = QImage(rgb.data, w, h, 3 * w, QImage.Format.Format_RGB888)
-        return qim.copy()
-    except Exception:
-        return None
-    finally:
-        cap.release()
+        finally:
+            cap.release()
 
 
 # -- Thumbnail + full-image loading -------------------------------------------
@@ -202,6 +211,11 @@ def load_thumbnail(path: str, max_px: int) -> QImage | None:
         return _scaled_qimage(qim, max_px)
     try:
         with Image.open(path) as im:
+            # draft() lets the JPEG decoder load at 1/2..1/8 scale directly,
+            # so a 24 MP photo never fully expands in RAM just to be thumbnailed
+            # (the main defence against OOM on big-photo folders).  No-op for
+            # non-JPEG formats.
+            im.draft(None, (max_px, max_px))
             alpha = _has_alpha(im)
             im = im.convert("RGBA" if alpha else "RGB")
             w, h = im.size
@@ -219,6 +233,7 @@ def load_full_qimage(path: str, max_px: int = 6000) -> QImage | None:
     """Full-resolution still for the lightbox (clamped to a sane ceiling)."""
     try:
         with Image.open(path) as im:
+            im.draft(None, (max_px, max_px))   # cheap down-scale for huge JPEGs
             alpha = _has_alpha(im)
             im = im.convert("RGBA" if alpha else "RGB")
             w, h = im.size
