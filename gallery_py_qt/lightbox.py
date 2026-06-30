@@ -12,7 +12,8 @@ Changes vs original:
 from __future__ import annotations
 import os
 
-from PySide6.QtCore import Qt, QUrl, Signal, QTimer
+from PySide6.QtCore import (Qt, QUrl, Signal, QTimer, QObject, QRunnable,
+                            QThreadPool)
 from PySide6.QtGui import QPixmap, QImage, QKeySequence, QShortcut
 from PySide6.QtWidgets import (QDialog, QGraphicsView, QGraphicsScene,
                                QGraphicsPixmapItem, QVBoxLayout, QHBoxLayout,
@@ -24,6 +25,32 @@ from PySide6.QtMultimediaWidgets import QVideoWidget
 from . import config
 from .engine import media
 from .seekbar import SeekBar, fmt_time
+
+
+class _FullImageSignals(QObject):
+    ready = Signal(int, str, QImage)   # (generation, path, decoded image)
+
+
+class _FullImageJob(QRunnable):
+    """Decode a full-resolution still off the GUI thread.
+
+    A generation token lets the lightbox ignore results that arrive after the
+    user has already navigated on, so rapid arrow-key paging never flashes a
+    stale image.
+    """
+    def __init__(self, gen: int, path: str, signals: _FullImageSignals):
+        super().__init__()
+        self._gen = gen
+        self._path = path
+        self._signals = signals
+
+    def run(self) -> None:
+        try:
+            qim = media.load_full_qimage(self._path)
+        except Exception:
+            qim = None
+        self._signals.ready.emit(self._gen, self._path,
+                                 qim if qim is not None else QImage())
 
 
 class _ImageView(QGraphicsView):
@@ -175,6 +202,26 @@ class Lightbox(QDialog):
         self._player.durationChanged.connect(self._on_dur)
         self._scrub.seeked.connect(self._on_seek)
 
+        # Async full-image decoding so large images don't freeze the UI.
+        self._img_pool = QThreadPool(self)
+        self._img_pool.setMaxThreadCount(2)
+        self._img_gen = 0
+        self._loaded_img_path: str | None = None
+        self._img_sig = _FullImageSignals(self)
+        self._img_sig.ready.connect(self._on_full_image)
+
+        # "Loading…" overlay, shown only if a decode takes a noticeable moment.
+        self._loading_lbl = QLabel("Loading…", self)
+        self._loading_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._loading_lbl.setStyleSheet(
+            f"color: {config.FG_MID}; background: rgba(0,0,0,140);"
+            " border-radius: 8px; padding: 10px 18px; font-size: 14px;")
+        self._loading_lbl.hide()
+        self._loading_timer = QTimer(self)
+        self._loading_timer.setSingleShot(True)
+        self._loading_timer.setInterval(150)
+        self._loading_timer.timeout.connect(self._show_loading)
+
         self._install_shortcuts()
 
     def _tb(self, glyph, cb, layout=None, checkable=False) -> QToolButton:
@@ -294,6 +341,11 @@ class Lightbox(QDialog):
             f"QToolButton {{ color: {config.FG_MID}; font-size: 15px; border: none;"
             " background: rgba(0,0,0,90); border-radius: 4px; padding: 4px 8px; }")
         if media.is_video(path):
+            # Cancel any in-flight image decode and clear its loading state.
+            self._img_gen += 1
+            self._loaded_img_path = None
+            self._loading_timer.stop()
+            self._loading_lbl.hide()
             self._stack.setCurrentIndex(1)
             self._transport.setVisible(True)
             self._player.setSource(QUrl.fromLocalFile(path))
@@ -304,10 +356,37 @@ class Lightbox(QDialog):
             self._player.stop()
             self._stack.setCurrentIndex(0)
             self._transport.setVisible(False)
-            qim = media.load_full_qimage(path)
-            if qim is not None:
-                self._img.set_pixmap(QPixmap.fromImage(qim))
+            # Skip re-decoding when re-showing the same image (e.g. after a
+            # favourite toggle); otherwise decode off-thread.
+            if path != self._loaded_img_path:
+                self._img_gen += 1
+                self._loaded_img_path = path
+                self._loading_timer.start()
+                self._img_pool.start(
+                    _FullImageJob(self._img_gen, path, self._img_sig))
         self._position_overlays()
+
+    def _on_full_image(self, gen: int, path: str, qim: QImage) -> None:
+        if gen != self._img_gen:
+            return        # superseded by a later navigation
+        self._loading_timer.stop()
+        self._loading_lbl.hide()
+        if qim is not None and not qim.isNull():
+            self._img.set_pixmap(QPixmap.fromImage(qim))
+
+    def _show_loading(self) -> None:
+        if self._stack.currentIndex() != 0:
+            return
+        self._loading_lbl.adjustSize()
+        self._position_loading()
+        self._loading_lbl.show()
+        self._loading_lbl.raise_()
+
+    def _position_loading(self) -> None:
+        self._loading_lbl.adjustSize()
+        lw, lh = self._loading_lbl.width(), self._loading_lbl.height()
+        self._loading_lbl.move(max(0, (self.width() - lw) // 2),
+                               max(0, (self.height() - lh) // 2))
 
     def resizeEvent(self, e) -> None:
         super().resizeEvent(e)
@@ -322,6 +401,8 @@ class Lightbox(QDialog):
             th = self._transport.sizeHint().height()
             self._transport.setGeometry(0, h - th, w, max(th, 1))
             self._transport.raise_()
+        if self._loading_lbl.isVisible():
+            self._position_loading()
         if self._help.isVisible():
             self._help.adjustSize()
             hw, hh = self._help.width(), self._help.height()
@@ -424,4 +505,7 @@ class Lightbox(QDialog):
 
     def closeEvent(self, e) -> None:
         self._player.stop()
+        # Invalidate any in-flight decode so a late result is ignored.
+        self._img_gen += 1
+        self._loading_timer.stop()
         super().closeEvent(e)
