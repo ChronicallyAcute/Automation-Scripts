@@ -66,12 +66,19 @@ def _make_pause_icon(color: QColor, px: int = 32) -> QIcon:
 
 
 class _AspectLabel(QLabel):
-    """QLabel that keeps a source pixmap and re-fits it on every resize."""
+    """QLabel that keeps a source pixmap and re-fits it on every resize.
+
+    Fit mode (default) scales to keep the whole image visible (letterboxed);
+    fill mode scales to cover the whole label and crops the overflow.
+    """
     def __init__(self, parent=None):
         super().__init__(parent)
         self._src = None
+        self._fill = False
         self.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.setMinimumSize(1, 1)
+        # Clip an oversized (cover-scaled) pixmap to the label bounds.
+        self.setScaledContents(False)
         p = self.palette()
         p.setColor(QPalette.ColorRole.Window, QColor("#000"))
         self.setPalette(p)
@@ -85,13 +92,25 @@ class _AspectLabel(QLabel):
         self._src = None
         self.clear()
 
+    def set_fill(self, fill: bool) -> None:
+        self._fill = fill
+        self._apply()
+
     def _apply(self) -> None:
         if self._src is not None and not self._src.isNull():
             sz = self.size()
             if sz.width() > 0 and sz.height() > 0:
-                self.setPixmap(self._src.scaled(
-                    sz, Qt.AspectRatioMode.KeepAspectRatio,
-                    Qt.TransformationMode.SmoothTransformation))
+                mode = (Qt.AspectRatioMode.KeepAspectRatioByExpanding
+                        if self._fill else Qt.AspectRatioMode.KeepAspectRatio)
+                scaled = self._src.scaled(
+                    sz, mode, Qt.TransformationMode.SmoothTransformation)
+                if self._fill and (scaled.width() > sz.width()
+                                   or scaled.height() > sz.height()):
+                    # Centre-crop the overflow so the cover fill is exact.
+                    x = max(0, (scaled.width() - sz.width()) // 2)
+                    y = max(0, (scaled.height() - sz.height()) // 2)
+                    scaled = scaled.copy(x, y, sz.width(), sz.height())
+                self.setPixmap(scaled)
 
     def resizeEvent(self, e):
         super().resizeEvent(e)
@@ -126,6 +145,7 @@ class _Slot(QWidget):
         self._is_pinned = False
         self._speed_idx = 2          # index into _SPEEDS → 1.0×
         self._drag_start = None
+        self._fill = False           # False = fit (letterbox), True = cover-crop
         self.setAcceptDrops(True)
 
         p = self.palette()
@@ -308,12 +328,17 @@ class _Slot(QWidget):
         if ns.isEmpty() or ns.width() <= 0 or ns.height() <= 0:
             disp_w, disp_h = float(vw), float(vh)
         else:
-            scale = min(vw / ns.width(), vh / ns.height())
+            # Fill = cover (scale up, crop overflow); fit = contain (letterbox).
+            if self._fill:
+                scale = max(vw / ns.width(), vh / ns.height())
+            else:
+                scale = min(vw / ns.width(), vh / ns.height())
             disp_w, disp_h = ns.width() * scale, ns.height() * scale
         self._video_item.setSize(QSizeF(disp_w, disp_h))
         self._video_item.setPos((vw - disp_w) / 2.0, (vh - disp_h) / 2.0)
-        self._scene.setSceneRect(0, 0, vw, vh)
-        self._disp = QSizeF(disp_w, disp_h)
+        self._scene.setSceneRect(0, 0, vw, vh)   # clips any cover overflow
+        # Overlays sit inside the visible area — the whole tile when filling.
+        self._disp = QSizeF(min(disp_w, float(vw)), min(disp_h, float(vh)))
         self._position_overlays()
 
     def _img_displayed_rect(self) -> tuple[int, int, int, int]:
@@ -379,6 +404,14 @@ class _Slot(QWidget):
     @property
     def row(self) -> int:
         return self._row
+
+    def set_fill(self, fill: bool) -> None:
+        """Toggle cover-fill (crop) vs fit (letterbox) for this tile's media."""
+        self._fill = fill
+        self._img.set_fill(fill)
+        if self._is_video:
+            self._fit_video()
+        self._position_overlays()
 
     # -- content ---------------------------------------------------------------
     def clear(self) -> None:
@@ -603,6 +636,10 @@ class MultiView(QWidget):
         self._model = model
         self._favs  = favorites
         self._layout_slots = 3
+        # Layout override: None = auto by orientation, else forced slot count
+        # (3 = 3×1, 4 = 2×2).  Fill mode crops media to cover each tile.
+        self._forced_layout = None
+        self._fill_mode = False
 
         # Orientation-partitioned path lists.
         self._portrait_paths:  list[str] = []
@@ -712,6 +749,15 @@ class MultiView(QWidget):
             f"color: {config.FG_MID}; background: rgba(0,0,0,90);"
             " border-radius: 4px; padding: 2px 8px;")
 
+        # Layout picker (Auto / 3×1 / 2×2) and Fit/Fill toggle
+        self._layout_btn = self._chrome_btn(
+            "Auto", self._cycle_layout,
+            "Tile layout: Auto / 3×1 / 2×2 (L)")
+        self._layout_btn.setFixedWidth(56)
+        self._fill_btn = self._chrome_btn(
+            "Fit", self._toggle_fill, "Fit (letterbox) / Fill (crop) tiles (F)")
+        self._fill_btn.setFixedWidth(46)
+
         # Orientation toggle: switch between portrait and landscape groups
         self._orient_btn = self._chrome_btn(
             "↔", self._switch_orientation,
@@ -726,6 +772,8 @@ class MultiView(QWidget):
         asl.addWidget(self._next_btn)
         asl.addWidget(self._counter)
         asl.addStretch(1)
+        asl.addWidget(self._layout_btn)
+        asl.addWidget(self._fill_btn)
         asl.addWidget(self._orient_btn)
         self._root.addWidget(self._autoscroll_widget)
 
@@ -738,6 +786,10 @@ class MultiView(QWidget):
                   activated=self._toggle_autoscroll)
         QShortcut(QKeySequence(Qt.Key.Key_S),     self,
                   activated=self._toggle_mode)
+        QShortcut(QKeySequence(Qt.Key.Key_L),     self,
+                  activated=self._cycle_layout)
+        QShortcut(QKeySequence(Qt.Key.Key_F),     self,
+                  activated=self._toggle_fill)
         QShortcut(QKeySequence("Ctrl+M"),          self,
                   activated=self._unmute_all)
 
@@ -802,7 +854,9 @@ class MultiView(QWidget):
         self._current_paths = portrait if was_portrait else landscape
 
     def _detect_layout(self) -> int:
-        """Return 3 for portrait 3×1, 4 for landscape 2×2."""
+        """Forced layout if set, else 3 for portrait 3×1 / 4 for landscape 2×2."""
+        if self._forced_layout in (3, 4):
+            return self._forced_layout
         return 3 if (self._current_paths is self._portrait_paths) else 4
 
     # -- layout / slot management ----------------------------------------------
@@ -839,6 +893,7 @@ class MultiView(QWidget):
             slot.reordered.connect(self._on_reorder)
             slot.rotated.connect(self._on_slot_rotate)
             slot.pinned.connect(lambda *_: None)
+            slot.set_fill(self._fill_mode)
             self._grid.addWidget(slot, r, c)
             self._slots.append(slot)
         # Extra slot for the side-scroll right-edge buffer (not in grid layout)
@@ -850,6 +905,7 @@ class MultiView(QWidget):
         self._ss_buf.trashed.connect(self._on_slot_trash)
         self._ss_buf.reordered.connect(self._on_reorder)
         self._ss_buf.rotated.connect(self._on_slot_rotate)
+        self._ss_buf.set_fill(self._fill_mode)
         self._ss_buf.hide()
         used_cols = 3 if n == 3 else 2
         used_rows = 1 if n == 3 else 2
@@ -1090,6 +1146,28 @@ class MultiView(QWidget):
         step = sum(1 for s in self._slots if not s.is_pinned) or 1
         nxt = self._start + step
         self._render(0 if nxt >= len(self._current_paths) else nxt)
+
+    def _cycle_layout(self) -> None:
+        """Cycle the tile layout: Auto → 3×1 → 2×2 → Auto."""
+        order = [None, 3, 4]
+        cur = order.index(self._forced_layout) if self._forced_layout in order else 0
+        self._forced_layout = order[(cur + 1) % len(order)]
+        self._update_layout_btn()
+        self._stop_slideshow()
+        self._render(self._start)
+
+    def _update_layout_btn(self) -> None:
+        self._layout_btn.setText(
+            {None: "Auto", 3: "3×1", 4: "2×2"}[self._forced_layout])
+
+    def _toggle_fill(self) -> None:
+        """Toggle cover-fill (crop to fill tiles) vs fit (letterbox)."""
+        self._fill_mode = not self._fill_mode
+        self._fill_btn.setText("Fill" if self._fill_mode else "Fit")
+        for slot in self._slots:
+            slot.set_fill(self._fill_mode)
+        if self._ss_buf is not None:
+            self._ss_buf.set_fill(self._fill_mode)
 
     def _toggle_mode(self) -> None:
         """Switch slideshow style (Set ⇄ Side-scroll); stops any active run."""
