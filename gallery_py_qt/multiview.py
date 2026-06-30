@@ -10,11 +10,13 @@ Layout rules
   • Orientation switch button lets the user jump to the other group.
   • Switching layout (3×1 ↔ 2×2) preserves pinned media.
 
-Auto-scroll (side-scroll mode)
-  • Activating auto-scroll starts a smooth continuous left-scroll: tiles
-    glide across the screen at a configurable speed and wrap seamlessly.
-  • The speed spin-box controls px per frame (0.5–5.0 px @ ~60 fps).
-  • Prev / Next buttons stop the scroll and page manually.
+Auto-slideshow (two switchable styles, via the mode button / S key)
+  • Set         — holds the current 3×1 / 2×2 grid for N seconds, then jumps
+                  to the next set (paged advance, wrapping at the end).
+  • Side-scroll — a smooth continuous left-scroll: tiles glide across the
+                  screen at a configurable speed and wrap seamlessly.
+  • The spin-box adapts to the active style (seconds for Set, speed for
+    Side-scroll).  Prev / Next stop the slideshow and page manually.
 
 Audio
   • Each slot has its own QAudioOutput, muted by default.
@@ -401,9 +403,9 @@ class _Slot(QWidget):
             config.ICON_HEART_FULL if is_fav else config.ICON_HEART_EMPTY)
         self._fav_btn.setStyleSheet(
             f"QToolButton {{ color: {config.RED}; background: rgba(0,0,0,90);"
-            " border-radius:4px; font-size:15px; padding:3px 6px; }}" if is_fav else
+            " border-radius:4px; font-size:15px; padding:3px 6px; }" if is_fav else
             f"QToolButton {{ color: {config.OVERLAY_FG}; background: rgba(0,0,0,90);"
-            " border-radius:4px; font-size:15px; padding:3px 6px; }}")
+            " border-radius:4px; font-size:15px; padding:3px 6px; }")
         if media.is_video(path):
             self._is_video = True
             self._pm = QPixmap()
@@ -610,11 +612,17 @@ class MultiView(QWidget):
         self._current_paths:   list[str] = []
         self._start = 0
 
+        # Auto-slideshow state.  Two styles share one play/pause button and one
+        # spin-box: "set" pages the whole grid on a timer; "scroll" side-scrolls.
+        self._slideshow_mode = "set"     # "set" | "scroll"
+        self._set_interval_s = 4         # remembered seconds-per-set
+        self._scroll_level   = 3         # remembered side-scroll speed level
+
         # Side-scroll state
         self._ss_slot_order: list[_Slot] = []   # non-empty only when scrolling
         self._ss_head_idx = 0     # index in _current_paths of the leftmost slot
         self._ss_px = 0.0         # fractional px scrolled into current position
-        self._ss_speed = 1.5      # px per timer tick
+        self._ss_speed = self._scroll_level * 0.5   # px per timer tick
         self._ss_buf: "_Slot | None" = None
         self._slot_grid_pos: list[tuple[int, int]] = []
 
@@ -666,6 +674,10 @@ class MultiView(QWidget):
         self._ss_timer.setInterval(16)
         self._ss_timer.timeout.connect(self._ss_tick)
 
+        # Set-slideshow paged-advance timer (interval set on start).
+        self._set_timer = QTimer(self)
+        self._set_timer.timeout.connect(self._advance_set)
+
         # Bottom navigation / autoscroll bar
         self._autoscroll_widget = QWidget()
         self._autoscroll_widget.setStyleSheet(
@@ -674,25 +686,26 @@ class MultiView(QWidget):
         asl.setContentsMargins(8, 6, 8, 6)
         asl.setSpacing(6)
 
+        # Slideshow-style toggle (Set ⇄ Side-scroll)
+        self._mode_btn = self._chrome_btn(
+            "", self._toggle_mode, "Slideshow style (S)")
+        self._mode_btn.setFixedWidth(86)
+
         self._prev_btn = self._chrome_btn(
             config.ICON_PREV, self.prev_page, "Previous page (←)", big=True)
         self._autoscroll_btn = self._chrome_btn(
-            config.ICON_PLAY, self._toggle_autoscroll, "Toggle side-scroll (A)")
+            config.ICON_PLAY, self._toggle_autoscroll, "Play / pause slideshow (A)")
         self._autoscroll_spin = QSpinBox()
-        self._autoscroll_spin.setRange(1, 10)
-        self._autoscroll_spin.setValue(3)
-        self._autoscroll_spin.setSuffix("×")
         self._autoscroll_spin.setFixedWidth(58)
-        self._autoscroll_spin.setToolTip("Scroll speed (1×– 10×)")
         self._autoscroll_spin.setStyleSheet(
             f"QSpinBox {{ color: {config.FG_BRIGHT}; background: rgba(0,0,0,90);"
             f" border: 1px solid {config.FG_DIM}; border-radius: 4px;"
             " padding: 2px 4px; font-size: 12px; }"
             " QSpinBox::up-button, QSpinBox::down-button"
             f" {{ background: rgba(0,0,0,60); border: none; width: 14px; }}")
-        self._autoscroll_spin.valueChanged.connect(self._on_autoscroll_speed_changed)
-        # Initialize speed from default spin value
-        self._ss_speed = self._autoscroll_spin.value() * 0.5
+        self._autoscroll_spin.valueChanged.connect(self._on_autoscroll_spin_changed)
+        self._apply_mode_to_spin()
+        self._update_mode_btn()
 
         self._next_btn = self._chrome_btn(
             config.ICON_NEXT, self.next_page, "Next page (→)", big=True)
@@ -708,6 +721,7 @@ class MultiView(QWidget):
         self._orient_btn.setFixedWidth(46)
 
         asl.addStretch(1)
+        asl.addWidget(self._mode_btn)
         asl.addWidget(self._prev_btn)
         asl.addWidget(self._autoscroll_btn)
         asl.addWidget(self._autoscroll_spin)
@@ -724,6 +738,8 @@ class MultiView(QWidget):
         QShortcut(QKeySequence(Qt.Key.Key_Right), self, activated=self.next_page)
         QShortcut(QKeySequence(Qt.Key.Key_A),     self,
                   activated=self._toggle_autoscroll)
+        QShortcut(QKeySequence(Qt.Key.Key_S),     self,
+                  activated=self._toggle_mode)
         QShortcut(QKeySequence("Ctrl+M"),          self,
                   activated=self._unmute_all)
 
@@ -735,8 +751,7 @@ class MultiView(QWidget):
         Clears any previous scroll / pin state so each gallery→multiview
         transition starts fresh.
         """
-        self._cleanup_sidescroll()
-        self._autoscroll_btn.setText(config.ICON_PLAY)
+        self._stop_slideshow()
 
         for s in self._slots:
             if s.is_pinned:
@@ -763,8 +778,7 @@ class MultiView(QWidget):
 
     def stop_autoscroll(self) -> None:
         """Called by main window when navigating away from multi-view."""
-        self._cleanup_sidescroll()
-        self._autoscroll_btn.setText(config.ICON_PLAY)
+        self._stop_slideshow()
 
     # -- orientation lists -----------------------------------------------------
 
@@ -995,9 +1009,7 @@ class MultiView(QWidget):
     # -- navigation ------------------------------------------------------------
 
     def next_page(self) -> None:
-        if self._ss_timer.isActive():
-            self._cleanup_sidescroll()
-            self._autoscroll_btn.setText(config.ICON_PLAY)
+        self._stop_slideshow()
         if not self._current_paths:
             return
         step = sum(1 for s in self._slots if not s.is_pinned) or 1
@@ -1005,9 +1017,7 @@ class MultiView(QWidget):
         self._render(0 if nxt >= len(self._current_paths) else nxt)
 
     def prev_page(self) -> None:
-        if self._ss_timer.isActive():
-            self._cleanup_sidescroll()
-            self._autoscroll_btn.setText(config.ICON_PLAY)
+        self._stop_slideshow()
         if not self._current_paths:
             return
         step = sum(1 for s in self._slots if not s.is_pinned) or 1
@@ -1040,18 +1050,89 @@ class MultiView(QWidget):
             w.raise_()
             w.activateWindow()
 
+    # -- auto-slideshow (set / side-scroll) ------------------------------------
+
+    def _slideshow_active(self) -> bool:
+        return self._ss_timer.isActive() or self._set_timer.isActive()
+
     def _toggle_autoscroll(self) -> None:
+        """Play / pause the slideshow in whichever style is selected."""
+        if self._slideshow_active():
+            self._stop_slideshow()
+        else:
+            self._start_slideshow()
+
+    def _start_slideshow(self) -> None:
+        if not self._current_paths:
+            return
+        if self._slideshow_mode == "scroll":
+            self._start_sidescroll()
+            active = self._ss_timer.isActive()
+        else:
+            self._set_timer.start(self._set_interval_s * 1000)
+            active = True
+        if active:
+            self._autoscroll_btn.setText(config.ICON_PAUSE)
+
+    def _stop_slideshow(self) -> None:
+        """Stop both slideshow styles and restore the play icon (idempotent)."""
+        self._set_timer.stop()
         if self._ss_timer.isActive():
-            self._autoscroll_btn.setText(config.ICON_PLAY)
             self._cleanup_sidescroll()
             self._render(self._ss_head_idx)
-        else:
-            self._start_sidescroll()
-            if self._ss_timer.isActive():
-                self._autoscroll_btn.setText(config.ICON_PAUSE)
+        self._autoscroll_btn.setText(config.ICON_PLAY)
 
-    def _on_autoscroll_speed_changed(self, val: int) -> None:
-        self._ss_speed = val * 0.5   # 0.5–5.0 px per 16 ms tick
+    def _advance_set(self) -> None:
+        """Paged advance for the 'set' slideshow style (wraps at the end)."""
+        if not self._current_paths:
+            self._set_timer.stop()
+            return
+        step = sum(1 for s in self._slots if not s.is_pinned) or 1
+        nxt = self._start + step
+        self._render(0 if nxt >= len(self._current_paths) else nxt)
+
+    def _toggle_mode(self) -> None:
+        """Switch slideshow style (Set ⇄ Side-scroll); stops any active run."""
+        self._stop_slideshow()
+        self._slideshow_mode = (
+            "scroll" if self._slideshow_mode == "set" else "set")
+        self._apply_mode_to_spin()
+        self._update_mode_btn()
+
+    def _update_mode_btn(self) -> None:
+        if self._slideshow_mode == "set":
+            self._mode_btn.setText("⊞ Set")
+            self._mode_btn.setToolTip(
+                "Style: paged sets (3×1 / 2×2) — click for side-scroll (S)")
+        else:
+            self._mode_btn.setText("⇆ Scroll")
+            self._mode_btn.setToolTip(
+                "Style: smooth side-scroll — click for paged sets (S)")
+
+    def _apply_mode_to_spin(self) -> None:
+        """Reconfigure the spin-box for the active style's units."""
+        sp = self._autoscroll_spin
+        sp.blockSignals(True)
+        if self._slideshow_mode == "set":
+            sp.setRange(1, 60)
+            sp.setSuffix(" s")
+            sp.setValue(self._set_interval_s)
+            sp.setToolTip("Seconds each set is shown")
+        else:
+            sp.setRange(1, 10)
+            sp.setSuffix("×")
+            sp.setValue(self._scroll_level)
+            sp.setToolTip("Side-scroll speed (1×–10×)")
+        sp.blockSignals(False)
+
+    def _on_autoscroll_spin_changed(self, val: int) -> None:
+        if self._slideshow_mode == "set":
+            self._set_interval_s = val
+            if self._set_timer.isActive():
+                self._set_timer.start(val * 1000)
+        else:
+            self._scroll_level = val
+            self._ss_speed = val * 0.5   # 0.5–5.0 px per 16 ms tick
 
     def _unmute_all(self) -> None:
         """Unmute every video slot currently displayed (Ctrl+M)."""
@@ -1062,9 +1143,7 @@ class MultiView(QWidget):
 
     def _switch_orientation(self) -> None:
         """Toggle between portrait and landscape orientation groups."""
-        if self._ss_timer.isActive():
-            self._cleanup_sidescroll()
-            self._autoscroll_btn.setText(config.ICON_PLAY)
+        self._stop_slideshow()
         if self._current_paths is self._portrait_paths:
             if self._landscape_paths:
                 self._current_paths = self._landscape_paths
@@ -1108,18 +1187,14 @@ class MultiView(QWidget):
     def _on_slot_trash(self, path: str) -> None:
         if path:
             self.trashed.emit(path)
-            if self._ss_timer.isActive():
-                self._cleanup_sidescroll()
-                self._autoscroll_btn.setText(config.ICON_PLAY)
+            self._stop_slideshow()
             self._refresh_orientation_lists()
             self._update_orient_btn()
             start = min(self._start, max(0, len(self._current_paths) - 1))
             self._render(start)
 
     def _on_reorder(self, src_path: str, dst_path: str) -> None:
-        if self._ss_timer.isActive():
-            self._cleanup_sidescroll()
-            self._autoscroll_btn.setText(config.ICON_PLAY)
+        self._stop_slideshow()
         cur_path = (self._current_paths[self._start]
                     if self._current_paths and self._start < len(self._current_paths)
                     else None)
