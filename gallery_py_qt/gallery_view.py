@@ -230,6 +230,13 @@ class GalleryView(QAbstractScrollArea):
         self._apply_canvas_palette()
         self.viewport().update()
 
+    def forget_path_dims(self, path: str) -> None:
+        """Drop a cached pixmap-derived aspect ratio (e.g. after a rotation)
+        so the masonry layout re-measures the cell from fresh data."""
+        if self._pm_dims.pop(path, None) is not None:
+            if not self._layout_timer.isActive():
+                self._layout_timer.start()
+
     def set_empty_hint(self, primary: str, secondary: str = "") -> None:
         """Set the message shown in the centre of an empty gallery."""
         self._empty_primary = primary

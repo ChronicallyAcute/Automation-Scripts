@@ -96,6 +96,7 @@ class Lightbox(QDialog):
     trashed     = Signal(str)
     requestInfo = Signal(str)
     openMulti   = Signal(int)
+    rotateRequested = Signal(int)   # degrees clockwise (+90 / -90)
 
     _SPEEDS = (0.25, 0.5, 1.0, 1.25, 1.5, 1.75, 2.0)
 
@@ -147,8 +148,10 @@ class Lightbox(QDialog):
         bar.addWidget(self._counter)
         bar.addStretch(1)
         self._fav_btn = self._tb(config.ICON_HEART_EMPTY, self._toggle_fav)
-        self._tb(config.ICON_ROTATE_CCW, lambda: self._img.rotate_by(-90), bar)
-        self._tb(config.ICON_ROTATE_CW,  lambda: self._img.rotate_by(90), bar)
+        self._tb(config.ICON_ROTATE_CCW,
+                 lambda: self.rotateRequested.emit(-90), bar)
+        self._tb(config.ICON_ROTATE_CW,
+                 lambda: self.rotateRequested.emit(90), bar)
         self._tb(config.ICON_INFO, lambda: self.requestInfo.emit(self._path()), bar)
         self._tb(config.ICON_GRID, lambda: self.openMulti.emit(self._row), bar)
         self._tb("?", self._toggle_help, bar).setToolTip("Keyboard shortcuts (?)")
@@ -411,6 +414,14 @@ class Lightbox(QDialog):
 
     def _path(self) -> str | None:
         return self._model.path_at(self._row)
+
+    def current_path(self) -> str | None:
+        return self._path()
+
+    def reload_current(self) -> None:
+        """Force a fresh decode of the current item (e.g. after disk rotation)."""
+        self._loaded_img_path = None
+        self.show_row(self._row)
 
     def prev(self) -> None:
         if self._hold.isChecked():

@@ -105,6 +105,7 @@ class _Slot(QWidget):
     enlarge    = Signal(int)        # model row
     pinned     = Signal(int)        # slot index
     reordered  = Signal(str, str)   # (dragged path, drop-target path)
+    rotated    = Signal(str)        # path — request permanent rotation
 
     _SPEEDS = (0.25, 0.5, 1.0, 1.25, 1.5, 1.75, 2.0)
 
@@ -455,14 +456,10 @@ class _Slot(QWidget):
         self.pinned.emit(self._idx)
 
     def _rotate(self) -> None:
-        if self._pm.isNull():
-            return
-        from PySide6.QtGui import QTransform
-        self._rotation = (self._rotation + 90) % 360
-        self._pm = self._pm.transformed(
-            QTransform().rotate(90),
-            Qt.TransformationMode.SmoothTransformation)
-        self._img.set_source(self._pm)
+        # Permanent rotation is handled by the main window (rewrites the file
+        # and reloads the slot); video tiles have no still to rotate.
+        if self._path and not self._is_video:
+            self.rotated.emit(self._path)
 
     def _toggle_fav(self) -> None:
         if self._path:
@@ -597,6 +594,7 @@ class MultiView(QWidget):
     """
     favToggled     = Signal(str)   # path
     trashed        = Signal(str)   # path
+    rotated        = Signal(str)   # path — request permanent rotation
     openLightbox   = Signal(int)   # row
     closeRequested = Signal()      # user wants to go back to gallery
 
@@ -839,6 +837,7 @@ class MultiView(QWidget):
             slot.favToggled.connect(self._on_slot_fav)
             slot.trashed.connect(self._on_slot_trash)
             slot.reordered.connect(self._on_reorder)
+            slot.rotated.connect(self._on_slot_rotate)
             slot.pinned.connect(lambda *_: None)
             self._grid.addWidget(slot, r, c)
             self._slots.append(slot)
@@ -850,6 +849,7 @@ class MultiView(QWidget):
         self._ss_buf.favToggled.connect(self._on_slot_fav)
         self._ss_buf.trashed.connect(self._on_slot_trash)
         self._ss_buf.reordered.connect(self._on_reorder)
+        self._ss_buf.rotated.connect(self._on_slot_rotate)
         self._ss_buf.hide()
         used_cols = 3 if n == 3 else 2
         used_rows = 1 if n == 3 else 2
@@ -1183,6 +1183,25 @@ class MultiView(QWidget):
             self.favToggled.emit(path)
             if not self._ss_timer.isActive():
                 self._render(self._start)
+
+    def _on_slot_rotate(self, path: str) -> None:
+        if path:
+            self.rotated.emit(path)
+
+    def reload_path(self, path: str) -> None:
+        """Reload any slot showing `path` after its pixels changed on disk.
+
+        Re-partitions orientation groups (a 90° turn flips portrait↔landscape)
+        and re-decodes the rotated file into every slot currently showing it.
+        """
+        self._refresh_orientation_lists()
+        self._update_orient_btn()
+        targets = list(self._slots)
+        if self._ss_buf is not None:
+            targets.append(self._ss_buf)
+        for slot in targets:
+            if slot._path == path:
+                slot.show_item(slot._row, path)
 
     def _on_slot_trash(self, path: str) -> None:
         if path:

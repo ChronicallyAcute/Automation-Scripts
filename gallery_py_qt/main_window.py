@@ -727,7 +727,33 @@ class MainWindow(QMainWindow):
     def _on_grid_rotate(self, row: int) -> None:
         path = self._model.path_at(row)
         if path:
-            self._model.rotate_path(path)
+            self._rotate_path(path, 90)
+
+    def _rotate_path(self, path: str, degrees: int) -> bool:
+        """Permanently rotate an image file on disk and refresh every view.
+
+        Returns True on success so the calling viewer can reload its own
+        full-resolution display.  Videos are not supported.
+        """
+        from .engine import media as _media
+        if _media.is_video(path):
+            self._status.setText("Rotating video files isn't supported")
+            return False
+        if not _media.rotate_image_file(path, degrees):
+            self._status.setText(f"Couldn't rotate {os.path.basename(path)}")
+            return False
+        # Invalidate cached pixels and the masonry aspect ratio, then push the
+        # rotated file's true dimensions so the grid reflows immediately.
+        self._model.reload_path(path)
+        self._view.forget_path_dims(path)
+        w, h = _media.peek_size(path)
+        if w > 0 and h > 0:
+            self._dims_done_for.add(path)
+            self._model.set_dims({path: (w, h)})
+        # Keep a favourite's Downloads mirror in sync with the rotated original.
+        self._favs.resync_mirror(path)
+        self._status.setText(f"Rotated {os.path.basename(path)}")
+        return True
 
     def _on_grid_trash(self, row: int) -> None:
         path = self._model.path_at(row)
@@ -812,12 +838,19 @@ class MainWindow(QMainWindow):
             self._prefs["trash_purge_days"] = dlg.auto_purge_days
             prefs.save_prefs(self._prefs)
 
+    def _rotate_from_lightbox(self, lb, degrees: int) -> None:
+        path = lb.current_path()
+        if path and self._rotate_path(path, degrees):
+            lb.reload_current()
+
     # -- lightbox / multiview --------------------------------------------------
     def _open_lightbox(self, row: int) -> None:
         lb = Lightbox(self._model, self._favs, self)
         lb.favToggled.connect(self._toggle_fav_path)
         lb.trashed.connect(self._trash_path)
         lb.requestInfo.connect(lambda p: InfoDialog(p, self).exec())
+        lb.rotateRequested.connect(
+            lambda deg, _lb=lb: self._rotate_from_lightbox(_lb, deg))
         # Close the lightbox before switching to the embedded multiview panel.
         lb.openMulti.connect(lambda r, _lb=lb: (_lb.close(), self._open_multiview(r)))
         lb.showFullScreen()
@@ -830,6 +863,7 @@ class MainWindow(QMainWindow):
             self._mv = MultiView(self._model, self._favs, self)
             self._mv.favToggled.connect(self._toggle_fav_path)
             self._mv.trashed.connect(self._trash_path)
+            self._mv.rotated.connect(self._rotate_from_multiview)
             self._mv.openLightbox.connect(self._open_lightbox)
             self._mv.closeRequested.connect(self._close_multiview)
             self._content_stack.addWidget(self._mv)
@@ -838,6 +872,10 @@ class MainWindow(QMainWindow):
         self._mv.open(start_row)
         self._content_stack.setCurrentWidget(self._mv)
         self._bar.hide()
+
+    def _rotate_from_multiview(self, path: str) -> None:
+        if self._rotate_path(path, 90) and self._mv is not None:
+            self._mv.reload_path(path)
 
     def _close_multiview(self) -> None:
         if self._mv is not None:

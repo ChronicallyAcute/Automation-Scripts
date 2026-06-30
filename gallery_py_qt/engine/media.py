@@ -80,6 +80,53 @@ def pil_to_qimage(im: "Image.Image") -> QImage:
     return qim.copy()   # detach from the Python bytes buffer
 
 
+# -- Permanent (on-disk) rotation ---------------------------------------------
+
+def rotate_image_file(path: str, degrees: int) -> bool:
+    """Rotate an image file *in place* by `degrees` clockwise (90/180/270).
+
+    Uses PIL's transpose, which is an exact pixel remap for right-angle turns
+    (no resampling blur).  Any existing EXIF orientation is baked in first so
+    the result is unambiguous, and the orientation tag is dropped so viewers
+    don't double-rotate.  ICC colour profiles and remaining EXIF are preserved
+    where possible.  Returns True on success.
+    """
+    deg = degrees % 360
+    if deg == 0:
+        return True
+    if deg not in (90, 180, 270):
+        return False
+    try:
+        from PIL import Image, ImageOps
+        # PIL ROTATE_n is counter-clockwise, so clockwise 90 == ROTATE_270.
+        op = {90: Image.Transpose.ROTATE_270,
+              180: Image.Transpose.ROTATE_180,
+              270: Image.Transpose.ROTATE_90}[deg]
+        with Image.open(path) as im:
+            fmt = im.format
+            im.load()
+            im = ImageOps.exif_transpose(im)      # normalise existing rotation
+            rotated = im.transpose(op)
+            params = {}
+            icc = im.info.get("icc_profile")
+            if icc:
+                params["icc_profile"] = icc
+            exif = im.info.get("exif")
+            if exif:
+                params["exif"] = exif              # orientation tag already cleared
+            if fmt == "JPEG":
+                params["quality"] = 95
+            try:
+                rotated.save(path, format=fmt, **params)
+            except Exception:
+                # Fall back to letting PIL infer the format / drop odd params.
+                rotated.save(path)
+        return True
+    except Exception as exc:
+        print(f"[rotate] {os.path.basename(path)}: {exc}", file=sys.stderr)
+        return False
+
+
 # -- Size / duration peeks (cheap, header-only where possible) ----------------
 
 def peek_size(path: str) -> tuple[int, int]:

@@ -352,6 +352,22 @@ class GalleryModel(QAbstractListModel):
             idx = self.index(row)
             self.dataChanged.emit(idx, idx, [FailedRole])
 
+    def reload_path(self, path: str) -> None:
+        """Drop cached state for a file changed on disk (e.g. after rotation).
+
+        Clears the in-memory pixmap, any failed flag, and any session display
+        rotation, then asks the view to repaint that row — the next paint
+        re-requests a fresh thumbnail (the disk cache is keyed by mtime, which
+        the on-disk change has bumped, so it decodes the new pixels).
+        """
+        self._pixmaps.pop(path, None)
+        self._failed.discard(path)
+        self._rotation.pop(path, None)
+        row = self._path_to_row.get(path)
+        if row is not None:
+            idx = self.index(row)
+            self.dataChanged.emit(idx, idx, [Qt.ItemDataRole.DecorationRole])
+
     def rotate_path(self, path: str) -> None:
         """Rotate display 90\u00b0 CW (display-only; persists for this session)."""
         self._rotation[path] = (self._rotation.get(path, 0) + 90) % 360

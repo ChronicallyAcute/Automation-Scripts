@@ -88,6 +88,17 @@ class Favorites:
         except Exception as exc:
             print(f"[favs-mirror] {exc}", file=sys.stderr)
 
+    def resync_mirror(self, path: str) -> None:
+        """Refresh the Downloads mirror after a favourited file changed on disk."""
+        if path not in self._paths:
+            return
+        try:
+            dest = os.path.join(config.FAVORITES_DIR, os.path.basename(path))
+            if os.path.exists(dest):
+                shutil.copy2(path, dest)
+        except Exception as exc:
+            print(f"[favs-resync] {exc}", file=sys.stderr)
+
     def _unmirror(self, path: str) -> None:
         try:
             dest = os.path.join(config.FAVORITES_DIR, os.path.basename(path))
