@@ -938,10 +938,14 @@ class MultiView(QWidget):
     def open(self, start_row: int) -> None:
         """Activate the panel from start_row's orientation group.
 
-        Clears any previous scroll / pin state so each gallery→multiview
-        transition starts fresh.
+        Clears any previous scroll / pin / forced-layout state so each
+        gallery→multiview transition starts fresh.
         """
         self._stop_slideshow()
+        # Start in Auto layout: a manual 3×1/2×2 override from a previous
+        # visit must not stop portrait media from getting its 3×1 grid.
+        self._forced_layout = None
+        self._update_layout_btn()
 
         for s in self._slots:
             if s.is_pinned:
