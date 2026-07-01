@@ -325,6 +325,10 @@ class MainWindow(QMainWindow):
         self._autoscroll_timer.setInterval(20)
         self._autoscroll_timer.timeout.connect(self._autoscroll_tick)
 
+        # Trim the on-disk thumbnail cache to its byte budget shortly after
+        # startup (deferred so it never delays the window appearing).
+        QTimer.singleShot(1500, cache.enforce_cap)
+
     # -- UI --------------------------------------------------------------------
     def _build_ui(self) -> None:
         central = QWidget()
@@ -408,7 +412,12 @@ class MainWindow(QMainWindow):
         self._search = QLineEdit()
         self._search.setPlaceholderText("search\u2026")
         self._search.setFixedWidth(150)
-        self._search.textChanged.connect(lambda _: self._apply_filter())
+        # Debounce: each keystroke re-runs the filter, and set_filter does a full
+        # sort + model reset \u2014 coalesce rapid typing into one pass every 200 ms.
+        self._search_timer = QTimer(self)
+        self._search_timer.setSingleShot(True)
+        self._search_timer.timeout.connect(self._apply_filter)
+        self._search.textChanged.connect(lambda _: self._search_timer.start(200))
         h.addWidget(self._search)
 
         h.addWidget(self._sep())

@@ -57,6 +57,45 @@ def get_thumbnail(path: str, max_px: int) -> QImage | None:
     return qim
 
 
+_MAX_CACHE_BYTES = 400 * 1024 * 1024   # ~400 MB on-disk thumbnail budget
+
+
+def enforce_cap(max_bytes: int = _MAX_CACHE_BYTES) -> int:
+    """Evict oldest cached thumbnails until the cache is under *max_bytes*.
+
+    The disk cache keys on (path, mtime, max_px); column-count changes and
+    rotations mint new keys, so without eviction it grew without bound.  Called
+    on startup.  Returns the number of files removed.
+    """
+    try:
+        entries = []
+        total = 0
+        for name in os.listdir(config.CACHE_DIR):
+            fp = os.path.join(config.CACHE_DIR, name)
+            try:
+                st = os.stat(fp)
+            except OSError:
+                continue
+            entries.append((st.st_mtime, st.st_size, fp))
+            total += st.st_size
+    except OSError:
+        return 0
+    if total <= max_bytes:
+        return 0
+    entries.sort()                      # oldest (smallest mtime) first
+    removed = 0
+    for _mtime, size, fp in entries:
+        if total <= max_bytes:
+            break
+        try:
+            os.remove(fp)
+            total -= size
+            removed += 1
+        except OSError:
+            pass
+    return removed
+
+
 def clear() -> int:
     """Delete all cached thumbnails. Returns number of files removed."""
     n = 0

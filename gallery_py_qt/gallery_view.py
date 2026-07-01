@@ -13,6 +13,7 @@ A 80 ms coalescing timer batches rapid dimension updates into one re-layout
 so initial thumbnail-burst loading doesn't produce O(n²) re-layouts.
 """
 from __future__ import annotations
+import bisect
 
 from PySide6.QtCore import (Qt, Signal, QModelIndex, QTimer, QPoint, QUrl,
                              QRect, QPointF, QEvent)
@@ -167,6 +168,9 @@ class GalleryView(QAbstractScrollArea):
         self._cols = config.DEFAULT_COLS
         # Masonry layout: (x, y, w, h) per model row, in screen coords before scroll.
         self._cells: list[tuple[int, int, int, int]] = []
+        self._cell_w = 0
+        self._col_ystart: list[list[int]] = []      # per-column cell y-starts
+        self._col_data: list[list[tuple[int, int]]] = []  # per-column (y_end, row)
         self._total_h = 0
         # Centred hint shown when the grid is empty (no folder / scanning / none found).
         self._empty_primary = "Open a folder to begin"
@@ -367,6 +371,9 @@ class GalleryView(QAbstractScrollArea):
         vw = self.viewport().width()
         if vw <= 0 or m is None:
             self._cells = []
+            self._cell_w = 0
+            self._col_ystart = []
+            self._col_data = []
             self._total_h = 0
             self.verticalScrollBar().setRange(0, 0)
             self.viewport().update()
@@ -375,15 +382,25 @@ class GalleryView(QAbstractScrollArea):
         cell_w = max(120, vw // self._cols)
         col_h = [0] * self._cols
         cells: list[tuple[int, int, int, int]] = []
+        # Per-column y-start / (y-end, row) indexes so hit-testing is O(log n)
+        # per mouse move instead of an O(n) scan over every cell.
+        col_ystart: list[list[int]] = [[] for _ in range(self._cols)]
+        col_data:   list[list[tuple[int, int]]] = [[] for _ in range(self._cols)]
 
         for i in range(m.rowCount()):
             path = m.path_at(i) or ""
             h = self._cell_h(path, cell_w)
             col = min(range(self._cols), key=lambda c: col_h[c])
-            cells.append((col * cell_w, col_h[col], cell_w, h))
+            y = col_h[col]
+            cells.append((col * cell_w, y, cell_w, h))
+            col_ystart[col].append(y)
+            col_data[col].append((y + h, i))
             col_h[col] += h
 
         self._cells = cells
+        self._cell_w = cell_w
+        self._col_ystart = col_ystart
+        self._col_data = col_data
         self._total_h = max(col_h) if col_h else 0
 
         vh = self.viewport().height()
@@ -510,12 +527,20 @@ class GalleryView(QAbstractScrollArea):
 
     # -- hit testing -----------------------------------------------------------
     def _row_at(self, pos: QPoint) -> int:
-        scroll_y = self.verticalScrollBar().value()
-        py = pos.y() + scroll_y
-        px = pos.x()
-        for i, (x, y, w, h) in enumerate(self._cells):
-            if x <= px < x + w and y <= py < y + h:
-                return i
+        cw = getattr(self, "_cell_w", 0)
+        if cw <= 0 or not self._col_ystart:
+            return -1
+        py = pos.y() + self.verticalScrollBar().value()
+        col = int(pos.x() // cw)
+        if col < 0 or col >= len(self._col_ystart):
+            return -1
+        ys = self._col_ystart[col]
+        # Rightmost cell whose y-start <= py, then check it actually contains py.
+        k = bisect.bisect_right(ys, py) - 1
+        if 0 <= k < len(ys):
+            y_end, row = self._col_data[col][k]
+            if py < y_end:
+                return row
         return -1
 
     def _rect_for(self, row: int) -> QRect | None:
