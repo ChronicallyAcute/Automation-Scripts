@@ -201,8 +201,10 @@ class GalleryModel(QAbstractListModel):
         self._dims.update(dims)
         if self.needs_dimensions():
             self._reindex()          # modelReset already drives a re-layout
-        else:
-            self.dimsChanged.emit()  # masonry needs to reflow without re-sorting
+        # Always announce that dimensions changed — even for dimension sorts
+        # where _reindex() handled the re-layout — so listeners keyed on
+        # orientation (e.g. the multi-view's 3×1/2×2 auto-switch) update too.
+        self.dimsChanged.emit()
 
     def _dim_area(self, p: str) -> int:
         w, h = self._dims.get(p, (0, 0))

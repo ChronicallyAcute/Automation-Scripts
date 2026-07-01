@@ -869,9 +869,12 @@ class MultiView(QWidget):
                 s._pin_btn.setStyleSheet(s._PIN_OFF)
             s.clear()
 
-        self._refresh_orientation_lists()
-
+        # Bias the partition toward the start item so the opening grid matches
+        # its real orientation immediately (a single cheap peek — never the
+        # whole folder).  The rest self-corrects via _on_model_dims_changed.
         path = self._model.path_at(start_row)
+        self._refresh_orientation_lists(priority_path=path)
+
         if path and path in self._portrait_paths:
             self._current_paths = self._portrait_paths
             start_in_list = self._portrait_paths.index(path)
@@ -891,13 +894,15 @@ class MultiView(QWidget):
 
     # -- orientation lists -----------------------------------------------------
 
-    def _refresh_orientation_lists(self) -> None:
-        # Partition by dimensions ALREADY cached in the model only.  Never call
-        # media.peek_size here: for videos it opens a cv2.VideoCapture under a
-        # global lock, and doing that on the GUI thread for a whole big folder
-        # froze the UI.  Items whose dims aren't computed yet bucket as
-        # landscape (2×2); _on_model_dims_changed re-partitions once the async
-        # dims job reports real sizes.
+    def _refresh_orientation_lists(self, priority_path: str | None = None) -> None:
+        # Partition by dimensions ALREADY cached in the model.  Never peek_size
+        # for the whole folder here — for videos that opens a cv2.VideoCapture
+        # under a global lock, and doing it for thousands of files on the GUI
+        # thread froze the UI.  As a bounded exception, a single priority_path
+        # (the item multi-view is opening on) is peeked synchronously so the
+        # opening grid matches its real orientation; everything else that isn't
+        # measured yet buckets as landscape and is corrected by the async dims
+        # job via _on_model_dims_changed.
         was_portrait = self._current_paths is self._portrait_paths
         portrait, landscape = [], []
         for i in range(self._model.rowCount()):
@@ -905,6 +910,11 @@ class MultiView(QWidget):
             if not path:
                 continue
             w, h = self._model.dim_at(path)
+            if (w <= 0 or h <= 0) and path == priority_path:
+                try:
+                    w, h = media.peek_size(path)
+                except Exception:
+                    w, h = 0, 0
             if w > 0 and h > 0 and w / h < 0.95:
                 portrait.append(path)
             else:
@@ -914,10 +924,12 @@ class MultiView(QWidget):
         self._current_paths = portrait if was_portrait else landscape
 
     def _on_model_dims_changed(self) -> None:
-        """Dimensions arrived from the background job — re-partition quietly.
+        """Dimensions arrived from the background job — re-partition and, in
+        auto mode, flip the grid (3×1 ⇄ 2×2) to match the now-known orientation.
 
-        Updates the orientation lists and counter so later navigation is
-        correct, but does not disturb the tiles currently on screen.
+        The focused tile follows its item into whichever orientation group the
+        real dimensions place it in, so vertical media that was provisionally
+        shown as 2×2 (before its size was measured) switches to 3×1.
         """
         if not self.isVisible():
             return
@@ -925,11 +937,19 @@ class MultiView(QWidget):
                if self._current_paths and self._start < len(self._current_paths)
                else None)
         self._refresh_orientation_lists()
-        if cur and cur in self._current_paths:
-            self._start = self._current_paths.index(cur)
+        # Follow the focused item into its true orientation group.
+        if cur is not None and cur in self._portrait_paths:
+            self._current_paths = self._portrait_paths
+            self._start = self._portrait_paths.index(cur)
+        elif cur is not None and cur in self._landscape_paths:
+            self._current_paths = self._landscape_paths
+            self._start = self._landscape_paths.index(cur)
         else:
             self._start = min(self._start, max(0, len(self._current_paths) - 1))
         self._update_orient_btn()
+        # Auto layout: re-render so the grid matches the corrected orientation.
+        if self._forced_layout is None and not self._slideshow_active():
+            self._render(self._start)
 
     def _detect_layout(self) -> int:
         """Forced layout if set, else 3 for portrait 3×1 / 4 for landscape 2×2."""
