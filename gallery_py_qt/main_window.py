@@ -213,6 +213,7 @@ from .lightbox import Lightbox
 from .multiview import MultiView
 from .exif_panel import InfoDialog
 from .trash_dialog import TrashDialog
+from .help_overlay import make_help_panel, toggle_help_panel
 
 
 # -- Streaming scan ------------------------------------------------------------
@@ -345,6 +346,9 @@ class MainWindow(QMainWindow):
         self._view.favBatch.connect(self._on_grid_fav_batch)
         self._view.trashBatch.connect(self._on_grid_trash_batch)
         self._view.selectionChanged.connect(self._on_selection_changed)
+        # Ctrl+wheel zoom routes through the spin box so UI and view stay in sync.
+        self._view.columnsZoom.connect(
+            lambda step: self._cols_spin.setValue(self._cols_spin.value() + step))
 
         # QStackedWidget: page 0 = gallery, page 1 = embedded multiview panel.
         self._content_stack = QStackedWidget()
@@ -480,6 +484,33 @@ class MainWindow(QMainWindow):
                   activated=self._toggle_autoscroll)
         QShortcut(QKeySequence(Qt.Key.Key_H), self, activated=self._toggle_bar)
 
+        # Keyboard-shortcuts help (gallery page); MultiView has its own.
+        self._help = make_help_panel(central, [
+            ("Ctrl+O", "Open folder(s)"),
+            ("Ctrl+wheel", "Zoom grid (columns)"),
+            ("Click / Ctrl / Shift", "Select · toggle · range-select"),
+            ("Ctrl+A  /  Esc", "Select all / clear selection"),
+            ("F", "Favourite selection"),
+            ("Delete", "Trash selection (undoable)"),
+            ("← → ↑ ↓", "Move cursor (Shift extends)"),
+            ("Enter / double-click", "Open in viewer"),
+            ("Space", "Auto-scroll the grid"),
+            ("H", "Show / hide the control bar"),
+            ("F11", "Toggle full screen"),
+            ("?  /  F1", "Show / hide this help"),
+        ])
+        QShortcut(QKeySequence(Qt.Key.Key_Question), self,
+                  activated=self._toggle_help)
+        QShortcut(QKeySequence(Qt.Key.Key_F1), self,
+                  activated=self._toggle_help)
+
+    def _toggle_help(self) -> None:
+        # Route to the active panel: the multiview overlay covers its own keys.
+        if self._mv is not None and self._content_stack.currentWidget() is self._mv:
+            self._mv.toggle_help()
+        else:
+            toggle_help_panel(self._help, self.centralWidget())
+
     # -- theming ---------------------------------------------------------------
     def _apply_bar_style(self) -> None:
         self._bar.setStyleSheet(
@@ -508,6 +539,10 @@ class MainWindow(QMainWindow):
         if self._undo_bar.isVisible():
             uh = self._undo_bar.sizeHint().height()
             self._undo_bar.setGeometry(8, ch - uh - 8, cw - 16, uh)
+        if self._help.isVisible():
+            self._help.move(max(0, (cw - self._help.width()) // 2),
+                            max(0, (ch - self._help.height()) // 2))
+            self._help.raise_()
 
     def _show_bar(self) -> None:
         self._bar_hide_timer.stop()
@@ -516,6 +551,12 @@ class MainWindow(QMainWindow):
         self._bar.raise_()
 
     def _toggle_bar(self) -> None:
+        # Single owner of the H shortcut: dispatch to whichever panel is
+        # active (a second window-context H in MultiView would make the key
+        # ambiguous and Qt would fire neither handler).
+        if self._mv is not None and self._content_stack.currentWidget() is self._mv:
+            self._mv._toggle_bars()
+            return
         self._show_bar() if not self._bar.isVisible() else self._bar.hide()
 
     def _bar_should_stay(self) -> bool:

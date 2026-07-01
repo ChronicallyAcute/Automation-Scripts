@@ -43,6 +43,7 @@ from PySide6.QtMultimediaWidgets import QGraphicsVideoItem
 
 from . import config
 from .engine import media
+from .help_overlay import make_help_panel, toggle_help_panel
 from .seekbar import SeekBar, fmt_time
 
 # MIME type carrying a dragged tile's file path between slots.
@@ -654,6 +655,11 @@ class _Slot(QWidget):
         self._drag_start = None
         super().mouseReleaseEvent(e)
 
+    def mouseDoubleClickEvent(self, e):
+        if e.button() == Qt.MouseButton.LeftButton and self._path:
+            self.enlarge.emit(self._row)     # open this tile in the lightbox
+        super().mouseDoubleClickEvent(e)
+
     def _begin_drag(self) -> None:
         self._drag_start = None
         drag = QDrag(self)
@@ -763,10 +769,13 @@ class MultiView(QWidget):
             f"{config.ICON_BACK} Gallery",
             self.closeRequested.emit,
             "Back to gallery (Esc)")
+        self._help_btn = self._chrome_btn(
+            "?", self.toggle_help, "Keyboard shortcuts (?)")
         self._fs_btn = self._chrome_btn(
             config.ICON_FULLSCREEN, self._toggle_fs, "Toggle full screen")
         chrome.addWidget(back_btn)
         chrome.addStretch(1)
+        chrome.addWidget(self._help_btn)
         chrome.addWidget(self._fs_btn)
         self._root.addWidget(self._chrome_widget)
 
@@ -870,8 +879,10 @@ class MultiView(QWidget):
                   activated=self._cycle_layout)
         QShortcut(QKeySequence(Qt.Key.Key_F),     self,
                   activated=self._toggle_fill)
-        QShortcut(QKeySequence(Qt.Key.Key_H),     self,
-                  activated=self._toggle_bars)
+        # NOTE: 'H' is deliberately NOT bound here.  MainWindow also binds H
+        # (gallery bar toggle); two window-context shortcuts on the same key
+        # make it ambiguous and Qt fires NEITHER.  MainWindow dispatches H to
+        # whichever panel is active instead.
         QShortcut(QKeySequence("Ctrl+M"),          self,
                   activated=self._unmute_all)
 
@@ -882,6 +893,25 @@ class MultiView(QWidget):
         self._bars_hide_timer.setSingleShot(True)
         self._bars_hide_timer.setInterval(2500)
         self._bars_hide_timer.timeout.connect(self._maybe_hide_bars)
+
+        # Keyboard/mouse help (?/F1 dispatched here by MainWindow — binding
+        # them locally too would make the shortcuts ambiguous, like H was).
+        self._help = make_help_panel(self, [
+            ("← / →  ·  wheel", "Previous / next set"),
+            ("A", "Play / pause slideshow"),
+            ("S", "Slideshow style (Set ⇄ Scroll)"),
+            ("L", "Layout: Auto / 3×1 / 2×2"),
+            ("F", "Fit (no crop) / Fill (cover)"),
+            ("H", "Show / hide the bars"),
+            ("Ctrl+M", "Unmute all visible videos"),
+            ("Double-click", "Open tile in the viewer"),
+            ("Drag tile → tile", "Swap positions"),
+            ("Esc", "Back to gallery"),
+            ("?  /  F1", "Show / hide this help"),
+        ])
+
+    def toggle_help(self) -> None:
+        toggle_help_panel(self._help, self)
 
     # -- public API ------------------------------------------------------------
 
@@ -1451,6 +1481,16 @@ class MultiView(QWidget):
     def mouseMoveEvent(self, e):
         self._show_bars()
         super().mouseMoveEvent(e)
+
+    def wheelEvent(self, e):
+        # Wheel pages the view (down = next set) — slots don't consume wheel
+        # events, so this works anywhere over the tiles.
+        d = e.angleDelta().y()
+        if d < 0:
+            self.next_page()
+        elif d > 0:
+            self.prev_page()
+        e.accept()
 
     # -- bar auto-hide -----------------------------------------------------------
 

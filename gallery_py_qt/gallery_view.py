@@ -156,6 +156,7 @@ class GalleryView(QAbstractScrollArea):
     favBatch     = Signal(list)   # rows — toggle favourite on a multi-selection
     trashBatch   = Signal(list)   # rows — trash a multi-selection
     selectionChanged = Signal(int)   # current selection count
+    columnsZoom  = Signal(int)    # +1 = more columns (smaller), -1 = fewer
 
     # A portrait image taller than this multiple of the column width is capped
     # so pathologically narrow images don't dominate the layout.
@@ -209,7 +210,12 @@ class GalleryView(QAbstractScrollArea):
         self._layout_timer = QTimer(self)
         self._layout_timer.setSingleShot(True)
         self._layout_timer.setInterval(80)
-        self._layout_timer.timeout.connect(self._relayout)
+        self._layout_timer.timeout.connect(self._on_layout_timer)
+        # When True the next layout pass must rebuild everything (dims or cell
+        # width changed); when False and rows were merely appended, the pass
+        # extends the existing masonry instead of recomputing all n cells.
+        self._full_relayout_needed = False
+        self._col_h: list[int] = []
 
         self._vid_pool = _VideoPreviewPool(self._on_video_frame, self)
         self._pending_frames: dict[str, object] = {}
@@ -250,6 +256,7 @@ class GalleryView(QAbstractScrollArea):
         """Drop a cached pixmap-derived aspect ratio (e.g. after a rotation)
         so the masonry layout re-measures the cell from fresh data."""
         if self._pm_dims.pop(path, None) is not None:
+            self._full_relayout_needed = True
             if not self._layout_timer.isActive():
                 self._layout_timer.start()
 
@@ -285,16 +292,52 @@ class GalleryView(QAbstractScrollArea):
         self._on_model_reset()
 
     def _on_rows_inserted(self, *args) -> None:
-        """Coalesce a streaming scan's per-batch insertions into one relayout
-        every ~80 ms — wiring rowsInserted straight to _relayout made a scan
-        O(n^2) (a full O(n) cell rebuild per 200-file batch)."""
+        """Coalesce a streaming scan's per-batch insertions into one layout
+        pass every ~80 ms; appends extend the masonry incrementally."""
         if not self._layout_timer.isActive():
             self._layout_timer.start()
 
     def _on_dims_changed(self) -> None:
         """The background dimension scan finished; reflow with true heights."""
+        self._full_relayout_needed = True
         if not self._layout_timer.isActive():
             self._layout_timer.start()
+
+    def _on_layout_timer(self) -> None:
+        """Pick incremental append vs full rebuild when the coalesce timer
+        fires.  Appends (streaming scan batches) continue from the existing
+        column heights — O(new) — so a 100k-file scan lays out O(n) total
+        instead of O(n²) across its batches."""
+        m = self._model
+        if (not self._full_relayout_needed
+                and m is not None
+                and self._cells
+                and len(self._col_ystart) == self._cols
+                and m.rowCount() > len(self._cells)
+                and max(120, self.viewport().width() // self._cols) == self._cell_w):
+            self._append_cells(m.rowCount())
+        else:
+            self._relayout()
+
+    def _append_cells(self, up_to: int) -> None:
+        """Extend the masonry with rows [len(_cells), up_to) in place."""
+        m = self._model
+        cell_w = self._cell_w
+        col_h = self._col_h
+        for i in range(len(self._cells), up_to):
+            path = m.path_at(i) or ""
+            h = self._cell_h(path, cell_w)
+            col = min(range(self._cols), key=col_h.__getitem__)
+            y = col_h[col]
+            self._cells.append((col * cell_w, y, cell_w, h))
+            self._col_ystart[col].append(y)
+            self._col_data[col].append((y + h, i))
+            col_h[col] += h
+        self._total_h = max(col_h) if col_h else 0
+        vh = self.viewport().height()
+        self.verticalScrollBar().setRange(0, max(0, self._total_h - vh))
+        self.verticalScrollBar().setPageStep(vh)
+        self.viewport().update()
 
     def model(self):
         return self._model
@@ -369,6 +412,7 @@ class GalleryView(QAbstractScrollArea):
                     self._pm_dims[path] = (pm.width(), pm.height())
                     changed = True
         if changed:
+            self._full_relayout_needed = True   # existing cell heights change
             if not self._layout_timer.isActive():
                 self._layout_timer.start()
         else:
@@ -419,6 +463,8 @@ class GalleryView(QAbstractScrollArea):
         self._cell_w = cell_w
         self._col_ystart = col_ystart
         self._col_data = col_data
+        self._col_h = col_h
+        self._full_relayout_needed = False
         self._total_h = max(col_h) if col_h else 0
 
         vh = self.viewport().height()
@@ -441,6 +487,27 @@ class GalleryView(QAbstractScrollArea):
             return True
         return super().viewportEvent(event)
 
+    def _visible_cell_rows(self) -> list[int]:
+        """Rows whose cells intersect the viewport, found by binary-searching
+        each column's y-index — O(visible + log n) instead of scanning every
+        cell, which mattered at 100k items on every paint/scroll tick."""
+        if not self._col_ystart:
+            return []
+        scroll_y = self.verticalScrollBar().value()
+        y_max = scroll_y + self.viewport().height()
+        out: list[int] = []
+        for ys, data in zip(self._col_ystart, self._col_data):
+            if not ys:
+                continue
+            k = max(0, bisect.bisect_right(ys, scroll_y) - 1)
+            while k < len(ys) and ys[k] < y_max:
+                y_end, row = data[k]
+                if y_end > scroll_y:
+                    out.append(row)
+                k += 1
+        out.sort()
+        return out
+
     def _paint(self, painter: QPainter) -> None:
         vp_rect = self.viewport().rect()
         painter.fillRect(vp_rect, QColor(config.CANVAS))
@@ -452,12 +519,10 @@ class GalleryView(QAbstractScrollArea):
 
         painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform, True)
         scroll_y = self.verticalScrollBar().value()
-        vp_h = vp_rect.height()
 
-        for i, (cx, cy, cw, ch) in enumerate(self._cells):
+        for i in self._visible_cell_rows():
+            cx, cy, cw, ch = self._cells[i]
             ry = cy - scroll_y
-            if ry + ch < 0 or ry > vp_h:
-                continue
             rect = QRect(cx, ry, cw, ch)
             idx = m.index(i)
 
@@ -738,6 +803,17 @@ class GalleryView(QAbstractScrollArea):
             elif y + h > sb.value() + vh:
                 sb.setValue(y + h - vh)
 
+    def wheelEvent(self, e) -> None:
+        # Ctrl+wheel zooms the grid (fewer columns = larger thumbnails),
+        # matching every mainstream gallery/browser convention.
+        if e.modifiers() & Qt.KeyboardModifier.ControlModifier:
+            d = e.angleDelta().y()
+            if d:
+                self.columnsZoom.emit(-1 if d > 0 else 1)
+            e.accept()
+            return
+        super().wheelEvent(e)
+
     # -- resize / scroll -------------------------------------------------------
     def resizeEvent(self, e) -> None:
         super().resizeEvent(e)
@@ -750,12 +826,7 @@ class GalleryView(QAbstractScrollArea):
 
     # -- video previews --------------------------------------------------------
     def _visible_rows(self) -> list[int]:
-        if not self._cells:
-            return []
-        scroll_y = self.verticalScrollBar().value()
-        vh = self.viewport().height()
-        return [i for i, (x, y, w, h) in enumerate(self._cells)
-                if y + h > scroll_y and y < scroll_y + vh]
+        return self._visible_cell_rows()
 
     def _sync_video_previews(self) -> None:
         m = self._model
