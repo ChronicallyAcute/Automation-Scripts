@@ -9,6 +9,11 @@ Layout rules
   • Media orientation groups never mix in the same view.
   • Orientation switch button lets the user jump to the other group.
   • Switching layout (3×1 ↔ 2×2) preserves pinned media.
+  • Tiles are positioned by _layout_tiles(), not a uniform grid: in Fit mode
+    each tile takes exactly its media's aspect box (justified rows, 1 px
+    seams, no internal letterboxing); Fill mode covers the panel edge-to-edge
+    with centre-cropped tiles.  The top/bottom bars auto-hide after idle
+    (mouse move or H restores them) so media gets the full panel.
 
 Auto-slideshow (two switchable styles, via the mode button / S key)
   • Set         — holds the current 3×1 / 2×2 grid for N seconds, then jumps
@@ -26,10 +31,10 @@ from __future__ import annotations
 import os
 
 from PySide6.QtCore import (Qt, QUrl, Signal, QSizeF, QSize, QRectF, QTimer,
-                            QMimeData, QObject, QRunnable, QThreadPool)
-from PySide6.QtWidgets import (QWidget, QGridLayout, QVBoxLayout,
+                            QMimeData, QObject, QRunnable, QThreadPool, QEvent)
+from PySide6.QtWidgets import (QWidget, QVBoxLayout,
                                QHBoxLayout, QLabel, QToolButton, QStackedWidget,
-                               QGraphicsScene, QGraphicsView, QSizePolicy,
+                               QGraphicsScene, QGraphicsView,
                                QSpinBox, QSlider, QApplication)
 from PySide6.QtGui import (QPixmap, QImage, QKeySequence, QShortcut, QPalette,
                            QColor, QPainter, QIcon, QDrag)
@@ -730,7 +735,6 @@ class MultiView(QWidget):
         self._ss_px = 0.0         # fractional px scrolled into current position
         self._ss_speed = self._scroll_level * 0.5   # px per timer tick
         self._ss_buf: "_Slot | None" = None
-        self._slot_grid_pos: list[tuple[int, int]] = []
 
         p = self.palette()
         p.setColor(QPalette.ColorRole.Window, QColor("#000"))
@@ -738,9 +742,11 @@ class MultiView(QWidget):
         self.setAutoFillBackground(True)
 
         # ------------------------------------------------------------------ #
-        # Root layout: [chrome bar] / [grid] / [bottom bar]                  #
+        # Root layout: [chrome bar] / [tile host] / [bottom bar]              #
         # The bars are IN the layout (not floating), so slot controls are     #
-        # never obscured by a higher-z sibling.                               #
+        # never obscured by a higher-z sibling.  Both bars auto-hide after a  #
+        # short idle so the tiles get the full panel; hiding a widget in a    #
+        # QVBoxLayout releases its space, so there is still no overlap.       #
         # ------------------------------------------------------------------ #
         self._root = QVBoxLayout(self)
         self._root.setContentsMargins(0, 0, 0, 0)
@@ -764,12 +770,15 @@ class MultiView(QWidget):
         chrome.addWidget(self._fs_btn)
         self._root.addWidget(self._chrome_widget)
 
-        # Grid host (takes all remaining space)
+        # Tile host (takes all remaining space).  Slots are positioned manually
+        # by _layout_tiles() — a justified layout where each tile takes exactly
+        # its media's aspect box, so media meets media with no internal
+        # letterboxing (QGridLayout's uniform cells wasted large black bars on
+        # any tile whose media didn't match the cell shape).
         self._grid_host = QWidget()
         self._grid_host.setStyleSheet("background: #000; border: none;")
-        self._grid = QGridLayout(self._grid_host)
-        self._grid.setContentsMargins(0, 0, 0, 0)
-        self._grid.setSpacing(1)
+        self._grid_host.setMouseTracking(True)
+        self._grid_host.installEventFilter(self)
         self._root.addWidget(self._grid_host, 1)
 
         self._slots: list[_Slot] = []
@@ -861,8 +870,18 @@ class MultiView(QWidget):
                   activated=self._cycle_layout)
         QShortcut(QKeySequence(Qt.Key.Key_F),     self,
                   activated=self._toggle_fill)
+        QShortcut(QKeySequence(Qt.Key.Key_H),     self,
+                  activated=self._toggle_bars)
         QShortcut(QKeySequence("Ctrl+M"),          self,
                   activated=self._unmute_all)
+
+        # Auto-hide the chrome/bottom bars after idle so tiles get the full
+        # panel height; any mouse move (H toggles manually) brings them back.
+        self.setMouseTracking(True)
+        self._bars_hide_timer = QTimer(self)
+        self._bars_hide_timer.setSingleShot(True)
+        self._bars_hide_timer.setInterval(2500)
+        self._bars_hide_timer.timeout.connect(self._maybe_hide_bars)
 
     # -- public API ------------------------------------------------------------
 
@@ -898,6 +917,7 @@ class MultiView(QWidget):
             start_in_list = 0
 
         self._update_orient_btn()
+        self._show_bars()          # visible on entry; auto-hide after idle
         self._render(start_in_list)
 
     def stop_autoscroll(self) -> None:
@@ -962,6 +982,9 @@ class MultiView(QWidget):
         # Auto layout: re-render so the grid matches the corrected orientation.
         if self._forced_layout is None and not self._slideshow_active():
             self._render(self._start)
+        else:
+            # Even without a re-render, newly-known aspects refine tile boxes.
+            self._layout_tiles()
 
     def _detect_layout(self) -> int:
         """Forced layout if set, else 3 for portrait 3×1 / 4 for landscape 2×2."""
@@ -970,6 +993,22 @@ class MultiView(QWidget):
         return 3 if (self._current_paths is self._portrait_paths) else 4
 
     # -- layout / slot management ----------------------------------------------
+
+    _TILE_GAP = 1     # px between adjacent tiles — minimal visible seam
+
+    def _make_slot(self, index: int) -> _Slot:
+        slot = _Slot(index, self._favs, self._grid_host)
+        slot.enlarge.connect(self._on_enlarge)
+        slot.favToggled.connect(self._on_slot_fav)
+        slot.trashed.connect(self._on_slot_trash)
+        slot.reordered.connect(self._on_reorder)
+        slot.rotated.connect(self._on_slot_rotate)
+        slot.pinned.connect(lambda *_: None)
+        slot.set_fill(self._fill_mode)
+        slot._img_pool = self._img_pool
+        slot.setMouseTracking(True)
+        slot.installEventFilter(self)     # mouse activity re-shows the bars
+        return slot
 
     def _build_slots(self, n: int) -> None:
         # Clean up any side-scroll state without re-rendering
@@ -984,47 +1023,85 @@ class MultiView(QWidget):
             self._ss_buf.setParent(None)
             self._ss_buf = None
         self._slots.clear()
-        while self._grid.count():
-            self._grid.takeAt(0)
-        for k in range(4):
-            self._grid.setColumnStretch(k, 0)
-            self._grid.setRowStretch(k, 0)
         self._layout_slots = n
-        positions = ([(0, 0), (0, 1), (0, 2)] if n == 3
-                     else [(0, 0), (0, 1), (1, 0), (1, 1)])
-        self._slot_grid_pos = list(positions)
-        for i, (r, c) in enumerate(positions):
-            slot = _Slot(i, self._favs, self)
-            slot.setSizePolicy(QSizePolicy.Policy.Ignored,
-                               QSizePolicy.Policy.Ignored)
-            slot.enlarge.connect(self._on_enlarge)
-            slot.favToggled.connect(self._on_slot_fav)
-            slot.trashed.connect(self._on_slot_trash)
-            slot.reordered.connect(self._on_reorder)
-            slot.rotated.connect(self._on_slot_rotate)
-            slot.pinned.connect(lambda *_: None)
-            slot.set_fill(self._fill_mode)
-            slot._img_pool = self._img_pool
-            self._grid.addWidget(slot, r, c)
+        for i in range(n):
+            slot = self._make_slot(i)
+            slot.show()
             self._slots.append(slot)
-        # Extra slot for the side-scroll right-edge buffer (not in grid layout)
-        self._ss_buf = _Slot(n, self._favs, self._grid_host)
-        self._ss_buf.setSizePolicy(QSizePolicy.Policy.Ignored,
-                                   QSizePolicy.Policy.Ignored)
-        self._ss_buf.enlarge.connect(self._on_enlarge)
-        self._ss_buf.favToggled.connect(self._on_slot_fav)
-        self._ss_buf.trashed.connect(self._on_slot_trash)
-        self._ss_buf.reordered.connect(self._on_reorder)
-        self._ss_buf.rotated.connect(self._on_slot_rotate)
-        self._ss_buf.set_fill(self._fill_mode)
-        self._ss_buf._img_pool = self._img_pool
+        # Extra slot for the side-scroll right-edge buffer
+        self._ss_buf = self._make_slot(n)
         self._ss_buf.hide()
-        used_cols = 3 if n == 3 else 2
-        used_rows = 1 if n == 3 else 2
-        for cc in range(used_cols):
-            self._grid.setColumnStretch(cc, 1)
-        for rr in range(used_rows):
-            self._grid.setRowStretch(rr, 1)
+        self._layout_tiles()
+
+    # -- tile geometry -----------------------------------------------------------
+
+    def _slot_aspect(self, slot: "_Slot") -> float:
+        """Best-known width/height ratio for the media in `slot`."""
+        path = slot._path
+        if path:
+            w, h = self._model.dim_at(path)
+            if w > 0 and h > 0:
+                return w / h
+            if slot._is_video:
+                ns = slot._video_item.nativeSize()
+                if ns.width() > 0 and ns.height() > 0:
+                    return ns.width() / ns.height()
+            elif not slot._pm.isNull():
+                return slot._pm.width() / slot._pm.height()
+        # Unknown: assume the active group's typical shape.
+        return 0.6 if (self._current_paths is self._portrait_paths) else 16 / 9
+
+    def _layout_tiles(self) -> None:
+        """Position the visible slots to maximise media coverage.
+
+        Fit mode uses justified rows: every tile gets exactly its media's
+        aspect box (row height = row width / Σaspects), so there is no
+        letterboxing inside any tile — leftover space collapses into one
+        centred outer margin instead of black bars around each item.
+        Fill mode uses a uniform grid and lets the tiles cover-crop, so
+        media covers every pixel of the panel.
+        """
+        if self._ss_slot_order:            # side-scroll owns tile geometry
+            return
+        W = self._grid_host.width()
+        H = self._grid_host.height()
+        if W <= 2 or H <= 2 or not self._slots:
+            return
+        gap = self._TILE_GAP
+        rows = ([self._slots[:3]] if self._layout_slots == 3
+                else [self._slots[:2], self._slots[2:4]])
+        rows = [r for r in rows if r]
+
+        if self._fill_mode:
+            nrows = len(rows)
+            rh = (H - gap * (nrows - 1)) / nrows
+            for r, row in enumerate(rows):
+                cw = (W - gap * (len(row) - 1)) / len(row)
+                y = round(r * (rh + gap))
+                y2 = round((r + 1) * rh + r * gap)
+                for c, slot in enumerate(row):
+                    x = round(c * (cw + gap))
+                    x2 = round((c + 1) * cw + c * gap)
+                    slot.setGeometry(x, y, max(1, x2 - x), max(1, y2 - y))
+            return
+
+        # Justified rows (fit mode)
+        aspects = [[self._slot_aspect(s) for s in row] for row in rows]
+        row_w = [W - gap * (len(row) - 1) for row in rows]
+        ideal = [rw / max(sum(a), 0.05) for rw, a in zip(row_w, aspects)]
+        avail_h = H - gap * (len(rows) - 1)
+        total = sum(ideal)
+        heights = ([h * (avail_h / total) for h in ideal] if total > avail_h
+                   else ideal)
+        y = (H - (sum(heights) + gap * (len(rows) - 1))) / 2.0
+        for row, a_row, h in zip(rows, aspects, heights):
+            widths = [h * a for a in a_row]
+            x = (W - (sum(widths) + gap * (len(row) - 1))) / 2.0
+            for slot, wdt in zip(row, widths):
+                slot.setGeometry(round(x), round(y),
+                                 max(1, round(wdt)), max(1, round(h)))
+                x += wdt + gap
+            y += h + gap
 
     def _switch_layout(self, n: int) -> None:
         """Rebuild grid for n slots, restoring pinned media to first slots."""
@@ -1059,17 +1136,13 @@ class MultiView(QWidget):
         self._ss_timer.stop()
         if not self._ss_slot_order:
             return
-        n_vis = self._ss_n_visible()
-        # Re-add the slots that were removed from the grid
-        for i in range(min(n_vis, len(self._slots))):
-            r, c = self._slot_grid_pos[i]
-            self._grid.addWidget(self._slots[i], r, c)
-        # Show all grid slots; hide buffer
+        # Show all tile slots; hide the buffer; restore justified geometry.
         for slot in self._slots:
             slot.show()
         if self._ss_buf is not None:
             self._ss_buf.hide()
         self._ss_slot_order.clear()
+        self._layout_tiles()
 
     def _start_sidescroll(self) -> None:
         n_paths = len(self._current_paths)
@@ -1077,10 +1150,8 @@ class MultiView(QWidget):
             return
         n_vis = self._ss_n_visible()
 
-        # Remove the visible slots from the grid layout so we can position them
-        # freely; extra grid slots (n_vis..n) are just hidden.
-        for i in range(n_vis):
-            self._grid.removeWidget(self._slots[i])
+        # Slots beyond the visible strip are just hidden (all slots are
+        # manually positioned children of the tile host already).
         for i in range(n_vis, len(self._slots)):
             self._slots[i].hide()
 
@@ -1173,6 +1244,8 @@ class MultiView(QWidget):
         total = len(paths)
         self._counter.setText(
             f"{self._start + 1}–{min(shown_end, total)} of {total}")
+        # Content changed → tile aspect boxes may have changed.
+        self._layout_tiles()
 
     # -- navigation ------------------------------------------------------------
 
@@ -1273,13 +1346,14 @@ class MultiView(QWidget):
             {None: "Auto", 3: "3×1", 4: "2×2"}[self._forced_layout])
 
     def _toggle_fill(self) -> None:
-        """Toggle cover-fill (crop to fill tiles) vs fit (letterbox)."""
+        """Toggle cover-fill (uniform grid, crop) vs fit (justified, no crop)."""
         self._fill_mode = not self._fill_mode
         self._fill_btn.setText("Fill" if self._fill_mode else "Fit")
         for slot in self._slots:
             slot.set_fill(self._fill_mode)
         if self._ss_buf is not None:
             self._ss_buf.set_fill(self._fill_mode)
+        self._layout_tiles()      # geometry philosophy changes with the mode
 
     def _toggle_mode(self) -> None:
         """Switch slideshow style (Set ⇄ Side-scroll); stops any active run."""
@@ -1361,6 +1435,48 @@ class MultiView(QWidget):
         super().resizeEvent(e)
         if self._ss_timer.isActive():
             self._ss_reposition()
+
+    def eventFilter(self, obj, event):
+        et = event.type()
+        if obj is self._grid_host and et == QEvent.Type.Resize:
+            # Host resizes when the panel resizes AND when the bars hide/show.
+            if self._ss_slot_order:
+                self._ss_reposition()
+            else:
+                self._layout_tiles()
+        elif et in (QEvent.Type.MouseMove, QEvent.Type.Enter):
+            self._show_bars()
+        return super().eventFilter(obj, event)
+
+    def mouseMoveEvent(self, e):
+        self._show_bars()
+        super().mouseMoveEvent(e)
+
+    # -- bar auto-hide -----------------------------------------------------------
+
+    def _show_bars(self) -> None:
+        if not self._chrome_widget.isVisible():
+            self._chrome_widget.show()
+            self._autoscroll_widget.show()
+        self._bars_hide_timer.start()
+
+    def _maybe_hide_bars(self) -> None:
+        # Keep the bars while the user is interacting with them.
+        if (self._chrome_widget.underMouse()
+                or self._autoscroll_widget.underMouse()
+                or QApplication.activePopupWidget() is not None):
+            self._bars_hide_timer.start()
+            return
+        self._chrome_widget.hide()
+        self._autoscroll_widget.hide()
+
+    def _toggle_bars(self) -> None:
+        if self._chrome_widget.isVisible():
+            self._bars_hide_timer.stop()
+            self._chrome_widget.hide()
+            self._autoscroll_widget.hide()
+        else:
+            self._show_bars()
 
     # -- slot signal handlers --------------------------------------------------
 
