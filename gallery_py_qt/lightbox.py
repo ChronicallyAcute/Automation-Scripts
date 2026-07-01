@@ -39,14 +39,24 @@ class _FullImageJob(QRunnable):
     stale image.
     """
     def __init__(self, gen: int, path: str, max_px: int,
-                 signals: _FullImageSignals):
+                 signals: _FullImageSignals, gen_now=None):
         super().__init__()
         self._gen = gen
         self._path = path
         self._max_px = max_px
         self._signals = signals
+        self._gen_now = gen_now
 
     def run(self) -> None:
+        # Re-check the generation when the job actually starts: rapid arrow-key
+        # paging queues decodes whose results would be discarded anyway — skip
+        # them instead of running a full large-image decode per skipped page.
+        if self._gen_now is not None:
+            try:
+                if self._gen_now() != self._gen:
+                    return
+            except Exception:
+                return
         try:
             qim = media.load_full_qimage(self._path, max_px=self._max_px)
         except Exception:
@@ -376,7 +386,8 @@ class Lightbox(QDialog):
                 self._loading_timer.start()
                 self._img_pool.start(
                     _FullImageJob(self._img_gen, path, self._decode_px,
-                                  self._img_sig))
+                                  self._img_sig,
+                                  gen_now=lambda: self._img_gen))
         self._position_overlays()
 
     def _on_full_image(self, gen: int, path: str, qim: QImage) -> None:

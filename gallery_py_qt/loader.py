@@ -19,6 +19,7 @@ Fork improvements over gallery_qt.loader:
 """
 from __future__ import annotations
 import os
+import threading
 
 from PySide6.QtCore import QObject, QRunnable, QThreadPool, Signal
 from PySide6.QtGui import QImage
@@ -33,18 +34,20 @@ class _Signals(QObject):
 
 class _Job(QRunnable):
     def __init__(self, path: str, max_px: int, signals: _Signals,
-                 cancelled: set):
+                 cancelled: set, lock: threading.Lock):
         super().__init__()
         self._path = path
         self._max_px = max_px
         self._signals = signals
         self._cancelled = cancelled   # shared mutable set; checked at run time
+        self._lock = lock
 
     def run(self) -> None:
         key = (self._path, self._max_px)
-        if key in self._cancelled:
-            self._cancelled.discard(key)
-            return
+        with self._lock:
+            if key in self._cancelled:
+                self._cancelled.discard(key)
+                return
         try:
             qim = cache.get_thumbnail(self._path, self._max_px)
         except Exception:
@@ -78,6 +81,9 @@ class ThumbnailLoader(QObject):
         self._pool.setMaxThreadCount(n)
         self._inflight: set[tuple[str, int]] = set()
         self._cancelled: set[tuple[str, int]] = set()
+        # Guards the two sets above: they get compound check-then-mutate
+        # sequences from both the GUI thread and worker threads.
+        self._lock = threading.Lock()
         self._priority = 0          # monotonically increasing; higher = sooner
         self._sig = _Signals(self)
         self._sig.ready.connect(self._on_ready)
@@ -85,29 +91,35 @@ class ThumbnailLoader(QObject):
 
     def request(self, path: str, max_px: int) -> None:
         key = (path, max_px)
-        if key in self._inflight:
-            return
-        self._inflight.add(key)
+        with self._lock:
+            if key in self._inflight:
+                return
+            self._inflight.add(key)
         self._priority += 1
-        self._pool.start(_Job(path, max_px, self._sig, self._cancelled),
-                         self._priority)
+        self._pool.start(
+            _Job(path, max_px, self._sig, self._cancelled, self._lock),
+            self._priority)
 
     def cancel(self, path: str, max_px: int) -> None:
         """Mark a queued job as cancelled; it skips its work when its turn comes."""
         key = (path, max_px)
-        if key in self._inflight:
-            self._cancelled.add(key)
-            self._inflight.discard(key)
+        with self._lock:
+            if key in self._inflight:
+                self._cancelled.add(key)
+                self._inflight.discard(key)
 
     def _on_ready(self, path: str, max_px: int, qim: QImage) -> None:
-        self._inflight.discard((path, max_px))
+        with self._lock:
+            self._inflight.discard((path, max_px))
         self.ready.emit(path, max_px, qim)
 
     def _on_failed(self, path: str) -> None:
-        self._inflight = {k for k in self._inflight if k[0] != path}
+        with self._lock:
+            self._inflight = {k for k in self._inflight if k[0] != path}
         self.failed.emit(path)
 
     def clear(self) -> None:
         self._pool.clear()
-        self._inflight.clear()
-        self._cancelled.clear()
+        with self._lock:
+            self._inflight.clear()
+            self._cancelled.clear()

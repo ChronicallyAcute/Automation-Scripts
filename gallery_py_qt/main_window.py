@@ -314,7 +314,6 @@ class MainWindow(QMainWindow):
         self._dims_sig.done.connect(self._on_dims_chunk)
         self._dims_done_for: set[str] = set()
         self._dims_inflight = False
-        self._dims_pending: dict[str, tuple[int, int]] = {}
         self._dims_remaining = 0
 
         self._build_ui()
@@ -716,34 +715,43 @@ class MainWindow(QMainWindow):
         # newly-added paths when the current pass finishes.
         if self._dims_inflight:
             return
+        from .engine import media as _media
         paths = [p for p in self._model.all_paths()
                  if p not in self._dims_done_for]
         if not paths:
             return
         self._dims_inflight = True
-        self._dims_pending = {}
-        # Round-robin split so images/videos are spread across workers; image
-        # header reads then run in parallel (video reads serialise on the lock).
-        n = min(self._dims_pool.maxThreadCount(), max(1, len(paths) // 400 + 1))
-        chunks = [paths[i::n] for i in range(n)]
-        chunks = [c for c in chunks if c]
-        self._dims_remaining = len(chunks)
+        # Images and videos are separated: image header reads are fast and run
+        # as parallel chunks; video probes serialise on the cv2 lock anyway, so
+        # they go in ONE trailing job.  Each job's results apply as they land
+        # (_on_dims_chunk), so the gallery reveals \u2014 images sorted, videos
+        # provisionally at the end \u2014 within seconds instead of staying blank
+        # until the last video has been probed.
+        images = [p for p in paths if not _media.is_video(p)]
+        videos = [p for p in paths if _media.is_video(p)]
+        jobs: list[list[str]] = []
+        if images:
+            n = min(self._dims_pool.maxThreadCount(),
+                    max(1, len(images) // 400 + 1))
+            jobs.extend(c for c in (images[i::n] for i in range(n)) if c)
+        if videos:
+            jobs.append(videos)
+        self._dims_remaining = len(jobs)
         self._status.setText("Computing dimensions\u2026")
-        for c in chunks:
+        for c in jobs:
             self._dims_pool.start(_DimsJob(c, self._dims_sig))
 
     def _on_dims_chunk(self, dims: dict) -> None:
-        # Accumulate chunk results; apply to the model once \u2014 a single re-sort
-        # rather than one per chunk (avoids repeated model resets / flicker).
-        self._dims_pending.update(dims)
+        # Apply each job's results immediately \u2014 progressive reveal.  At most a
+        # handful of jobs run per pass, so the extra re-sorts are cheap next to
+        # minutes of blank grid on a video-heavy folder.
+        self._dims_done_for.update(dims.keys())
+        if dims:
+            self._model.set_dims(dims)
         self._dims_remaining -= 1
         if self._dims_remaining > 0:
             return
-        self._dims_done_for.update(self._dims_pending.keys())
-        applied = self._dims_pending
-        self._dims_pending = {}
         self._dims_inflight = False
-        self._model.set_dims(applied)
         if self._model.needs_dimensions():
             self._status.setText(
                 f"Sorted by {self._sort.currentText().lower()}")

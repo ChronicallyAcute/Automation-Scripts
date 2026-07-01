@@ -37,6 +37,9 @@ class _VideoPreviewPool(QWidget):
     def __init__(self, frame_cb, parent=None):
         super().__init__(parent)
         self._frame_cb = frame_cb
+        # Preview frames are downscaled to this long side before caching.
+        # Updated from the view's relayout to track the current thumb size.
+        self._max_px = 640
         self._free: list[tuple[QMediaPlayer, QVideoSink]] = []
         self._used: dict[str, tuple[QMediaPlayer, QVideoSink]] = {}
         for _ in range(self.MAX):
@@ -80,8 +83,17 @@ class _VideoPreviewPool(QWidget):
 
     def _on_frame(self, path: str, frame) -> None:
         img = frame.toImage()
-        if not img.isNull():
-            self._frame_cb(path, QPixmap.fromImage(img))
+        if img.isNull():
+            return
+        # Downscale before caching: a raw 4K frame is ~33 MB, and the model's
+        # pixmap LRU caps by item count assuming thumb-sized entries — full
+        # frames silently blew the byte budget on video folders.  Fast
+        # transform: these are ephemeral preview frames, not stills.
+        if max(img.width(), img.height()) > self._max_px:
+            img = img.scaled(self._max_px, self._max_px,
+                             Qt.AspectRatioMode.KeepAspectRatio,
+                             Qt.TransformationMode.FastTransformation)
+        self._frame_cb(path, QPixmap.fromImage(img))
 
 
 # ---------------------------------------------------------------------------
@@ -309,18 +321,17 @@ class GalleryView(QAbstractScrollArea):
             self._selection.clear()
             self._anchor = -1
             self.selectionChanged.emit(0)
-        # Seed dims from thumbnails already in the model's in-memory pixmap cache
-        # so the very first relayout after a modelReset uses the correct heights
-        # instead of falling back to square cells.
+        # Seed dims from thumbnails already in the model's in-memory pixmap
+        # cache so the first relayout after a modelReset uses correct heights.
+        # Iterate the cache directly (bounded by the pixmap LRU cap, ~hundreds)
+        # rather than every model row — the per-row data() loop was O(n) of
+        # Python/Qt calls on EVERY reset, a real stall at 100k files now that
+        # dims chunks each trigger a reset.
         m = self._model
         if m is not None:
-            for i in range(m.rowCount()):
-                idx = m.index(i)
-                path = idx.data(PathRole)
-                if path and path not in self._pm_dims and idx.data(LoadedRole):
-                    pm = idx.data(Qt.ItemDataRole.DecorationRole)
-                    if isinstance(pm, QPixmap) and not pm.isNull():
-                        self._pm_dims[path] = (pm.width(), pm.height())
+            for path, pm in list(getattr(m, "_pixmaps", {}).items()):
+                if path not in self._pm_dims and not pm.isNull():
+                    self._pm_dims[path] = (pm.width(), pm.height())
         self._relayout()
 
     def _on_data_changed(self, top: QModelIndex, bottom: QModelIndex,
@@ -333,6 +344,13 @@ class GalleryView(QAbstractScrollArea):
         # dimension pre-scan.
         m = self._model
         if m is None:
+            return
+        # A span covering (nearly) the whole model is a broadcast invalidation
+        # — set_thumb_px() just cleared the pixmap cache, so LoadedRole is
+        # False everywhere and the per-row probe below would be a pure-waste
+        # O(n) loop on the GUI thread.  Repaint and let visible cells reload.
+        if bottom.row() - top.row() > 500:
+            self.viewport().update()
             return
         changed = False
         for row in range(top.row(), bottom.row() + 1):
@@ -411,6 +429,8 @@ class GalleryView(QAbstractScrollArea):
         thumb = min(config.MAX_THUMB_PX, (cell_w // 32) * 32)
         if hasattr(m, "set_thumb_px"):
             m.set_thumb_px(max(128, thumb))
+        # Video preview frames should match the cell size, not the source.
+        self._vid_pool._max_px = max(320, min(960, thumb))
 
         self.viewport().update()
 

@@ -53,15 +53,26 @@ class _ImgJob(QRunnable):
 
     A generation token lets the slot ignore results that land after it has
     been re-used for a different item, so paging never shows a stale image.
+    gen_now is re-checked when the job actually starts, so decodes queued
+    behind others are skipped entirely once superseded — rapid paging through
+    large files no longer burns a full decode per discarded page.
     """
-    def __init__(self, gen: int, path: str, max_px: int, signals: _ImgSignals):
+    def __init__(self, gen: int, path: str, max_px: int, signals: _ImgSignals,
+                 gen_now=None):
         super().__init__()
         self._gen = gen
         self._path = path
         self._max_px = max_px
         self._signals = signals
+        self._gen_now = gen_now
 
     def run(self) -> None:
+        if self._gen_now is not None:
+            try:
+                if self._gen_now() != self._gen:
+                    return              # superseded while waiting in the queue
+            except Exception:
+                return                  # owner gone — nothing to deliver to
         try:
             qim = media.load_full_qimage(self._path, max_px=self._max_px)
         except Exception:
@@ -496,7 +507,8 @@ class _Slot(QWidget):
             tile_px = max(640, min(tile_px, 2048))
             if self._img_pool is not None:
                 self._img_pool.start(
-                    _ImgJob(self._img_gen, path, tile_px, self._img_sig))
+                    _ImgJob(self._img_gen, path, tile_px, self._img_sig,
+                            gen_now=lambda: self._img_gen))
             else:
                 qim = media.load_full_qimage(path, max_px=tile_px)
                 self._on_img_decoded(self._img_gen,

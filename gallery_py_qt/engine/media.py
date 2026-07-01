@@ -246,22 +246,35 @@ def load_thumbnail(path: str, max_px: int) -> QImage | None:
         return _scaled_qimage(qim, max_px)
     try:
         with Image.open(path) as im:
-            # draft() lets the JPEG decoder load at 1/2..1/8 scale directly,
-            # so a 24 MP photo never fully expands in RAM just to be thumbnailed
-            # (the main defence against OOM on big-photo folders).  No-op for
-            # non-JPEG formats.
-            im.draft(None, (max_px, max_px))
-            alpha = _has_alpha(im)
-            im = im.convert("RGBA" if alpha else "RGB")
-            w, h = im.size
-            scale = min(max_px / max(w, 1), max_px / max(h, 1), 1.0)
-            if scale < 1.0:
-                im = im.resize((max(1, int(w * scale)),
-                                max(1, int(h * scale))), Image.LANCZOS)
-            return pil_to_qimage(im)
+            return _decode_scaled(im, max_px)
     except Exception as exc:
         print(f"[thumb] {os.path.basename(path)}: {exc}", file=sys.stderr)
         return None
+
+
+def _decode_scaled(im: "Image.Image", max_px: int) -> QImage:
+    """Decode `im` to a QImage no larger than max_px, minimising peak memory.
+
+    Order matters: draft() lets the JPEG decoder produce a reduced-scale
+    bitmap, but it is a NO-OP for PNG/TIFF/WebP — and converting those at
+    source resolution duplicated the full-size bitmap before any downscale
+    (the main residual OOM on big-PNG folders).  So for natively resizable
+    modes we downscale FIRST and only convert the small result; odd modes
+    (palette, 1-bit, CMYK…) still convert first for resize quality, but their
+    native bitmaps are 1 byte/px so the full-size copy is far smaller anyway.
+    """
+    im.draft(None, (max_px, max_px))            # JPEG: reduced-scale decode
+    alpha = _has_alpha(im)
+    if im.mode not in ("RGB", "RGBA", "L", "LA"):
+        im = im.convert("RGBA" if alpha else "RGB")
+    w, h = im.size
+    scale = min(max_px / max(w, 1), max_px / max(h, 1), 1.0)
+    if scale < 1.0:
+        im = im.resize((max(1, int(w * scale)),
+                        max(1, int(h * scale))), Image.LANCZOS)
+    if im.mode not in ("RGB", "RGBA"):
+        im = im.convert("RGBA" if alpha else "RGB")   # small now — cheap
+    return pil_to_qimage(im)
 
 
 def load_full_qimage(path: str, max_px: int = 4096) -> QImage | None:
@@ -270,15 +283,7 @@ def load_full_qimage(path: str, max_px: int = 4096) -> QImage | None:
     never balloons to the source resolution."""
     try:
         with Image.open(path) as im:
-            im.draft(None, (max_px, max_px))   # cheap down-scale for huge JPEGs
-            alpha = _has_alpha(im)
-            im = im.convert("RGBA" if alpha else "RGB")
-            w, h = im.size
-            scale = min(max_px / max(w, 1), max_px / max(h, 1), 1.0)
-            if scale < 1.0:
-                im = im.resize((max(1, int(w * scale)),
-                                max(1, int(h * scale))), Image.LANCZOS)
-            return pil_to_qimage(im)
+            return _decode_scaled(im, max_px)
     except Exception as exc:
         print(f"[full] {os.path.basename(path)}: {exc}", file=sys.stderr)
         return None
