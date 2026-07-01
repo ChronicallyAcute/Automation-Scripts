@@ -251,7 +251,7 @@ class GalleryView(QAbstractScrollArea):
             for sig, slot in (
                 (old.modelReset,    self._on_model_reset),
                 (old.dataChanged,   self._on_data_changed),
-                (old.rowsInserted,  self._relayout),
+                (old.rowsInserted,  self._on_rows_inserted),
                 (old.rowsRemoved,   self._on_model_reset),
                 (old.dimsChanged,   self._on_dims_changed),
             ):
@@ -263,10 +263,17 @@ class GalleryView(QAbstractScrollArea):
         if model is not None:
             model.modelReset.connect(self._on_model_reset)
             model.dataChanged.connect(self._on_data_changed)
-            model.rowsInserted.connect(self._relayout)
+            model.rowsInserted.connect(self._on_rows_inserted)
             model.rowsRemoved.connect(self._on_model_reset)
             model.dimsChanged.connect(self._on_dims_changed)
         self._on_model_reset()
+
+    def _on_rows_inserted(self, *args) -> None:
+        """Coalesce a streaming scan's per-batch insertions into one relayout
+        every ~80 ms — wiring rowsInserted straight to _relayout made a scan
+        O(n^2) (a full O(n) cell rebuild per 200-file batch)."""
+        if not self._layout_timer.isActive():
+            self._layout_timer.start()
 
     def _on_dims_changed(self) -> None:
         """The background dimension scan finished; reflow with true heights."""

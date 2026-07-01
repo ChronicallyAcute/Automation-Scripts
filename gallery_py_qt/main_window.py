@@ -300,13 +300,22 @@ class MainWindow(QMainWindow):
         # Streaming scan infrastructure.
         self._scan_gen = 0
         self._scan_pool = QThreadPool(self)
+        self._scan_pool.setMaxThreadCount(2)
         self._stream_sig = _StreamSignals(self)
         self._stream_sig.batch.connect(self._on_scan_batch)
         self._stream_sig.done.connect(self._on_scan_done)
 
+        # Dimensions run on their own small pool (parallel image header reads;
+        # video reads still serialise on the cv2 lock).  An inflight guard stops
+        # redundant full-folder passes from piling up.
+        self._dims_pool = QThreadPool(self)
+        self._dims_pool.setMaxThreadCount(min(4, max(1, (os.cpu_count() or 2))))
         self._dims_sig = _DimsSignals(self)
-        self._dims_sig.done.connect(self._on_dims_done)
+        self._dims_sig.done.connect(self._on_dims_chunk)
         self._dims_done_for: set[str] = set()
+        self._dims_inflight = False
+        self._dims_pending: dict[str, tuple[int, int]] = {}
+        self._dims_remaining = 0
 
         self._build_ui()
         self._restore_session()
@@ -693,19 +702,45 @@ class MainWindow(QMainWindow):
                                  else "Ascending \u2014 click for descending")
 
     def _ensure_dims(self) -> None:
+        # One pass at a time \u2014 a second call while a pass runs would re-scan the
+        # whole folder and saturate the cv2 lock. _on_dims_chunk re-checks for
+        # newly-added paths when the current pass finishes.
+        if self._dims_inflight:
+            return
         paths = [p for p in self._model.all_paths()
                  if p not in self._dims_done_for]
         if not paths:
             return
+        self._dims_inflight = True
+        self._dims_pending = {}
+        # Round-robin split so images/videos are spread across workers; image
+        # header reads then run in parallel (video reads serialise on the lock).
+        n = min(self._dims_pool.maxThreadCount(), max(1, len(paths) // 400 + 1))
+        chunks = [paths[i::n] for i in range(n)]
+        chunks = [c for c in chunks if c]
+        self._dims_remaining = len(chunks)
         self._status.setText("Computing dimensions\u2026")
-        self._scan_pool.start(_DimsJob(paths, self._dims_sig))
+        for c in chunks:
+            self._dims_pool.start(_DimsJob(c, self._dims_sig))
 
-    def _on_dims_done(self, dims: dict) -> None:
-        self._dims_done_for.update(dims.keys())
-        self._model.set_dims(dims)
+    def _on_dims_chunk(self, dims: dict) -> None:
+        # Accumulate chunk results; apply to the model once \u2014 a single re-sort
+        # rather than one per chunk (avoids repeated model resets / flicker).
+        self._dims_pending.update(dims)
+        self._dims_remaining -= 1
+        if self._dims_remaining > 0:
+            return
+        self._dims_done_for.update(self._dims_pending.keys())
+        applied = self._dims_pending
+        self._dims_pending = {}
+        self._dims_inflight = False
+        self._model.set_dims(applied)
         if self._model.needs_dimensions():
             self._status.setText(
                 f"Sorted by {self._sort.currentText().lower()}")
+        # Paths added during the pass (streaming scan) still need measuring.
+        if any(p not in self._dims_done_for for p in self._model.all_paths()):
+            self._ensure_dims()
 
     # -- favourites / rotate / trash -------------------------------------------
     def _on_grid_fav(self, row: int) -> None:
@@ -797,11 +832,12 @@ class MainWindow(QMainWindow):
             if not dest:
                 continue
             self._favs.discard(path)
-            self._model.remove_path(path)
             batch.append((path, dest))
         if not batch:
             self._status.setText("Delete failed")
             return
+        # One model update for the whole batch (remove_path per item is O(n·k)).
+        self._model.remove_paths([p for p, _ in batch])
         self._trash_stack.append(batch)
         if len(batch) == 1:
             self._undo_label.setText(

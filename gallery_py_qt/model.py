@@ -407,6 +407,29 @@ class GalleryModel(QAbstractListModel):
                 self._path_to_row[p] = r - 1
         self.endRemoveRows()
 
+    def remove_paths(self, paths: list[str]) -> None:
+        """Remove many paths in one model reset.
+
+        remove_path() shifts every downstream row index O(n) per call, so
+        deleting k items one-by-one is O(n*k).  For a multi-selection trash this
+        rebuilds the visible rows and reverse index a single time instead.
+        """
+        drop = {p for p in paths if p in self._all_set}
+        if not drop:
+            return
+        if len(drop) == 1:
+            self.remove_path(next(iter(drop)))
+            return
+        self.beginResetModel()
+        self._all = [p for p in self._all if p not in drop]
+        self._all_set -= drop
+        for p in drop:
+            self._pixmaps.pop(p, None)
+            self._failed.discard(p)
+        self._rows = [p for p in self._rows if p not in drop]
+        self._path_to_row = {p: i for i, p in enumerate(self._rows)}
+        self.endResetModel()
+
     def add_path(self, path: str) -> None:
         """Re-insert a path (e.g. after undo-trash). Triggers a full reindex."""
         if path not in self._all_set:
@@ -417,6 +440,11 @@ class GalleryModel(QAbstractListModel):
     def update_video_frame(self, path: str, pm: "QPixmap") -> None:
         """Overwrite the displayed pixmap with a live video preview frame."""
         self._pixmaps[path] = pm
+        # Respect the LRU memory cap — live frames were bypassing it, letting
+        # the pixmap cache grow past its byte budget while videos were visible.
+        self._pixmaps.move_to_end(path)
+        while len(self._pixmaps) > self._pixmap_cap:
+            self._pixmaps.popitem(last=False)
         row = self._path_to_row.get(path)
         if row is not None:
             idx = self.index(row)
