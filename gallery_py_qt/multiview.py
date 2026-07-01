@@ -749,6 +749,9 @@ class MultiView(QWidget):
 
         # Tile currently under the mouse — the Delete key's target.
         self._hover_slot: "_Slot | None" = None
+        # Dimension probing still running (counter shows "measuring…").
+        self._measuring = False
+        self._counter_base = ""
 
         # Side-scroll state
         self._ss_slot_order: list[_Slot] = []   # non-empty only when scrolling
@@ -1264,7 +1267,8 @@ class MultiView(QWidget):
             for s in self._slots:
                 if not s.is_pinned:
                     s.clear()
-            self._counter.setText("0 of 0")
+            self._counter_base = "0 of 0"
+            self._apply_counter()
             return
 
         want = self._detect_layout()
@@ -1283,24 +1287,49 @@ class MultiView(QWidget):
                 idx += 1
             if idx < len(paths):
                 path = paths[idx]
-                row = self._model.row_for_path(path)
-                slot.show_item(row if row >= 0 else idx, path)
                 shown_end = idx + 1
                 idx += 1
             elif paths:
                 path = paths[idx % len(paths)]
-                row = self._model.row_for_path(path)
-                slot.show_item(row if row >= 0 else 0, path)
                 shown_end = len(paths)
                 idx += 1
             else:
                 slot.clear()
+                continue
+            # Skip reloading a slot that already shows this file — dims-driven
+            # re-partitions re-render frequently, and an unconditional
+            # show_item() restarted every playing video each time.
+            row = self._model.row_for_path(path)
+            if slot._path != path:
+                slot.show_item(row if row >= 0 else max(0, idx - 1), path)
+            elif row >= 0:
+                slot._row = row     # keep enlarge/lightbox on the right item
 
         total = len(paths)
-        self._counter.setText(
+        self._counter_base = (
             f"{self._start + 1}–{min(shown_end, total)} of {total}")
+        self._apply_counter()
         # Content changed → tile aspect boxes may have changed.
         self._layout_tiles()
+
+    def _apply_counter(self) -> None:
+        suffix = "  ·  measuring…" if self._measuring else ""
+        self._counter.setText(self._counter_base + suffix)
+
+    def set_measuring(self, on: bool) -> None:
+        """Dimension probing is running: the orientation groups can still grow.
+
+        Shown in the counter so a partially-measured video folder doesn't
+        falsely read as \"these are the only items\".
+        """
+        on = bool(on)
+        if on == self._measuring:
+            return
+        self._measuring = on
+        self._apply_counter()
+        if not on and self.isVisible():
+            # Final sizes are in — settle the groups one last time.
+            self._on_model_dims_changed()
 
     # -- navigation ------------------------------------------------------------
 

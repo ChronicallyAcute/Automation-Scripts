@@ -893,11 +893,12 @@ class MainWindow(QMainWindow):
             return
         self._dims_inflight = True
         # Images and videos are separated: image header reads are fast and run
-        # as parallel chunks; video probes serialise on the cv2 lock anyway, so
-        # they go in ONE trailing job.  Each job's results apply as they land
-        # (_on_dims_chunk), so the gallery reveals \u2014 images sorted, videos
-        # provisionally at the end \u2014 within seconds instead of staying blank
-        # until the last video has been probed.
+        # as parallel chunks.  Video probes serialise on the cv2 lock, so they
+        # were ONE monolithic trailing job \u2014 but that meant dimsChanged fired
+        # only when the LAST video finished, so the multi-view's orientation
+        # groups looked complete-but-tiny ("the only videos") for minutes on a
+        # big video folder.  Small video chunks make results land every few
+        # seconds and the groups grow live.
         images = [p for p in paths if not _media.is_video(p)]
         videos = [p for p in paths if _media.is_video(p)]
         jobs: list[list[str]] = []
@@ -905,17 +906,18 @@ class MainWindow(QMainWindow):
             n = min(self._dims_pool.maxThreadCount(),
                     max(1, len(images) // 400 + 1))
             jobs.extend(c for c in (images[i::n] for i in range(n)) if c)
-        if videos:
-            jobs.append(videos)
+        _VCHUNK = 24
+        jobs.extend(videos[i:i + _VCHUNK]
+                    for i in range(0, len(videos), _VCHUNK))
         self._dims_remaining = len(jobs)
         self._status.setText("Computing dimensions\u2026")
+        if self._mv is not None:
+            self._mv.set_measuring(True)
         for c in jobs:
             self._dims_pool.start(_DimsJob(c, self._dims_sig))
 
     def _on_dims_chunk(self, dims: dict) -> None:
-        # Apply each job's results immediately \u2014 progressive reveal.  At most a
-        # handful of jobs run per pass, so the extra re-sorts are cheap next to
-        # minutes of blank grid on a video-heavy folder.
+        # Apply each job's results immediately \u2014 progressive reveal.
         self._dims_done_for.update(dims.keys())
         if dims:
             self._model.set_dims(dims)
@@ -928,7 +930,9 @@ class MainWindow(QMainWindow):
                 f"Sorted by {self._sort.currentText().lower()}")
         # Paths added during the pass (streaming scan) still need measuring.
         if any(p not in self._dims_done_for for p in self._model.all_paths()):
-            self._ensure_dims()
+            self._ensure_dims()      # sets measuring back on if it restarts
+        if not self._dims_inflight and self._mv is not None:
+            self._mv.set_measuring(False)
 
     # -- favourites / rotate / trash -------------------------------------------
     def _on_grid_fav(self, row: int) -> None:
@@ -1100,6 +1104,7 @@ class MainWindow(QMainWindow):
             self._content_stack.addWidget(self._mv)
         # Kick off dims computation so orientation lists are accurate.
         self._ensure_dims()
+        self._mv.set_measuring(self._dims_inflight)
         self._mv.open(start_row)
         self._content_stack.setCurrentWidget(self._mv)
         self._bar.hide()
