@@ -26,13 +26,13 @@ from __future__ import annotations
 import os
 
 from PySide6.QtCore import (Qt, QUrl, Signal, QSizeF, QSize, QRectF, QTimer,
-                            QMimeData)
+                            QMimeData, QObject, QRunnable, QThreadPool)
 from PySide6.QtWidgets import (QWidget, QGridLayout, QVBoxLayout,
                                QHBoxLayout, QLabel, QToolButton, QStackedWidget,
                                QGraphicsScene, QGraphicsView, QSizePolicy,
                                QSpinBox, QSlider, QApplication)
-from PySide6.QtGui import (QPixmap, QKeySequence, QShortcut, QPalette, QColor,
-                           QPainter, QIcon, QDrag)
+from PySide6.QtGui import (QPixmap, QImage, QKeySequence, QShortcut, QPalette,
+                           QColor, QPainter, QIcon, QDrag)
 from PySide6.QtMultimedia import QMediaPlayer, QAudioOutput, QtAudio
 from PySide6.QtMultimediaWidgets import QGraphicsVideoItem
 
@@ -42,6 +42,31 @@ from .seekbar import SeekBar, fmt_time
 
 # MIME type carrying a dragged tile's file path between slots.
 _SLOT_MIME = "application/x-gallery-slot-path"
+
+
+class _ImgSignals(QObject):
+    ready = Signal(int, QImage)   # (generation, decoded image)
+
+
+class _ImgJob(QRunnable):
+    """Decode a tile's still off the GUI thread (mirrors the lightbox).
+
+    A generation token lets the slot ignore results that land after it has
+    been re-used for a different item, so paging never shows a stale image.
+    """
+    def __init__(self, gen: int, path: str, max_px: int, signals: _ImgSignals):
+        super().__init__()
+        self._gen = gen
+        self._path = path
+        self._max_px = max_px
+        self._signals = signals
+
+    def run(self) -> None:
+        try:
+            qim = media.load_full_qimage(self._path, max_px=self._max_px)
+        except Exception:
+            qim = None
+        self._signals.ready.emit(self._gen, qim if qim is not None else QImage())
 
 
 def _make_pause_icon(color: QColor, px: int = 32) -> QIcon:
@@ -146,6 +171,11 @@ class _Slot(QWidget):
         self._speed_idx = 2          # index into _SPEEDS → 1.0×
         self._drag_start = None
         self._fill = False           # False = fit (letterbox), True = cover-crop
+        # Off-thread still decoding (set by MultiView after construction).
+        self._img_pool: "QThreadPool | None" = None
+        self._img_gen = 0
+        self._img_sig = _ImgSignals(self)
+        self._img_sig.ready.connect(self._on_img_decoded)
         self.setAcceptDrops(True)
 
         p = self.palette()
@@ -345,6 +375,9 @@ class _Slot(QWidget):
         """Pixel bounds (x, y, w, h) of the scaled image within the slot."""
         cw = self._img.width() or self.width()
         ch = self._img.height() or self.height()
+        # Fill mode covers the whole tile — overlays span the full tile.
+        if self._fill:
+            return 0, 0, max(cw, 1), max(ch, 1)
         if self._pm.isNull() or cw <= 0 or ch <= 0:
             return 0, 0, max(cw, 1), max(ch, 1)
         pw, ph = self._pm.width(), self._pm.height()
@@ -415,6 +448,7 @@ class _Slot(QWidget):
 
     # -- content ---------------------------------------------------------------
     def clear(self) -> None:
+        self._img_gen += 1                      # drop any in-flight decode
         self._player.stop()
         self._img.clear_source()
         self._seekwrap.hide()
@@ -440,6 +474,7 @@ class _Slot(QWidget):
             " border-radius:4px; font-size:15px; padding:3px 6px; }" if is_fav else
             f"QToolButton {{ color: {config.OVERLAY_FG}; background: rgba(0,0,0,90);"
             " border-radius:4px; font-size:15px; padding:3px 6px; }")
+        self._img_gen += 1                      # invalidate any pending decode
         if media.is_video(path):
             self._is_video = True
             self._pm = QPixmap()
@@ -454,10 +489,27 @@ class _Slot(QWidget):
             self._player.stop()
             self._stack.setCurrentIndex(0)
             self._seekwrap.hide()
-            qim = media.load_full_qimage(path, max_px=2000)
-            self._pm = QPixmap.fromImage(qim) if (qim and not qim.isNull()) else QPixmap()
-            self._img.set_source(self._pm)
+            self._pm = QPixmap()
+            self._img.clear_source()            # blank while decoding off-thread
+            # Decode only to the tile's pixel size, not the source resolution.
+            tile_px = max(self.width(), self.height()) or 1280
+            tile_px = max(640, min(tile_px, 2048))
+            if self._img_pool is not None:
+                self._img_pool.start(
+                    _ImgJob(self._img_gen, path, tile_px, self._img_sig))
+            else:
+                qim = media.load_full_qimage(path, max_px=tile_px)
+                self._on_img_decoded(self._img_gen,
+                                     qim if qim is not None else QImage())
             self._position_overlays()
+
+    def _on_img_decoded(self, gen: int, qim: QImage) -> None:
+        if gen != self._img_gen or self._is_video:
+            return                              # superseded by a later show_item
+        self._pm = (QPixmap.fromImage(qim)
+                    if (qim is not None and not qim.isNull()) else QPixmap())
+        self._img.set_source(self._pm)
+        self._position_overlays()
 
     def _reset_audio(self) -> None:
         self._muted = True
@@ -640,6 +692,13 @@ class MultiView(QWidget):
         # (3 = 3×1, 4 = 2×2).  Fill mode crops media to cover each tile.
         self._forced_layout = None
         self._fill_mode = False
+
+        # Shared, bounded pool for off-thread tile decoding (all tiles share it,
+        # so at most 2 full decodes run at once — never one-per-tile on the GUI).
+        self._img_pool = QThreadPool(self)
+        self._img_pool.setMaxThreadCount(2)
+        # Re-partition orientation groups when the async dims job reports sizes.
+        model.dimsChanged.connect(self._on_model_dims_changed)
 
         # Orientation-partitioned path lists.
         self._portrait_paths:  list[str] = []
@@ -833,6 +892,12 @@ class MultiView(QWidget):
     # -- orientation lists -----------------------------------------------------
 
     def _refresh_orientation_lists(self) -> None:
+        # Partition by dimensions ALREADY cached in the model only.  Never call
+        # media.peek_size here: for videos it opens a cv2.VideoCapture under a
+        # global lock, and doing that on the GUI thread for a whole big folder
+        # froze the UI.  Items whose dims aren't computed yet bucket as
+        # landscape (2×2); _on_model_dims_changed re-partitions once the async
+        # dims job reports real sizes.
         was_portrait = self._current_paths is self._portrait_paths
         portrait, landscape = [], []
         for i in range(self._model.rowCount()):
@@ -840,11 +905,6 @@ class MultiView(QWidget):
             if not path:
                 continue
             w, h = self._model.dim_at(path)
-            if w <= 0 or h <= 0:
-                try:
-                    w, h = media.peek_size(path)
-                except Exception:
-                    w, h = 0, 0
             if w > 0 and h > 0 and w / h < 0.95:
                 portrait.append(path)
             else:
@@ -852,6 +912,24 @@ class MultiView(QWidget):
         self._portrait_paths  = portrait
         self._landscape_paths = landscape
         self._current_paths = portrait if was_portrait else landscape
+
+    def _on_model_dims_changed(self) -> None:
+        """Dimensions arrived from the background job — re-partition quietly.
+
+        Updates the orientation lists and counter so later navigation is
+        correct, but does not disturb the tiles currently on screen.
+        """
+        if not self.isVisible():
+            return
+        cur = (self._current_paths[self._start]
+               if self._current_paths and self._start < len(self._current_paths)
+               else None)
+        self._refresh_orientation_lists()
+        if cur and cur in self._current_paths:
+            self._start = self._current_paths.index(cur)
+        else:
+            self._start = min(self._start, max(0, len(self._current_paths) - 1))
+        self._update_orient_btn()
 
     def _detect_layout(self) -> int:
         """Forced layout if set, else 3 for portrait 3×1 / 4 for landscape 2×2."""
@@ -894,6 +972,7 @@ class MultiView(QWidget):
             slot.rotated.connect(self._on_slot_rotate)
             slot.pinned.connect(lambda *_: None)
             slot.set_fill(self._fill_mode)
+            slot._img_pool = self._img_pool
             self._grid.addWidget(slot, r, c)
             self._slots.append(slot)
         # Extra slot for the side-scroll right-edge buffer (not in grid layout)
@@ -906,6 +985,7 @@ class MultiView(QWidget):
         self._ss_buf.reordered.connect(self._on_reorder)
         self._ss_buf.rotated.connect(self._on_slot_rotate)
         self._ss_buf.set_fill(self._fill_mode)
+        self._ss_buf._img_pool = self._img_pool
         self._ss_buf.hide()
         used_cols = 3 if n == 3 else 2
         used_rows = 1 if n == 3 else 2

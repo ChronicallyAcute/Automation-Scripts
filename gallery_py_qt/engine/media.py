@@ -54,6 +54,24 @@ def is_video(path: str) -> bool:
     return os.path.splitext(path.lower())[1] in config.VIDEO_EXT
 
 
+def screen_max_px(fallback: int = 2560) -> int:
+    """Largest useful decode size = the biggest screen's long side (device px),
+    clamped.  A viewer never needs more pixels than the display can show, so
+    this keeps full-image decodes/retained pixmaps far below source resolution."""
+    try:
+        from PySide6.QtGui import QGuiApplication
+        best = 0
+        for s in QGuiApplication.screens():
+            sz = s.size()
+            best = max(best,
+                       int(max(sz.width(), sz.height()) * s.devicePixelRatio()))
+        if best > 0:
+            return max(1280, min(best, 5120))
+    except Exception:
+        pass
+    return fallback
+
+
 def _has_alpha(im: "Image.Image") -> bool:
     """Return True if the PIL image has (or may have) a transparency channel."""
     if im.mode in _ALPHA_MODES:
@@ -102,13 +120,30 @@ def rotate_image_file(path: str, degrees: int) -> bool:
     if deg not in (90, 180, 270):
         return False
     try:
-        from PIL import Image, ImageOps
+        from PIL import Image, ImageOps, ImageSequence
         # PIL ROTATE_n is counter-clockwise, so clockwise 90 == ROTATE_270.
         op = {90: Image.Transpose.ROTATE_270,
               180: Image.Transpose.ROTATE_180,
               270: Image.Transpose.ROTATE_90}[deg]
         with Image.open(path) as im:
             fmt = im.format
+            # Animated GIF / multi-page TIFF: rotate EVERY frame and re-save
+            # with save_all, otherwise we'd silently flatten it to frame 0.
+            if getattr(im, "is_animated", False) and getattr(im, "n_frames", 1) > 1:
+                frames, durations = [], []
+                for fr in ImageSequence.Iterator(im):
+                    durations.append(fr.info.get("duration", 80))
+                    frames.append(fr.convert("RGBA").transpose(op))
+                save_kw = {"save_all": True, "append_images": frames[1:],
+                           "loop": im.info.get("loop", 0), "duration": durations}
+                if fmt == "GIF":
+                    save_kw["disposal"] = 2
+                try:
+                    frames[0].save(path, format=fmt, **save_kw)
+                except Exception:
+                    frames[0].save(path, save_all=True,
+                                   append_images=frames[1:], duration=durations)
+                return True
             im.load()
             im = ImageOps.exif_transpose(im)      # normalise existing rotation
             rotated = im.transpose(op)
@@ -229,8 +264,10 @@ def load_thumbnail(path: str, max_px: int) -> QImage | None:
         return None
 
 
-def load_full_qimage(path: str, max_px: int = 6000) -> QImage | None:
-    """Full-resolution still for the lightbox (clamped to a sane ceiling)."""
+def load_full_qimage(path: str, max_px: int = 4096) -> QImage | None:
+    """Full still for the lightbox / multiview, capped to max_px on the long
+    side.  Callers pass a screen- or tile-derived size so the retained pixmap
+    never balloons to the source resolution."""
     try:
         with Image.open(path) as im:
             im.draft(None, (max_px, max_px))   # cheap down-scale for huge JPEGs

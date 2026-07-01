@@ -38,15 +38,17 @@ class _FullImageJob(QRunnable):
     user has already navigated on, so rapid arrow-key paging never flashes a
     stale image.
     """
-    def __init__(self, gen: int, path: str, signals: _FullImageSignals):
+    def __init__(self, gen: int, path: str, max_px: int,
+                 signals: _FullImageSignals):
         super().__init__()
         self._gen = gen
         self._path = path
+        self._max_px = max_px
         self._signals = signals
 
     def run(self) -> None:
         try:
-            qim = media.load_full_qimage(self._path)
+            qim = media.load_full_qimage(self._path, max_px=self._max_px)
         except Exception:
             qim = None
         self._signals.ready.emit(self._gen, self._path,
@@ -205,9 +207,16 @@ class Lightbox(QDialog):
         self._player.durationChanged.connect(self._on_dur)
         self._scrub.seeked.connect(self._on_seek)
 
+        # Free everything (dialog, players, thread pool, retained pixmap) as
+        # soon as the viewer closes — otherwise every open leaked a full
+        # QMediaPlayer + pixmap that accumulated across a session.
+        self.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose, True)
+
         # Async full-image decoding so large images don't freeze the UI.
+        # Decode only to screen resolution, not the source's.
         self._img_pool = QThreadPool(self)
         self._img_pool.setMaxThreadCount(2)
+        self._decode_px = media.screen_max_px()
         self._img_gen = 0
         self._loaded_img_path: str | None = None
         self._img_sig = _FullImageSignals(self)
@@ -366,7 +375,8 @@ class Lightbox(QDialog):
                 self._loaded_img_path = path
                 self._loading_timer.start()
                 self._img_pool.start(
-                    _FullImageJob(self._img_gen, path, self._img_sig))
+                    _FullImageJob(self._img_gen, path, self._decode_px,
+                                  self._img_sig))
         self._position_overlays()
 
     def _on_full_image(self, gen: int, path: str, qim: QImage) -> None:
@@ -515,8 +525,15 @@ class Lightbox(QDialog):
         self._player.setPosition(new)
 
     def closeEvent(self, e) -> None:
-        self._player.stop()
-        # Invalidate any in-flight decode so a late result is ignored.
+        # Invalidate + drain in-flight decodes BEFORE the widget (and its
+        # signals object) is destroyed by WA_DeleteOnClose, so no worker thread
+        # emits into freed memory.
         self._img_gen += 1
         self._loading_timer.stop()
+        self._img_pool.clear()
+        self._img_pool.waitForDone(3000)
+        # Release the heavy resources explicitly.
+        self._player.stop()
+        self._player.setSource(QUrl())
+        self._img.set_pixmap(QPixmap())
         super().closeEvent(e)

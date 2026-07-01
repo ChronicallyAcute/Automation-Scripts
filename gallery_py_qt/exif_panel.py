@@ -26,6 +26,9 @@ def _fmt_size(nbytes: int) -> str:
 class InfoDialog(QDialog):
     def __init__(self, path: str, parent=None):
         super().__init__(parent)
+        # Auto-destroy on close so repeated info popups don't accumulate as
+        # (parented) children of the main window.
+        self.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose, True)
         self.setWindowTitle("File info")
         self.setMinimumWidth(380)
         if parent is not None:
