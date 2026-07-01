@@ -32,17 +32,22 @@ BAR_HIDE_MS = 2000
 # ---------------------------------------------------------------------------
 
 class _CheckFSModel(QFileSystemModel):
-    """QFileSystemModel extended with per-directory checkbox state.
+    """QFileSystemModel extended with per-item checkbox state.
 
     Column 0 gets Qt.ItemFlag.ItemIsUserCheckable so the view draws a native
-    checkbox on each directory entry.  Checked paths are tracked in a set and
-    survive tree expansion/collapsing.
+    checkbox on every entry.  Both directories AND individual media files are
+    shown and checkable (non-media files are hidden via name filters).
+    Checked paths are tracked in a set and survive expansion/collapsing.
     """
 
     def __init__(self, parent=None):
         super().__init__(parent)
         self._checked: set[str] = set()
-        self.setFilter(QDir.Filter.AllDirs | QDir.Filter.NoDotAndDotDot)
+        self.setFilter(QDir.Filter.AllDirs | QDir.Filter.Files
+                       | QDir.Filter.NoDotAndDotDot)
+        # Only media files are relevant; hide everything else entirely.
+        self.setNameFilters([f"*{ext}" for ext in sorted(config.SUPPORTED)])
+        self.setNameFilterDisables(False)
         self.setRootPath("")
 
     def flags(self, index: QModelIndex):
@@ -74,6 +79,12 @@ class _CheckFSModel(QFileSystemModel):
     def checked_paths(self) -> list[str]:
         return [p for p in sorted(self._checked) if os.path.isdir(p)]
 
+    def checked_files(self) -> list[str]:
+        return [p for p in sorted(self._checked) if os.path.isfile(p)]
+
+    def checked_all(self) -> list[str]:
+        return [p for p in sorted(self._checked) if os.path.exists(p)]
+
 
 class _FolderPickDlg(QDialog):
     """Folder picker: checkbox tree (left) + selected-folder list (right).
@@ -84,13 +95,16 @@ class _FolderPickDlg(QDialog):
     the current tree selection is used instead.
     """
 
-    def __init__(self, parent=None, recents: list[str] | None = None):
+    def __init__(self, parent=None, recents: list[str] | None = None,
+                 loader=None):
         super().__init__(parent, Qt.WindowType.Window)
-        self.setWindowTitle("Open Folder(s)  —  check boxes or Ctrl-click for multi-select")
+        self.setWindowTitle(
+            "Open folders & files  —  check boxes or Ctrl-click for multi-select")
         self.resize(900, 580)
         self.setStyleSheet(parent.styleSheet() if parent else "")
+        self._loader = loader
 
-        # File-system model with checkboxes
+        # File-system model with checkboxes (folders AND media files)
         self._fs = _CheckFSModel(self)
 
         # Tree view
@@ -107,6 +121,40 @@ class _FolderPickDlg(QDialog):
         self._tree.setCurrentIndex(home)
         self._tree.doubleClicked.connect(self._on_dbl)
 
+        # Hover thumbnail preview for individual files: a small floating
+        # tooltip-style label fed by the shared async thumbnail loader.
+        self._tree.setMouseTracking(True)
+        self._tree.entered.connect(self._on_hover_index)
+        self._tree.viewport().installEventFilter(self)
+        self._preview = QLabel(self, Qt.WindowType.ToolTip)
+        self._preview.setStyleSheet(
+            "background: #101010; border: 1px solid #333; padding: 3px;")
+        self._preview.hide()
+        self._preview_path = ""
+        self._preview_timer = QTimer(self)
+        self._preview_timer.setSingleShot(True)
+        self._preview_timer.setInterval(140)     # debounce fast hover sweeps
+        self._preview_timer.timeout.connect(self._request_preview)
+        if self._loader is not None:
+            self._loader.ready.connect(self._on_preview_ready)
+
+        # Quick access: common media locations, one click to jump the tree.
+        quick = QHBoxLayout()
+        quick.setSpacing(4)
+        ql = QLabel("Go to:")
+        ql.setStyleSheet(f"color: {config.FG_MID};")
+        quick.addWidget(ql)
+        home_dir = QDir.homePath()
+        for name in ("Downloads", "Pictures", "Videos", "Desktop", "Home"):
+            p = home_dir if name == "Home" else os.path.join(home_dir, name)
+            if not os.path.isdir(p):
+                continue
+            b = QPushButton(name)
+            b.setToolTip(p)
+            b.clicked.connect(lambda _=False, pp=p: self._goto(pp))
+            quick.addWidget(b)
+        quick.addStretch(1)
+
         # Checked-paths list
         self._list = QListView()
         from PySide6.QtCore import QStringListModel
@@ -116,7 +164,7 @@ class _FolderPickDlg(QDialog):
         self._list.setSizePolicy(QSizePolicy.Policy.Expanding,
                                  QSizePolicy.Policy.Expanding)
 
-        list_label = QLabel("Selected folders:")
+        list_label = QLabel("Selected folders && files:")
         list_label.setStyleSheet(f"color: {config.FG_MID}; padding: 2px 0;")
         right_panel = QWidget()
         rlay = QVBoxLayout(right_panel)
@@ -138,8 +186,14 @@ class _FolderPickDlg(QDialog):
                 btn.clicked.connect(lambda _=False, p=r: self._add_path(p))
                 rlay.addWidget(btn)
 
+        left_panel = QWidget()
+        llay = QVBoxLayout(left_panel)
+        llay.setContentsMargins(0, 0, 0, 0)
+        llay.addLayout(quick)
+        llay.addWidget(self._tree, 1)
+
         splitter = QSplitter(Qt.Orientation.Horizontal)
-        splitter.addWidget(self._tree)
+        splitter.addWidget(left_panel)
         splitter.addWidget(right_panel)
         splitter.setSizes([580, 300])
 
@@ -166,10 +220,59 @@ class _FolderPickDlg(QDialog):
         self._fs.dataChanged.connect(self._refresh_list)
 
     # -- internal helpers -----------------------------------------------------
+    def _goto(self, path: str) -> None:
+        idx = self._fs.index(path)
+        if idx.isValid():
+            self._tree.expand(idx)
+            self._tree.scrollTo(idx, self._tree.ScrollHint.PositionAtTop)
+            self._tree.setCurrentIndex(idx)
+
     def _on_dbl(self, index: QModelIndex) -> None:
         path = self._fs.filePath(index)
-        if os.path.isdir(path):
+        if os.path.isdir(path) or os.path.isfile(path):
             self._add_path(path)
+
+    # -- hover thumbnail preview -----------------------------------------------
+    def _on_hover_index(self, index: QModelIndex) -> None:
+        path = self._fs.filePath(index)
+        if (os.path.isfile(path)
+                and os.path.splitext(path.lower())[1] in config.SUPPORTED):
+            if path != self._preview_path:
+                self._preview_path = path
+                self._preview.hide()
+                self._preview_timer.start()
+        else:
+            self._hide_preview()
+
+    def _request_preview(self) -> None:
+        if self._preview_path and self._loader is not None:
+            self._loader.request(self._preview_path, 160)
+
+    def _on_preview_ready(self, path: str, max_px: int, qim) -> None:
+        if path != self._preview_path or max_px != 160 or qim.isNull():
+            return
+        from PySide6.QtGui import QCursor
+        self._preview.setPixmap(QPixmap.fromImage(qim))
+        self._preview.adjustSize()
+        pos = QCursor.pos()
+        self._preview.move(pos.x() + 18, pos.y() + 12)
+        self._preview.show()
+
+    def _hide_preview(self) -> None:
+        self._preview_path = ""
+        self._preview_timer.stop()
+        self._preview.hide()
+
+    def eventFilter(self, obj, event):
+        from PySide6.QtCore import QEvent
+        if (obj is self._tree.viewport()
+                and event.type() in (QEvent.Type.Leave, QEvent.Type.Hide)):
+            self._hide_preview()
+        return super().eventFilter(obj, event)
+
+    def done(self, result: int) -> None:
+        self._hide_preview()
+        super().done(result)
 
     def _add_path(self, path: str) -> None:
         self._fs._checked.add(path)
@@ -184,21 +287,25 @@ class _FolderPickDlg(QDialog):
             [Qt.ItemDataRole.CheckStateRole])
 
     def _refresh_list(self, *_) -> None:
-        self._list_model.setStringList(self._fs.checked_paths())
+        self._list_model.setStringList(self._fs.checked_all())
 
     # -- result ---------------------------------------------------------------
-    def selected_folders(self) -> list[str]:
-        """Checked folders first; fall back to tree selection if nothing checked."""
-        checked = self._fs.checked_paths()
-        if checked:
-            return checked
-        selected = []
+    def selected_items(self) -> tuple[list[str], list[str]]:
+        """(folders, files) — checked items first; fall back to the tree
+        selection if nothing is checked."""
+        folders = self._fs.checked_paths()
+        files = self._fs.checked_files()
+        if folders or files:
+            return folders, files
         for idx in self._tree.selectedIndexes():
-            if idx.column() == 0:
-                p = self._fs.filePath(idx)
-                if os.path.isdir(p) and p not in selected:
-                    selected.append(p)
-        return selected
+            if idx.column() != 0:
+                continue
+            p = self._fs.filePath(idx)
+            if os.path.isdir(p) and p not in folders:
+                folders.append(p)
+            elif os.path.isfile(p) and p not in files:
+                files.append(p)
+        return folders, files
 
     def recursive(self) -> bool:
         return self._recursive_cb.isChecked()
@@ -621,28 +728,38 @@ class MainWindow(QMainWindow):
 
     # -- folder / scan ---------------------------------------------------------
     def _pick_folders(self) -> None:
-        """Folder chooser with checkboxes + multi-select + recent folders."""
-        dlg = _FolderPickDlg(self, self._recents)
+        """Folder & file chooser with checkboxes, hover previews, quick access."""
+        dlg = _FolderPickDlg(self, self._recents, loader=self._loader)
         if dlg.exec() == QDialog.DialogCode.Accepted:
-            folders = dlg.selected_folders()
-            if folders:
-                self.open_folders(folders, recursive=dlg.recursive())
+            folders, files = dlg.selected_items()
+            if folders or files:
+                self.open_media(folders, files, recursive=dlg.recursive())
 
 
     def open_folder(self, folder: str) -> None:
         self.open_folders([folder])
 
     def open_folders(self, folders: list[str], recursive: bool = False) -> None:
+        self.open_media(folders, [], recursive=recursive)
+
+    def open_media(self, folders: list[str], files: list[str],
+                   recursive: bool = False) -> None:
+        """Open a mix of folders (scanned) and individually chosen files."""
         folders = [f for f in folders if os.path.isdir(f)]
-        if not folders:
+        files = [f for f in files if os.path.isfile(f)
+                 and os.path.splitext(f.lower())[1] in config.SUPPORTED]
+        if not folders and not files:
             return
         self._current_folders = folders
-        self._current_folder = folders[0]
-        if len(folders) == 1:
+        self._current_folder = folders[0] if folders else None
+        if len(folders) == 1 and not files:
             self.setWindowTitle(
                 f"Gallery \u2014 {os.path.basename(os.path.normpath(folders[0]))}")
+        elif folders:
+            self.setWindowTitle(f"Gallery \u2014 {len(folders)} folder(s)"
+                                + (f" + {len(files)} file(s)" if files else ""))
         else:
-            self.setWindowTitle(f"Gallery \u2014 {len(folders)} folders")
+            self.setWindowTitle(f"Gallery \u2014 {len(files)} file(s)")
         for f in folders:
             self._recents = [f] + [r for r in self._recents if r != f]
         self._recents = self._recents[:10]
@@ -654,12 +771,25 @@ class MainWindow(QMainWindow):
         self._model.set_paths([])    # clear immediately
         scanning = (os.path.basename(os.path.normpath(folders[0]))
                     if len(folders) == 1 else f"{len(folders)} folders")
-        self._status.setText(f"Scanning {len(folders)} folder(s)\u2026")
-        self._view.set_empty_hint(f"Scanning {scanning}\u2026",
-                                  "Media appears once dimensions are read")
-        self._scan_pool.start(
-            _StreamScanJob(folders, self._scan_gen, self._stream_sig,
-                           recursive=recursive))
+        if folders:
+            self._status.setText(f"Scanning {len(folders)} folder(s)\u2026")
+            self._view.set_empty_hint(f"Scanning {scanning}\u2026",
+                                      "Media appears once dimensions are read")
+        # Hand-picked files go through the same batch path as a scan (dedup
+        # against later folder hits happens in the model).
+        if files:
+            self._on_scan_batch(self._scan_gen, files)
+        if folders:
+            self._scan_pool.start(
+                _StreamScanJob(folders, self._scan_gen, self._stream_sig,
+                               recursive=recursive))
+        else:
+            # Files only: no scan job will fire done \u2014 synthesise the result.
+            from .engine.scan import ScanResult
+            res = ScanResult()
+            res.paths = list(files)
+            res.total = len(files)
+            self._on_scan_done(self._scan_gen, res)
 
     def _on_scan_batch(self, gen: int, paths: list) -> None:
         if gen != self._scan_gen:
