@@ -464,9 +464,18 @@ class _Slot(QWidget):
         self._position_overlays()
 
     # -- content ---------------------------------------------------------------
+    def release_media(self) -> None:
+        """Stop playback AND release the file handle.
+
+        stop() alone keeps the source open — on Windows that locks the file
+        and makes deleting a video that is (or recently was) playing fail.
+        """
+        self._player.stop()
+        self._player.setSource(QUrl())
+
     def clear(self) -> None:
         self._img_gen += 1                      # drop any in-flight decode
-        self._player.stop()
+        self.release_media()
         self._img.clear_source()
         self._seekwrap.hide()
         self._vol_popup.hide()
@@ -570,7 +579,10 @@ class _Slot(QWidget):
 
     def _trash(self) -> None:
         if self._path:
-            self._player.stop()
+            # Release this slot's handle up front; MultiView.release_path()
+            # releases any OTHER slot showing the same file (duplicate-filled
+            # pages and the side-scroll buffer) before the move happens.
+            self.release_media()
             self.trashed.emit(self._path)
 
     # -- media player callbacks ------------------------------------------------
@@ -735,6 +747,9 @@ class MultiView(QWidget):
         self._set_interval_s = 4         # remembered seconds-per-set
         self._scroll_level   = 3         # remembered side-scroll speed level
 
+        # Tile currently under the mouse — the Delete key's target.
+        self._hover_slot: "_Slot | None" = None
+
         # Side-scroll state
         self._ss_slot_order: list[_Slot] = []   # non-empty only when scrolling
         self._ss_head_idx = 0     # index in _current_paths of the leftmost slot
@@ -885,6 +900,10 @@ class MultiView(QWidget):
         # whichever panel is active instead.
         QShortcut(QKeySequence("Ctrl+M"),          self,
                   activated=self._unmute_all)
+        QShortcut(QKeySequence(Qt.Key.Key_Delete), self,
+                  activated=self._trash_hovered)
+        QShortcut(QKeySequence(Qt.Key.Key_Backspace), self,
+                  activated=self._trash_hovered)
 
         # Auto-hide the chrome/bottom bars after idle so tiles get the full
         # panel height; any mouse move (H toggles manually) brings them back.
@@ -904,6 +923,7 @@ class MultiView(QWidget):
             ("F", "Fit (no crop) / Fill (cover)"),
             ("H", "Show / hide the bars"),
             ("Ctrl+M", "Unmute all visible videos"),
+            ("Delete", "Trash the hovered tile (undoable)"),
             ("Double-click", "Open tile in the viewer"),
             ("Drag tile → tile", "Swap positions"),
             ("Esc", "Back to gallery"),
@@ -1041,6 +1061,7 @@ class MultiView(QWidget):
         return slot
 
     def _build_slots(self, n: int) -> None:
+        self._hover_slot = None       # old slots are about to be destroyed
         # Clean up any side-scroll state without re-rendering
         if self._ss_slot_order:
             self._ss_timer.stop()
@@ -1475,7 +1496,11 @@ class MultiView(QWidget):
             else:
                 self._layout_tiles()
         elif et in (QEvent.Type.MouseMove, QEvent.Type.Enter):
+            if isinstance(obj, _Slot):
+                self._hover_slot = obj      # target for the Delete key
             self._show_bars()
+        elif et == QEvent.Type.Leave and obj is self._hover_slot:
+            self._hover_slot = None
         return super().eventFilter(obj, event)
 
     def mouseMoveEvent(self, e):
@@ -1534,6 +1559,9 @@ class MultiView(QWidget):
         if path:
             self.rotated.emit(path)
 
+    def _all_slots(self) -> list["_Slot"]:
+        return self._slots + ([self._ss_buf] if self._ss_buf is not None else [])
+
     def reload_path(self, path: str) -> None:
         """Reload any slot showing `path` after its pixels changed on disk.
 
@@ -1542,12 +1570,36 @@ class MultiView(QWidget):
         """
         self._refresh_orientation_lists()
         self._update_orient_btn()
-        targets = list(self._slots)
-        if self._ss_buf is not None:
-            targets.append(self._ss_buf)
-        for slot in targets:
+        for slot in self._all_slots():
             if slot._path == path:
                 slot.show_item(slot._row, path)
+
+    def release_path(self, path: str) -> None:
+        """Release every player handle on `path` so the file can be moved.
+
+        Duplicate-filled pages and the side-scroll buffer can all hold the
+        same video open; a single locked handle makes deletion fail on
+        Windows.  Called by the main window before trashing a file.
+        """
+        for slot in self._all_slots():
+            if slot._path == path:
+                slot.release_media()
+
+    def release_all_media(self) -> None:
+        """Stop playback and release every file handle (panel deactivated).
+
+        Without this, tiles kept decoding (and locking) their videos while
+        the gallery was shown — burning CPU and blocking deletion of any
+        file last seen in multi-view.
+        """
+        for slot in self._all_slots():
+            slot.clear()
+
+    def _trash_hovered(self) -> None:
+        """Delete key: trash the tile currently under the mouse."""
+        slot = self._hover_slot
+        if slot is not None and slot._path:
+            slot._trash()
 
     def _on_slot_trash(self, path: str) -> None:
         if path:

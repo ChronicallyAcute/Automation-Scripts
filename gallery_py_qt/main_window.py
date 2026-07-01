@@ -886,6 +886,13 @@ class MainWindow(QMainWindow):
         """Trash one or more files as a single undoable batch."""
         batch: list[tuple[str, str]] = []
         for path in paths:
+            # Release every open handle on the file first — multiview tiles
+            # (including duplicates and the side-scroll buffer) and the
+            # gallery's video-preview players each hold the file open, which
+            # blocks moving a video to the trash on Windows.
+            if self._mv is not None:
+                self._mv.release_path(path)
+            self._view.release_video(path)
             dest = favorites.trash_file(path)
             if not dest:
                 continue
@@ -974,6 +981,10 @@ class MainWindow(QMainWindow):
     def _close_multiview(self) -> None:
         if self._mv is not None:
             self._mv.stop_autoscroll()
+            # Stop hidden playback and release file handles — otherwise tiles
+            # kept decoding their videos behind the gallery, and any file last
+            # shown in multi-view stayed locked against deletion.
+            self._mv.release_all_media()
         self._content_stack.setCurrentWidget(self._view)
         self._bar.show()
         self._position_overlays()

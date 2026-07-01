@@ -140,7 +140,20 @@ def trash_file(path: str) -> str | None:
         if os.path.exists(dest):
             stem, ext = os.path.splitext(base)
             dest = os.path.join(config.TRASH_DIR, f"{stem}_{int(time.time())}{ext}")
-        shutil.move(path, dest)
+        # A video that was just playing may still be locked for a moment on
+        # Windows — QMediaPlayer releases its file handle shortly after the
+        # source is cleared, not instantly.  Retry briefly before giving up.
+        last_exc: Exception | None = None
+        for attempt in range(4):
+            try:
+                shutil.move(path, dest)
+                last_exc = None
+                break
+            except (PermissionError, OSError) as exc:
+                last_exc = exc
+                time.sleep(0.05 * (attempt + 1))
+        if last_exc is not None:
+            raise last_exc
         man = _load_manifest()
         man[os.path.basename(dest)] = {"orig": path, "ts": time.time()}
         _save_manifest(man)

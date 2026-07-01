@@ -252,6 +252,12 @@ class GalleryView(QAbstractScrollArea):
         self._apply_canvas_palette()
         self.viewport().update()
 
+    def release_video(self, path: str) -> None:
+        """Release the in-grid preview player's handle on `path` (no-op if
+        the path isn't previewing) so the file can be moved to trash."""
+        self._vid_pool.stop(path)
+        self._pending_frames.pop(path, None)
+
     def forget_path_dims(self, path: str) -> None:
         """Drop a cached pixmap-derived aspect ratio (e.g. after a rotation)
         so the masonry layout re-measures the cell from fresh data."""

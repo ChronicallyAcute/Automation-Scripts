@@ -468,7 +468,10 @@ class Lightbox(QDialog):
     def _trash(self) -> None:
         p = self._path()
         if p:
+            # Release the handle, not just stop — a stopped QMediaPlayer still
+            # holds the file open, which blocks the trash move on Windows.
             self._player.stop()
+            self._player.setSource(QUrl())
             self.trashed.emit(p)
 
     def _toggle_fs(self) -> None:
