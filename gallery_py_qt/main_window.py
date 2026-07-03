@@ -401,6 +401,7 @@ class MainWindow(QMainWindow):
         self._model.sortChanged.connect(self._sync_sort_combo)
         self._current_folder: str | None = None
         self._current_folders: list[str] = []
+        self._lightbox_count = 0     # open viewer windows (previews pause)
         # Stack of trash batches; each batch is a list of (orig, trash) pairs
         # so a single Undo restores all files deleted together.
         self._trash_stack: list[list[tuple[str, str]]] = []
@@ -1082,7 +1083,18 @@ class MainWindow(QMainWindow):
             lb.reload_current()
 
     # -- lightbox / multiview --------------------------------------------------
+    def _resume_previews_if_gallery_active(self) -> None:
+        """Resume in-grid video previews only when the gallery is truly on
+        top again (stack shows it and no lightbox window is open)."""
+        if (self._content_stack.currentWidget() is self._view
+                and self._lightbox_count <= 0):
+            self._view.resume_video_previews()
+
     def _open_lightbox(self, row: int) -> None:
+        # Hidden gallery previews under the viewer waste GUI-thread frame
+        # conversions and starve input handling.
+        self._view.suspend_video_previews()
+        self._lightbox_count += 1
         lb = Lightbox(self._model, self._favs, self)
         lb.favToggled.connect(self._toggle_fav_path)
         lb.trashed.connect(self._trash_path)
@@ -1091,12 +1103,21 @@ class MainWindow(QMainWindow):
             lambda deg, _lb=lb: self._rotate_from_lightbox(_lb, deg))
         # Close the lightbox before switching to the embedded multiview panel.
         lb.openMulti.connect(lambda r, _lb=lb: (_lb.close(), self._open_multiview(r)))
+        lb.destroyed.connect(self._on_lightbox_gone)
         lb.showFullScreen()
         lb.raise_()
         lb.activateWindow()
         lb.show_row(row)
 
+    def _on_lightbox_gone(self, *_) -> None:
+        self._lightbox_count = max(0, self._lightbox_count - 1)
+        self._resume_previews_if_gallery_active()
+
     def _open_multiview(self, start_row: int) -> None:
+        # Same reasoning as the lightbox: 4 visible multi-view videos plus 4
+        # invisible gallery previews meant up to 8 decode pipelines pushing
+        # per-frame work through the GUI thread — every click lagged.
+        self._view.suspend_video_previews()
         if self._mv is None:
             self._mv = MultiView(self._model, self._favs, self)
             self._mv.favToggled.connect(self._toggle_fav_path)
@@ -1126,6 +1147,7 @@ class MainWindow(QMainWindow):
         self._content_stack.setCurrentWidget(self._view)
         self._bar.show()
         self._position_overlays()
+        self._resume_previews_if_gallery_active()
 
     # -- autoscroll / fullscreen -----------------------------------------------
     def _toggle_autoscroll(self) -> None:

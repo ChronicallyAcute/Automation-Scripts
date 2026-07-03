@@ -219,6 +219,7 @@ class GalleryView(QAbstractScrollArea):
 
         self._vid_pool = _VideoPreviewPool(self._on_video_frame, self)
         self._pending_frames: dict[str, object] = {}
+        self._previews_suspended = False
 
         self._frame_flush = QTimer(self)
         self._frame_flush.setInterval(50)
@@ -257,6 +258,29 @@ class GalleryView(QAbstractScrollArea):
         the path isn't previewing) so the file can be moved to trash."""
         self._vid_pool.stop(path)
         self._pending_frames.pop(path, None)
+
+    def suspend_video_previews(self) -> None:
+        """Stop all in-grid preview playback and frame processing.
+
+        Called when another panel (multi-view, lightbox) covers the gallery:
+        the hidden previews kept decoding AND converting every frame on the
+        GUI thread, which starved input handling — 4 visible multi-view
+        videos plus 4 invisible previews made every click lag.
+
+        The explicit flag matters: spurious Show events (native-window
+        creation elsewhere, stack switches) hit showEvent and would silently
+        restart the timer otherwise.
+        """
+        self._previews_suspended = True
+        self._vid_update.stop()
+        self._frame_flush.stop()
+        self._vid_pool.stop_all()
+        self._pending_frames.clear()
+
+    def resume_video_previews(self) -> None:
+        """Restart previews for the currently visible cells (debounced)."""
+        self._previews_suspended = False
+        self._vid_update.start()
 
     def forget_path_dims(self, path: str) -> None:
         """Drop a cached pixmap-derived aspect ratio (e.g. after a rotation)
@@ -827,7 +851,8 @@ class GalleryView(QAbstractScrollArea):
 
     def _on_scroll(self, _) -> None:
         self._overlay.hide()
-        self._vid_update.start()
+        if not self._previews_suspended:
+            self._vid_update.start()
         self.viewport().update()
 
     # -- video previews --------------------------------------------------------
@@ -837,6 +862,11 @@ class GalleryView(QAbstractScrollArea):
     def _sync_video_previews(self) -> None:
         m = self._model
         if m is None:
+            return
+        # Never run previews while suspended or covered/hidden.
+        if self._previews_suspended or not self.isVisible():
+            self._vid_pool.stop_all()
+            self._frame_flush.stop()
             return
         want: set[str] = set()
         for row in self._visible_rows():
@@ -875,4 +905,5 @@ class GalleryView(QAbstractScrollArea):
         # The first _relayout (during setModel) often runs before the viewport
         # has a real width and bails out; relayout again now that we're visible.
         self._relayout()
-        self._vid_update.start()
+        if not self._previews_suspended:
+            self._vid_update.start()

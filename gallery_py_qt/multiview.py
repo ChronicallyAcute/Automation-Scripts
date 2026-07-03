@@ -209,6 +209,8 @@ class _Slot(QWidget):
 
         # Video page
         self._scene = QGraphicsScene(self)
+        # One item, no spatial queries needed — skip the BSP index churn.
+        self._scene.setItemIndexMethod(QGraphicsScene.ItemIndexMethod.NoIndex)
         self._gview = QGraphicsView(self._scene)
         self._gview.setFrameStyle(0)
         self._gview.setStyleSheet("background: #000; border: none;")
@@ -216,8 +218,24 @@ class _Slot(QWidget):
             Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         self._gview.setVerticalScrollBarPolicy(
             Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        # Render video on the GPU: with the default raster viewport,
+        # QGraphicsVideoItem converts every frame YUV->RGB on the CPU — four
+        # simultaneous videos saturated the GUI thread and every click lagged.
+        # An OpenGL viewport uploads frames as textures instead.  Set the env
+        # var GALLERY_NO_GL=1 to force the raster path if GL misbehaves.
+        if os.environ.get("GALLERY_NO_GL") != "1":
+            try:
+                from PySide6.QtOpenGLWidgets import QOpenGLWidget
+                self._gview.setViewport(QOpenGLWidget())
+            except Exception:
+                pass
+        # Full-viewport updates are cheaper than per-frame dirty-region math
+        # for a constantly-changing video (and required for the GL path).
+        self._gview.setViewportUpdateMode(
+            QGraphicsView.ViewportUpdateMode.FullViewportUpdate)
 
-        # Media body passes mouse events through so slot can start a reorder drag.
+        # Media body passes mouse events through so slot can start a reorder
+        # drag.  NOTE: viewport() must be fetched AFTER any setViewport above.
         for w in (self._img, self._gview, self._gview.viewport()):
             w.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
         self._video_item = QGraphicsVideoItem()
@@ -1556,7 +1574,11 @@ class MultiView(QWidget):
         if not self._chrome_widget.isVisible():
             self._chrome_widget.show()
             self._autoscroll_widget.show()
-        self._bars_hide_timer.start()
+            self._bars_hide_timer.start()
+        elif self._bars_hide_timer.remainingTime() < 2200:
+            # Mouse-move events arrive in the hundreds per second; restarting
+            # the timer at most ~every 300 ms keeps the handler near-free.
+            self._bars_hide_timer.start()
 
     def _maybe_hide_bars(self) -> None:
         # Keep the bars while the user is interacting with them.
