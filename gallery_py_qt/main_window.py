@@ -956,8 +956,13 @@ class MainWindow(QMainWindow):
             self._apply_filter()    # un-favourited item leaves the filtered view
 
     def _toggle_fav_path(self, path: str) -> None:
-        self._favs.toggle(path)
+        new = self._favs.toggle(path)
         self._model.refresh_fav(path)
+        # Update multi-view hearts in place (tiles are not reloaded on toggle).
+        if self._mv is not None:
+            self._mv.refresh_fav(path)
+        self._status.setText(
+            f"{'Favourited' if new else 'Unfavourited'} {os.path.basename(path)}")
         if self._favs_btn.isChecked():
             self._apply_filter()
 

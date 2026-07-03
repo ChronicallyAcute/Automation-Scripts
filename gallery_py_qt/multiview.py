@@ -504,13 +504,14 @@ class _Slot(QWidget):
         self._reset_audio()
         self._position_overlays()
 
-    def show_item(self, row: int, path: str) -> None:
-        self._row  = row
-        self._path = path
-        self._rotation = 0
-        self._dur_ms   = 0
-        self._reset_audio()
-        is_fav = self._favs.is_fav(path)
+    def refresh_fav(self) -> None:
+        """Sync the heart button with the item's current favourite state.
+
+        Separate from show_item(): favourite toggles must update the icon
+        WITHOUT reloading the tile (a reload restarts playing videos, and
+        _render deliberately skips unchanged tiles anyway).
+        """
+        is_fav = bool(self._path) and self._favs.is_fav(self._path)
         self._fav_btn.setText(
             config.ICON_HEART_FULL if is_fav else config.ICON_HEART_EMPTY)
         self._fav_btn.setStyleSheet(
@@ -518,6 +519,14 @@ class _Slot(QWidget):
             " border-radius:4px; font-size:15px; padding:3px 6px; }" if is_fav else
             f"QToolButton {{ color: {config.OVERLAY_FG}; background: rgba(0,0,0,90);"
             " border-radius:4px; font-size:15px; padding:3px 6px; }")
+
+    def show_item(self, row: int, path: str) -> None:
+        self._row  = row
+        self._path = path
+        self._rotation = 0
+        self._dur_ms   = 0
+        self._reset_audio()
+        self.refresh_fav()
         self._img_gen += 1                      # invalidate any pending decode
         if media.is_video(path):
             self._is_video = True
@@ -1606,9 +1615,18 @@ class MultiView(QWidget):
 
     def _on_slot_fav(self, path: str) -> None:
         if path:
+            # MainWindow toggles the favourite and calls refresh_fav(path)
+            # back on us synchronously — no re-render needed (and a re-render
+            # wouldn't refresh hearts anyway, since unchanged tiles are
+            # deliberately not reloaded).
             self.favToggled.emit(path)
-            if not self._ss_timer.isActive():
-                self._render(self._start)
+
+    def refresh_fav(self, path: str) -> None:
+        """Update the heart on every tile showing `path` (duplicate-filled
+        pages and the side-scroll buffer can all display the same file)."""
+        for slot in self._all_slots():
+            if slot._path == path:
+                slot.refresh_fav()
 
     def _on_slot_rotate(self, path: str) -> None:
         if path:
