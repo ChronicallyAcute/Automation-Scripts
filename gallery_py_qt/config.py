@@ -9,12 +9,17 @@ os.environ.setdefault(
 os.environ.setdefault("QT_FFMPEG_DEBUG", "0")
 
 # -- Persistent file locations -----------------------------------------------
-# Favourites / trash / the Downloads mirror are SHARED with gallery_qt so the
-# two stay in sync.  Cache + prefs use separate names to avoid format clashes.
+# Favourites / trash are SHARED with gallery_qt so the two stay in sync.
+# Cache + prefs use separate names to avoid format clashes.
 HOME          = os.path.expanduser("~")
 FAVS_FILE     = os.path.join(HOME, ".gallery_favorites.json")       # shared
 TRASH_DIR     = os.path.join(HOME, ".gallery_trash")                # shared
-FAVORITES_DIR = os.path.join(HOME, "Downloads", "Gallery Favorites")# shared
+# Favourited files are mirrored (copied) here.  Overridable at runtime via the
+# "favorites_dir" key in the prefs file.
+if sys.platform.startswith("win"):
+    FAVORITES_DIR = "G:\\X"
+else:
+    FAVORITES_DIR = os.path.join(HOME, "Downloads", "Gallery Favorites")
 CACHE_DIR     = os.path.join(HOME, ".gallery_py_qt_cache")          # own
 PREFS_FILE    = os.path.join(HOME, ".gallery_py_qt_prefs.json")     # own
 RECENT_FILE   = os.path.join(HOME, ".gallery_py_qt_recent.json")    # own

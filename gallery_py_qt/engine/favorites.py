@@ -1,6 +1,5 @@
 """Favourites (with Downloads mirror) and trash/undo."""
 from __future__ import annotations
-import ctypes
 import json
 import os
 import shutil
@@ -21,16 +20,12 @@ def _same_file(a: str, b: str) -> bool:
 
 
 def ensure_favorites_dir() -> None:
+    # NOTE: the destination is an explicit user location (e.g. G:\X), so it is
+    # deliberately NOT marked hidden the way the old Downloads mirror was.
     try:
         os.makedirs(config.FAVORITES_DIR, exist_ok=True)
     except OSError as exc:
         print(f"[favs-dir] {exc}", file=sys.stderr)
-        return
-    if sys.platform.startswith("win"):
-        try:
-            ctypes.windll.kernel32.SetFileAttributesW(config.FAVORITES_DIR, 0x02)
-        except Exception:
-            pass
 
 
 class Favorites:

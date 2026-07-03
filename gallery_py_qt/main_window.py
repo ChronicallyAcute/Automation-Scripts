@@ -388,6 +388,12 @@ class MainWindow(QMainWindow):
         config.ensure_dirs()
         self._prefs = prefs.load_prefs()
         config.apply_theme(self._prefs.get("theme", "dark"))
+        # Favourites mirror destination (defaults to G:\X on Windows); a
+        # "favorites_dir" entry in the prefs file overrides it without a
+        # code change.
+        fav_dir = self._prefs.get("favorites_dir")
+        if isinstance(fav_dir, str) and fav_dir.strip():
+            config.FAVORITES_DIR = fav_dir.strip()
         self.setStyleSheet(theme.stylesheet())
         # Opt-in housekeeping: drop trashed items older than the configured age.
         purge_days = self._prefs.get("trash_purge_days", 0)
