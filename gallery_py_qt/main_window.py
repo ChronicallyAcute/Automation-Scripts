@@ -644,8 +644,11 @@ class MainWindow(QMainWindow):
         bh = self._bar.sizeHint().height()
         self._bar.setGeometry(8, 8, cw - 16, bh)
         if self._undo_bar.isVisible():
+            # Deleted-media banner sits at the top, just below the control
+            # bar's strip (fixed slot, so the two never overlap even while
+            # the control bar auto-hides/shows).
             uh = self._undo_bar.sizeHint().height()
-            self._undo_bar.setGeometry(8, ch - uh - 8, cw - 16, uh)
+            self._undo_bar.setGeometry(8, 8 + bh + 6, cw - 16, uh)
         if self._help.isVisible():
             self._help.move(max(0, (cw - self._help.width()) // 2),
                             max(0, (ch - self._help.height()) // 2))
