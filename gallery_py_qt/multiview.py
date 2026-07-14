@@ -1095,28 +1095,55 @@ class MultiView(QWidget):
         return slot
 
     def _build_slots(self, n: int) -> None:
-        self._hover_slot = None       # old slots are about to be destroyed
+        """Activate `n` of the persistent slots (3 = 3×1, 4 = 2×2).
+
+        Slots (and their media players / GL viewports) are created ONCE and
+        reused: the old rebuild destroyed and recreated five QMediaPlayer +
+        QAudioOutput pipelines on every 3×1⇄2×2 switch — a visible stall and
+        audio-device churn each time the orientation flipped.
+        """
+        self._hover_slot = None
         # Clean up any side-scroll state without re-rendering
         if self._ss_slot_order:
             self._ss_timer.stop()
             self._ss_slot_order.clear()
-        for s in self._slots:
-            s.clear()
-            s.setParent(None)
-        if self._ss_buf is not None:
-            self._ss_buf.clear()
-            self._ss_buf.setParent(None)
-            self._ss_buf = None
-        self._slots.clear()
+        if not self._slots:                       # first call: create 4 + buffer
+            for i in range(4):
+                self._slots.append(self._make_slot(i))
+            self._ss_buf = self._make_slot(4)
+            self._ss_buf.hide()
+        prev = self._layout_slots
         self._layout_slots = n
-        for i in range(n):
-            slot = self._make_slot(i)
+        # A pinned slot beyond the new active range keeps its media: relocate
+        # it into the first non-pinned active slot before deactivating.
+        for idx in range(n, len(self._slots)):
+            src = self._slots[idx]
+            if src.is_pinned and src._path:
+                for dst in self._slots[:n]:
+                    if not dst.is_pinned:
+                        dst._speed_idx = src._speed_idx
+                        dst._speed_btn.setText(
+                            f"{dst._SPEEDS[dst._speed_idx]:g}×")
+                        dst.show_item(src._row, src._path)
+                        dst._is_pinned = True
+                        dst._pin_btn.setIcon(dst._pause_icon_on)
+                        dst._pin_btn.setStyleSheet(dst._PIN_ON)
+                        dst._bar_hide_timer.stop()
+                        dst._btnbar.show()
+                        break
+            src._is_pinned = False
+            src._pin_btn.setIcon(src._pause_icon_off)
+            src._pin_btn.setStyleSheet(src._PIN_OFF)
+            src.clear()
+            src.hide()
+        for slot in self._slots[:n]:
             slot.show()
-            self._slots.append(slot)
-        # Extra slot for the side-scroll right-edge buffer
-        self._ss_buf = self._make_slot(n)
-        self._ss_buf.hide()
-        self._layout_tiles()
+        if prev != n or not self._slots[0].isVisible():
+            self._layout_tiles()
+
+    def _active_slots(self) -> list["_Slot"]:
+        """The slots participating in the current layout (3 or 4)."""
+        return self._slots[:self._layout_slots]
 
     # -- tile geometry -----------------------------------------------------------
 
@@ -1189,20 +1216,9 @@ class MultiView(QWidget):
             y += h + gap
 
     def _switch_layout(self, n: int) -> None:
-        """Rebuild grid for n slots, restoring pinned media to first slots."""
-        saved = [(s._path, s._row, s._speed_idx)
-                 for s in self._slots if s.is_pinned]
+        """Activate n slots; pinned media survives in place (persistent slots
+        mean no player teardown — see _build_slots)."""
         self._build_slots(n)
-        for (path, row, speed), slot in zip(saved[:n], self._slots):
-            if path:
-                slot._speed_idx = speed
-                slot._speed_btn.setText(f"{slot._SPEEDS[speed]:g}×")
-                slot.show_item(row if row >= 0 else 0, path)
-                slot._is_pinned = True
-                slot._pin_btn.setIcon(slot._pause_icon_on)
-                slot._pin_btn.setStyleSheet(slot._PIN_ON)
-                slot._bar_hide_timer.stop()
-                slot._btnbar.show()
 
     # -- side-scroll -----------------------------------------------------------
 
@@ -1221,8 +1237,8 @@ class MultiView(QWidget):
         self._ss_timer.stop()
         if not self._ss_slot_order:
             return
-        # Show all tile slots; hide the buffer; restore justified geometry.
-        for slot in self._slots:
+        # Show the active tile slots; hide the buffer; restore geometry.
+        for slot in self._active_slots():
             slot.show()
         if self._ss_buf is not None:
             self._ss_buf.hide()
@@ -1303,11 +1319,12 @@ class MultiView(QWidget):
             self._switch_layout(want)
 
         self._start = max(0, min(start, len(paths) - 1))
-        pinned_set = {s._path for s in self._slots if s.is_pinned and s._path}
+        active = self._active_slots()
+        pinned_set = {s._path for s in active if s.is_pinned and s._path}
 
         idx = self._start
         shown_end = self._start
-        for slot in self._slots:
+        for slot in active:
             if slot.is_pinned:
                 continue
             while idx < len(paths) and paths[idx] in pinned_set:
@@ -1364,7 +1381,7 @@ class MultiView(QWidget):
         self._stop_slideshow()
         if not self._current_paths:
             return
-        step = sum(1 for s in self._slots if not s.is_pinned) or 1
+        step = sum(1 for s in self._active_slots() if not s.is_pinned) or 1
         nxt = self._start + step
         self._render(0 if nxt >= len(self._current_paths) else nxt)
 
@@ -1372,7 +1389,7 @@ class MultiView(QWidget):
         self._stop_slideshow()
         if not self._current_paths:
             return
-        step = sum(1 for s in self._slots if not s.is_pinned) or 1
+        step = sum(1 for s in self._active_slots() if not s.is_pinned) or 1
         self._render(max(0, self._start - step))
 
     # -- chrome / UI helpers ---------------------------------------------------
@@ -1439,7 +1456,7 @@ class MultiView(QWidget):
         if not self._current_paths:
             self._set_timer.stop()
             return
-        step = sum(1 for s in self._slots if not s.is_pinned) or 1
+        step = sum(1 for s in self._active_slots() if not s.is_pinned) or 1
         nxt = self._start + step
         self._render(0 if nxt >= len(self._current_paths) else nxt)
 

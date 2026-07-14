@@ -5,8 +5,23 @@ import os
 import shutil
 import sys
 import time
+from concurrent.futures import ThreadPoolExecutor
 
 from .. import config
+
+# Mirror file operations (copying favourites to FAVORITES_DIR, e.g. G:\X)
+# run on a single background worker: copying a large video to another drive
+# froze the GUI for seconds per heart-click.  One worker keeps operations in
+# submission order, so toggle-on -> toggle-off can never race each other.
+_MIRROR_POOL = ThreadPoolExecutor(max_workers=1, thread_name_prefix="favmirror")
+
+
+def flush_mirror_ops(timeout: float = 10.0) -> None:
+    """Block until queued mirror copies/removals finish (tests, shutdown)."""
+    try:
+        _MIRROR_POOL.submit(lambda: None).result(timeout=timeout)
+    except Exception:
+        pass
 
 
 def _same_file(a: str, b: str) -> bool:
@@ -56,11 +71,11 @@ class Favorites:
     def toggle(self, path: str) -> bool:
         if path in self._paths:
             self._paths.discard(path)
-            self._unmirror(path)
+            _MIRROR_POOL.submit(self._unmirror, path)
             new = False
         else:
             self._paths.add(path)
-            self._mirror(path)
+            _MIRROR_POOL.submit(self._mirror, path)
             new = True
         self._save()
         return new
@@ -71,6 +86,7 @@ class Favorites:
             self._save()
 
     def _mirror(self, path: str) -> None:
+        # Runs on the mirror worker — never on the GUI thread.
         try:
             ensure_favorites_dir()
             dest = os.path.join(config.FAVORITES_DIR, os.path.basename(path))
@@ -84,9 +100,12 @@ class Favorites:
             print(f"[favs-mirror] {exc}", file=sys.stderr)
 
     def resync_mirror(self, path: str) -> None:
-        """Refresh the Downloads mirror after a favourited file changed on disk."""
+        """Refresh the mirror copy after a favourited file changed on disk."""
         if path not in self._paths:
             return
+        _MIRROR_POOL.submit(self._resync_mirror_now, path)
+
+    def _resync_mirror_now(self, path: str) -> None:
         try:
             dest = os.path.join(config.FAVORITES_DIR, os.path.basename(path))
             if os.path.exists(dest):

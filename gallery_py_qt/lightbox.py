@@ -128,19 +128,18 @@ class Lightbox(QDialog):
         root.setSpacing(0)
 
         # Media stack fills the full window — overlays are positioned on top.
+        # The video pipeline (QMediaPlayer + audio-device open + QVideoWidget)
+        # is built LAZILY on the first video shown: constructing it eagerly
+        # made every viewer popup slow, even for plain images — and with
+        # WA_DeleteOnClose each open rebuilt it from scratch.
         self._stack = QStackedWidget()
         self._img = _ImageView()
         self._video_panel = QWidget()
         vlay = QVBoxLayout(self._video_panel)
         vlay.setContentsMargins(0, 0, 0, 0)
-        self._video = QVideoWidget()
-        vlay.addWidget(self._video, 1)
-        self._player = QMediaPlayer(self)
-        self._audio = QAudioOutput(self)
-        self._player.setAudioOutput(self._audio)
-        self._player.setVideoOutput(self._video)
-        self._player.setLoops(QMediaPlayer.Loops.Infinite)
-        self._player.mediaStatusChanged.connect(self._on_media_status)
+        self._video = None
+        self._player = None
+        self._audio = None
         self._stack.addWidget(self._img)
         self._stack.addWidget(self._video_panel)
         root.addWidget(self._stack, 1)
@@ -210,11 +209,8 @@ class Lightbox(QDialog):
             f"QSlider::handle:horizontal {{ width:10px; margin:-4px 0;"
             f" border-radius:5px; background:{config.FG_BRIGHT}; }}")
         self._vol_slider.valueChanged.connect(self._set_volume_pct)
-        self._set_volume_pct(self._vol_slider.value())
         tlay.addWidget(self._vol_slider)
 
-        self._player.positionChanged.connect(self._on_pos)
-        self._player.durationChanged.connect(self._on_dur)
         self._scrub.seeked.connect(self._on_seek)
 
         # Free everything (dialog, players, thread pool, retained pixmap) as
@@ -245,6 +241,22 @@ class Lightbox(QDialog):
         self._loading_timer.timeout.connect(self._show_loading)
 
         self._install_shortcuts()
+
+    def _ensure_player(self) -> None:
+        """Build the video pipeline on first use (see __init__ note)."""
+        if self._player is not None:
+            return
+        self._video = QVideoWidget()
+        self._video_panel.layout().addWidget(self._video, 1)
+        self._player = QMediaPlayer(self)
+        self._audio = QAudioOutput(self)
+        self._player.setAudioOutput(self._audio)
+        self._player.setVideoOutput(self._video)
+        self._player.setLoops(QMediaPlayer.Loops.Infinite)
+        self._player.mediaStatusChanged.connect(self._on_media_status)
+        self._player.positionChanged.connect(self._on_pos)
+        self._player.durationChanged.connect(self._on_dur)
+        self._set_volume_pct(self._vol_slider.value())
 
     def _tb(self, glyph, cb, layout=None, checkable=False) -> QToolButton:
         b = QToolButton()
@@ -370,12 +382,14 @@ class Lightbox(QDialog):
             self._loading_lbl.hide()
             self._stack.setCurrentIndex(1)
             self._transport.setVisible(True)
+            self._ensure_player()
             self._player.setSource(QUrl.fromLocalFile(path))
             self._player.play()
             self._player.setPlaybackRate(self._SPEEDS[self._speed_idx])
             self._play_btn.setText(config.ICON_PAUSE)
         else:
-            self._player.stop()
+            if self._player is not None:
+                self._player.stop()
             self._stack.setCurrentIndex(0)
             self._transport.setVisible(False)
             # Skip re-decoding when re-showing the same image (e.g. after a
@@ -470,8 +484,9 @@ class Lightbox(QDialog):
         if p:
             # Release the handle, not just stop — a stopped QMediaPlayer still
             # holds the file open, which blocks the trash move on Windows.
-            self._player.stop()
-            self._player.setSource(QUrl())
+            if self._player is not None:
+                self._player.stop()
+                self._player.setSource(QUrl())
             self.trashed.emit(p)
 
     def _toggle_fs(self) -> None:
@@ -485,7 +500,8 @@ class Lightbox(QDialog):
     def _cycle_speed(self) -> None:
         self._speed_idx = (self._speed_idx + 1) % len(self._SPEEDS)
         rate = self._SPEEDS[self._speed_idx]
-        self._player.setPlaybackRate(rate)
+        if self._player is not None:
+            self._player.setPlaybackRate(rate)
         self._speed_btn.setText(f"{rate:g}×")
 
     def _set_volume_pct(self, pct: int) -> None:
@@ -497,6 +513,8 @@ class Lightbox(QDialog):
         track.  QtAudio.convertVolume() does the standard log→linear remap so
         the slider feels uniform end to end.
         """
+        if self._audio is None:
+            return          # applied by _ensure_player when the pipeline builds
         amp = QtAudio.convertVolume(
             pct / 100.0,
             QtAudio.VolumeScale.LogarithmicVolumeScale,
@@ -504,6 +522,8 @@ class Lightbox(QDialog):
         self._audio.setVolume(amp)
 
     def _toggle_play(self) -> None:
+        if self._player is None:
+            return
         if self._player.playbackState() == QMediaPlayer.PlaybackState.PlayingState:
             self._player.pause()
             self._play_btn.setText(config.ICON_PLAY)
@@ -518,10 +538,12 @@ class Lightbox(QDialog):
     def _on_dur(self, dur: int) -> None:
         self._dur_ms = dur
         self._scrub.set_duration(dur)
-        self._time.setText(
-            f"{fmt_time(self._player.position())} / {fmt_time(dur)}")
+        pos = self._player.position() if self._player is not None else 0
+        self._time.setText(f"{fmt_time(pos)} / {fmt_time(dur)}")
 
     def _on_seek(self, frac: float) -> None:
+        if self._player is None:
+            return
         dur = self._dur_ms or self._player.duration()
         if dur > 0:
             self._player.setPosition(int(frac * dur))
@@ -532,6 +554,8 @@ class Lightbox(QDialog):
             self._player.play()
 
     def _seek_relative(self, delta_ms: int) -> None:
+        if self._player is None:
+            return
         if self._stack.currentIndex() != 1 or self._player.duration() <= 0:
             return
         new = max(0, min(self._player.duration(),
@@ -547,7 +571,8 @@ class Lightbox(QDialog):
         self._img_pool.clear()
         self._img_pool.waitForDone(3000)
         # Release the heavy resources explicitly.
-        self._player.stop()
-        self._player.setSource(QUrl())
+        if self._player is not None:
+            self._player.stop()
+            self._player.setSource(QUrl())
         self._img.set_pixmap(QPixmap())
         super().closeEvent(e)

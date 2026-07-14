@@ -338,6 +338,9 @@ class GalleryView(QAbstractScrollArea):
         fires.  Appends (streaming scan batches) continue from the existing
         column heights — O(new) — so a 100k-file scan lays out O(n) total
         instead of O(n²) across its batches."""
+        if not self.isVisible():
+            self._full_relayout_needed = True   # settle on next showEvent
+            return
         m = self._model
         if (not self._full_relayout_needed
                 and m is not None
@@ -405,7 +408,13 @@ class GalleryView(QAbstractScrollArea):
             for path, pm in list(getattr(m, "_pixmaps", {}).items()):
                 if path not in self._pm_dims and not pm.isNull():
                     self._pm_dims[path] = (pm.width(), pm.height())
-        self._relayout()
+        # While another panel covers the gallery, a full relayout per model
+        # reset (one per dims batch) is pure GUI-thread waste — defer it to
+        # showEvent, which relayouts unconditionally.
+        if self.isVisible():
+            self._relayout()
+        else:
+            self._full_relayout_needed = True
 
     def _on_data_changed(self, top: QModelIndex, bottom: QModelIndex,
                          roles=None) -> None:

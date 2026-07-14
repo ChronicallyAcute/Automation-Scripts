@@ -353,6 +353,49 @@ class _StreamScanJob(QRunnable):
         self._signals.done.emit(self._gen, last_result or SR())
 
 
+class _FnJob(QRunnable):
+    """Run an arbitrary callable on a pool thread (fire-and-forget)."""
+    def __init__(self, fn):
+        super().__init__()
+        self._fn = fn
+
+    def run(self) -> None:
+        try:
+            self._fn()
+        except Exception:
+            pass
+
+
+# -- Background trash (cross-device moves copy the whole file) ------------------
+
+class _TrashSignals(QObject):
+    done = Signal(list, list)     # (moved (orig, dest) pairs, failed paths)
+
+
+class _TrashJob(QRunnable):
+    """Move files to the trash off the GUI thread.
+
+    Same-device deletes are instant renames and stay synchronous, but when the
+    media lives on a different drive than the trash dir, shutil.move copies
+    the entire file — deleting one large video froze the UI for seconds.
+    """
+    def __init__(self, paths: list[str], signals: _TrashSignals):
+        super().__init__()
+        self._paths = list(paths)
+        self._signals = signals
+
+    def run(self) -> None:
+        moved: list[tuple[str, str]] = []
+        failed: list[str] = []
+        for p in self._paths:
+            dest = favorites.trash_file(p)
+            if dest:
+                moved.append((p, dest))
+            else:
+                failed.append(p)
+        self._signals.done.emit(moved, failed)
+
+
 # -- Dimension pre-fetch -------------------------------------------------------
 
 class _DimsSignals(QObject):
@@ -395,10 +438,6 @@ class MainWindow(QMainWindow):
         if isinstance(fav_dir, str) and fav_dir.strip():
             config.FAVORITES_DIR = fav_dir.strip()
         self.setStyleSheet(theme.stylesheet())
-        # Opt-in housekeeping: drop trashed items older than the configured age.
-        purge_days = self._prefs.get("trash_purge_days", 0)
-        if isinstance(purge_days, int) and purge_days > 0:
-            favorites.purge_older_than(purge_days)
         self._recents = prefs.load_recent()
         self._favs = Favorites()
         # No explicit max_threads -- ThumbnailLoader auto-sizes to CPU count.
@@ -416,6 +455,8 @@ class MainWindow(QMainWindow):
         self._scan_gen = 0
         self._scan_pool = QThreadPool(self)
         self._scan_pool.setMaxThreadCount(2)
+        self._trash_sig = _TrashSignals(self)
+        self._trash_sig.done.connect(self._on_trash_moved)
         self._stream_sig = _StreamSignals(self)
         self._stream_sig.batch.connect(self._on_scan_batch)
         self._stream_sig.done.connect(self._on_scan_done)
@@ -430,6 +471,14 @@ class MainWindow(QMainWindow):
         self._dims_done_for: set[str] = set()
         self._dims_inflight = False
         self._dims_remaining = 0
+        # Coalesce chunk results: every set_dims() re-sorts and resets the
+        # model (and re-lays the grid), so applying 20+ video chunks
+        # individually produced a storm of 100-300 ms GUI stalls.
+        self._dims_apply: dict[str, tuple[int, int]] = {}
+        self._dims_apply_timer = QTimer(self)
+        self._dims_apply_timer.setSingleShot(True)
+        self._dims_apply_timer.setInterval(350)
+        self._dims_apply_timer.timeout.connect(self._apply_dims_batch)
 
         self._build_ui()
         self._restore_session()
@@ -439,9 +488,21 @@ class MainWindow(QMainWindow):
         self._autoscroll_timer.setInterval(20)
         self._autoscroll_timer.timeout.connect(self._autoscroll_tick)
 
-        # Trim the on-disk thumbnail cache to its byte budget shortly after
-        # startup (deferred so it never delays the window appearing).
-        QTimer.singleShot(1500, cache.enforce_cap)
+        # Housekeeping (thumbnail-cache trim + opt-in trash auto-purge) runs on
+        # a worker shortly after startup: it stats/deletes potentially
+        # thousands of files, which used to stall the GUI thread exactly when
+        # the user starts interacting.
+        purge_days = self._prefs.get("trash_purge_days", 0)
+
+        def _housekeeping(days=purge_days):
+            try:
+                if isinstance(days, int) and days > 0:
+                    favorites.purge_older_than(days)
+                cache.enforce_cap()
+            except Exception:
+                pass
+        QTimer.singleShot(
+            1500, lambda: self._scan_pool.start(_FnJob(_housekeeping)))
 
     # -- UI --------------------------------------------------------------------
     def _build_ui(self) -> None:
@@ -926,14 +987,24 @@ class MainWindow(QMainWindow):
         for c in jobs:
             self._dims_pool.start(_DimsJob(c, self._dims_sig))
 
+    def _apply_dims_batch(self) -> None:
+        self._dims_apply_timer.stop()
+        if self._dims_apply:
+            batch, self._dims_apply = self._dims_apply, {}
+            self._model.set_dims(batch)
+
     def _on_dims_chunk(self, dims: dict) -> None:
-        # Apply each job's results immediately \u2014 progressive reveal.
+        # Progressive reveal, but coalesced: chunks merge into one apply every
+        # ~350 ms instead of a model reset + grid relayout per chunk.
         self._dims_done_for.update(dims.keys())
         if dims:
-            self._model.set_dims(dims)
+            self._dims_apply.update(dims)
+            if not self._dims_apply_timer.isActive():
+                self._dims_apply_timer.start()
         self._dims_remaining -= 1
         if self._dims_remaining > 0:
             return
+        self._apply_dims_batch()     # pass complete \u2014 settle immediately
         self._dims_inflight = False
         if self._model.needs_dimensions():
             self._status.setText(
@@ -1032,8 +1103,12 @@ class MainWindow(QMainWindow):
         self._trash_paths([path])
 
     def _trash_paths(self, paths: list[str]) -> None:
-        """Trash one or more files as a single undoable batch."""
-        batch: list[tuple[str, str]] = []
+        """Trash one or more files as a single undoable batch.
+
+        Same-device moves are instant renames and run inline; cross-device
+        moves (media on another drive than the trash dir) copy the whole file,
+        so those run on a worker with an optimistic model update.
+        """
         for path in paths:
             # Release every open handle on the file first — multiview tiles
             # (including duplicates and the side-scroll buffer) and the
@@ -1042,6 +1117,18 @@ class MainWindow(QMainWindow):
             if self._mv is not None:
                 self._mv.release_path(path)
             self._view.release_video(path)
+
+        if self._trash_is_cross_device(paths):
+            for path in paths:
+                self._favs.discard(path)
+            self._model.remove_paths(list(paths))
+            self._status.setText(
+                f"Moving {len(paths)} item(s) to trash…")
+            self._scan_pool.start(_TrashJob(paths, self._trash_sig))
+            return
+
+        batch: list[tuple[str, str]] = []
+        for path in paths:
             dest = favorites.trash_file(path)
             if not dest:
                 continue
@@ -1052,6 +1139,29 @@ class MainWindow(QMainWindow):
             return
         # One model update for the whole batch (remove_path per item is O(n·k)).
         self._model.remove_paths([p for p, _ in batch])
+        self._finish_trash_batch(batch)
+
+    def _trash_is_cross_device(self, paths: list[str]) -> bool:
+        """True when any file lives on a different device than the trash dir
+        (its move would be a full copy, not a rename)."""
+        try:
+            os.makedirs(config.TRASH_DIR, exist_ok=True)
+            tdev = os.stat(config.TRASH_DIR).st_dev
+            return any(os.stat(p).st_dev != tdev for p in paths)
+        except OSError:
+            return False        # unsure — take the simple synchronous path
+
+    def _on_trash_moved(self, moved: list, failed: list) -> None:
+        """Background trash job finished — arm undo and surface failures."""
+        for p in failed:
+            self._model.add_path(p)     # optimistic removal rolled back
+        if failed:
+            self._status.setText(
+                f"Couldn't delete {len(failed)} item(s); restored to view")
+        if moved:
+            self._finish_trash_batch([tuple(m) for m in moved])
+
+    def _finish_trash_batch(self, batch: list[tuple[str, str]]) -> None:
         self._trash_stack.append(batch)
         if len(batch) == 1:
             self._undo_label.setText(
