@@ -117,14 +117,28 @@ def rotate_image_file(path: str, degrees: int) -> bool:
     deg = degrees % 360
     if deg == 0:
         return True
-    if deg not in (90, 180, 270):
+    if deg % 45 != 0:
         return False
     try:
         from PIL import Image, ImageOps, ImageSequence
+        # Right angles use transpose (exact pixel remap, no resampling).
         # PIL ROTATE_n is counter-clockwise, so clockwise 90 == ROTATE_270.
-        op = {90: Image.Transpose.ROTATE_270,
-              180: Image.Transpose.ROTATE_180,
-              270: Image.Transpose.ROTATE_90}[deg]
+        right = {90: Image.Transpose.ROTATE_270,
+                 180: Image.Transpose.ROTATE_180,
+                 270: Image.Transpose.ROTATE_90}
+
+        def _turn(img: "Image.Image") -> "Image.Image":
+            if deg in right:
+                return img.transpose(right[deg])
+            # Diagonal (45/135/225/315): the canvas grows; corners fill with
+            # transparency where the format supports it, black otherwise.
+            if img.mode not in ("RGB", "RGBA"):
+                img = img.convert("RGBA" if _has_alpha(img) else "RGB")
+            fill = (0, 0, 0, 0) if img.mode == "RGBA" else (0, 0, 0)
+            return img.rotate(-deg, expand=True,
+                              resample=Image.Resampling.BICUBIC,
+                              fillcolor=fill)
+
         with Image.open(path) as im:
             fmt = im.format
             # Animated GIF / multi-page TIFF: rotate EVERY frame and re-save
@@ -133,7 +147,7 @@ def rotate_image_file(path: str, degrees: int) -> bool:
                 frames, durations = [], []
                 for fr in ImageSequence.Iterator(im):
                     durations.append(fr.info.get("duration", 80))
-                    frames.append(fr.convert("RGBA").transpose(op))
+                    frames.append(_turn(fr.convert("RGBA")))
                 save_kw = {"save_all": True, "append_images": frames[1:],
                            "loop": im.info.get("loop", 0), "duration": durations}
                 if fmt == "GIF":
@@ -146,7 +160,7 @@ def rotate_image_file(path: str, degrees: int) -> bool:
                 return True
             im.load()
             im = ImageOps.exif_transpose(im)      # normalise existing rotation
-            rotated = im.transpose(op)
+            rotated = _turn(im)
             params = {}
             icc = im.info.get("icc_profile")
             if icc:

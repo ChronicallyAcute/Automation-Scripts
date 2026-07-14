@@ -572,6 +572,20 @@ class MainWindow(QMainWindow):
         self._sort.addItem("Manual order", "manual")
         self._sort.currentIndexChanged.connect(lambda _: self._on_sort_changed())
         h.addWidget(self._sort)
+        # Secondary sort: ties from the primary key break by this one.
+        h.addWidget(QLabel("then"))
+        self._sort2 = QComboBox()
+        self._sort2.setToolTip("Secondary sort \u2014 breaks ties from the primary")
+        self._sort2.addItem("Name", "name")
+        self._sort2.addItem("(none)", "")
+        self._sort2.addItem("Images first", "img_first")
+        self._sort2.addItem("Videos first", "vid_first")
+        self._sort2.addItem("Favourites", "favorites")
+        self._sort2.addItem("Dimensions \u00b7 area", "area")
+        self._sort2.addItem("Dimensions \u00b7 width", "width")
+        self._sort2.addItem("Dimensions \u00b7 height", "height")
+        self._sort2.currentIndexChanged.connect(lambda _: self._on_sort_changed())
+        h.addWidget(self._sort2)
         self._dir_btn = self._btn("\u2191", self._toggle_sort_dir)
         self._dir_btn.setToolTip("Ascending \u2014 click for descending")
         h.addWidget(self._dir_btn)
@@ -710,7 +724,14 @@ class MainWindow(QMainWindow):
             return
         cw, ch = c.width(), c.height()
         bh = self._bar.sizeHint().height()
-        self._bar.setGeometry(8, 8, cw - 16, bh)
+        # In multi-view the settings bar sits just below the panel's own
+        # chrome strip instead of overlapping it.
+        y0 = 8
+        if (self._mv is not None
+                and self._content_stack.currentWidget() is self._mv
+                and self._mv._chrome_widget.isVisible()):
+            y0 = self._mv._chrome_widget.height() + 10
+        self._bar.setGeometry(8, y0, cw - 16, bh)
         if self._undo_bar.isVisible():
             # Deleted-media banner sits at the top, just below the control
             # bar's strip (fixed slot, so the two never overlap even while
@@ -738,6 +759,10 @@ class MainWindow(QMainWindow):
         self._show_bar() if not self._bar.isVisible() else self._bar.hide()
 
     def _bar_should_stay(self) -> bool:
+        # In multi-view the bar follows the panel's own chrome bars.
+        if (self._mv is not None
+                and self._content_stack.currentWidget() is self._mv):
+            return self._mv._chrome_widget.isVisible()
         if self._model.rowCount() == 0:
             return True
         if self._bar.underMouse():
@@ -914,6 +939,7 @@ class MainWindow(QMainWindow):
                                self._vid_btn.isChecked(),
                                self._search.text(),
                                self._favs_btn.isChecked())
+        self._refresh_mv_after_model_change()
         # If a folder is loaded but the filter hides everything, explain why
         # the grid is blank rather than leaving a bare black screen.
         if self._model.all_paths() and self._model.rowCount() == 0:
@@ -931,18 +957,30 @@ class MainWindow(QMainWindow):
 
     # -- sorting ---------------------------------------------------------------
     def _on_sort_changed(self) -> None:
-        self._model.set_sort(self._sort.currentData())
+        primary = self._sort.currentData()
+        secondary = self._sort2.currentData()
+        chain = [primary]
+        if secondary and secondary != primary and primary != "manual":
+            chain.append(secondary)
+        self._model.set_sort_chain(chain)
         if self._model.needs_dimensions():
             self._ensure_dims()
+        self._refresh_mv_after_model_change()
 
     def _sync_sort_combo(self, mode: str) -> None:
         """Reflect a model-driven sort change (e.g. drag-reorder -> manual)
-        in the combo without re-triggering _on_sort_changed."""
+        in the combos without re-triggering _on_sort_changed."""
         i = self._sort.findData(mode)
         if i >= 0 and self._sort.currentIndex() != i:
             self._sort.blockSignals(True)
             self._sort.setCurrentIndex(i)
             self._sort.blockSignals(False)
+        if mode == "manual":
+            j = self._sort2.findData("")
+            if j >= 0:
+                self._sort2.blockSignals(True)
+                self._sort2.setCurrentIndex(j)
+                self._sort2.blockSignals(False)
 
     def _toggle_sort_dir(self) -> None:
         desc = not self._model.descending()
@@ -1246,13 +1284,34 @@ class MainWindow(QMainWindow):
             self._mv.rotated.connect(self._rotate_from_multiview)
             self._mv.openLightbox.connect(self._open_lightbox)
             self._mv.closeRequested.connect(self._close_multiview)
+            self._mv.barsVisibleChanged.connect(self._on_mv_bars_visible)
             self._content_stack.addWidget(self._mv)
         # Kick off dims computation so orientation lists are accurate.
         self._ensure_dims()
         self._mv.set_measuring(self._dims_inflight)
         self._mv.open(start_row)
         self._content_stack.setCurrentWidget(self._mv)
-        self._bar.hide()
+        # The settings bar stays available in multi-view: it floats just
+        # below the multi-view chrome and follows its auto-hide rhythm.
+        self._bar.show()
+        self._position_overlays()
+        self._bar.raise_()
+
+    def _on_mv_bars_visible(self, on: bool) -> None:
+        """Multi-view chrome bars hid/showed — the settings bar follows."""
+        if self._mv is None or self._content_stack.currentWidget() is not self._mv:
+            return
+        self._bar.setVisible(on)
+        if on:
+            self._position_overlays()
+            self._bar.raise_()
+
+    def _refresh_mv_after_model_change(self) -> None:
+        """Sort/filter changed the model while multi-view is showing — refresh
+        its orientation groups and page so it tracks the new order."""
+        if (self._mv is not None
+                and self._content_stack.currentWidget() is self._mv):
+            self._mv._on_model_dims_changed()
 
     def _rotate_from_multiview(self, path: str) -> None:
         if self._rotate_path(path, 90) and self._mv is not None:

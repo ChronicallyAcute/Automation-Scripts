@@ -744,6 +744,7 @@ class MultiView(QWidget):
     rotated        = Signal(str)   # path — request permanent rotation
     openLightbox   = Signal(int)   # row
     closeRequested = Signal()      # user wants to go back to gallery
+    barsVisibleChanged = Signal(bool)   # chrome bars shown/hidden (auto-hide)
 
     def __init__(self, model, favorites, parent=None):
         super().__init__(parent)
@@ -1601,6 +1602,7 @@ class MultiView(QWidget):
             self._chrome_widget.show()
             self._autoscroll_widget.show()
             self._bars_hide_timer.start()
+            self.barsVisibleChanged.emit(True)
         elif self._bars_hide_timer.remainingTime() < 2200:
             # Mouse-move events arrive in the hundreds per second; restarting
             # the timer at most ~every 300 ms keeps the handler near-free.
@@ -1615,12 +1617,14 @@ class MultiView(QWidget):
             return
         self._chrome_widget.hide()
         self._autoscroll_widget.hide()
+        self.barsVisibleChanged.emit(False)
 
     def _toggle_bars(self) -> None:
         if self._chrome_widget.isVisible():
             self._bars_hide_timer.stop()
             self._chrome_widget.hide()
             self._autoscroll_widget.hide()
+            self.barsVisibleChanged.emit(False)
         else:
             self._show_bars()
 

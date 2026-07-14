@@ -81,7 +81,10 @@ class GalleryModel(QAbstractListModel):
         self._show_videos = True
         self._favs_only = False
         self._query = ""
-        self._sort = "like_dims"
+        # Sort chain: keys applied in order (first differentiates, later ones
+        # break ties).  Default: group by like sizes, then by name.
+        self._sort_chain: list[str] = ["like_dims", "name"]
+        self._sort = "like_dims"          # primary mode (legacy accessor)
         self._descending = False
         self._loader.ready.connect(self._on_thumb_ready)
         self._loader.failed.connect(self._on_thumb_failed)
@@ -172,8 +175,17 @@ class GalleryModel(QAbstractListModel):
         self._reindex()
 
     def set_sort(self, mode: str) -> None:
-        self._sort = mode
+        self.set_sort_chain([mode])
+
+    def set_sort_chain(self, chain: list[str]) -> None:
+        """Apply several sort keys in order (later keys break ties)."""
+        chain = [m for m in chain if m] or ["name"]
+        self._sort_chain = chain
+        self._sort = chain[0]
         self._reindex()
+
+    def sort_chain(self) -> list[str]:
+        return list(self._sort_chain)
 
     def set_descending(self, descending: bool) -> None:
         self._descending = bool(descending)
@@ -194,7 +206,8 @@ class GalleryModel(QAbstractListModel):
         return self._path_to_row.get(path, -1)
 
     def needs_dimensions(self) -> bool:
-        return self._sort in ("area", "width", "height", "like_dims")
+        dims_modes = ("area", "width", "height", "like_dims")
+        return any(m in dims_modes for m in self._sort_chain)
 
     def set_dims(self, dims: dict[str, tuple[int, int]]) -> None:
         """Supply (w, h) per path (from a background scan); re-sort if needed."""
@@ -227,13 +240,14 @@ class GalleryModel(QAbstractListModel):
             hidden = [p for p in self._all if p not in self._path_to_row]
             self._all = visible + hidden
             self._sort = "manual"
+            self._sort_chain = ["manual"]
             self.sortChanged.emit("manual")
         ia, ib = self._all.index(a), self._all.index(b)
         self._all[ia], self._all[ib] = self._all[ib], self._all[ia]
         self._reindex()
 
     def _like_dims_key(self, p: str) -> tuple:
-        """Sort key that groups media by like dimensions.
+        """Component key that groups media by like dimensions.
 
         Primary:   orientation bucket (0=portrait, 1=square, 2=landscape)
         Secondary: quantized aspect ratio (groups e.g. all 9:16 together)
@@ -242,7 +256,7 @@ class GalleryModel(QAbstractListModel):
         """
         w, h = self._dims.get(p, (0, 0))
         if w <= 0 or h <= 0:
-            return (3, 0, 0, os.path.basename(p).lower())
+            return (3, 0.0, 0)
         ratio = w / h
         if ratio < 0.95:
             bucket = 0      # portrait
@@ -253,30 +267,34 @@ class GalleryModel(QAbstractListModel):
         # Quantize the aspect ratio to 0.05 steps so very-similar ratios
         # (e.g. 1920×1080 and 3840×2160) land in the same bucket.
         ar_q = round(max(w, h) / min(w, h) / 0.05) * 0.05
-        return (bucket, ar_q, w * h, os.path.basename(p).lower())
+        return (bucket, ar_q, w * h)
+
+    def _key_component(self, mode: str):
+        """Return a callable producing one comparable tuple for `mode`."""
+        name = lambda p: (os.path.basename(p).lower(),)
+        return {
+            "name":      name,
+            "img_first": lambda p: (media.is_video(p),),
+            "vid_first": lambda p: (not media.is_video(p),),
+            "favorites": lambda p: (not self._favs.is_fav(p),),
+            "area":      lambda p: (self._dim_area(p),),
+            "width":     lambda p: (self._dims.get(p, (0, 0))[0],),
+            "height":    lambda p: (self._dims.get(p, (0, 0))[1],),
+            "like_dims": self._like_dims_key,
+        }.get(mode)
 
     def _reindex(self) -> None:
         self.beginResetModel()
         rows = [p for p in self._all if self._passes_filter(p)]
-        name = lambda p: os.path.basename(p).lower()
-        if self._sort == "name":
-            rows.sort(key=name)
-        elif self._sort == "img_first":
-            rows.sort(key=lambda p: (media.is_video(p), name(p)))
-        elif self._sort == "vid_first":
-            rows.sort(key=lambda p: (not media.is_video(p), name(p)))
-        elif self._sort == "favorites":
-            rows.sort(key=lambda p: (not self._favs.is_fav(p), name(p)))
-        elif self._sort == "area":
-            rows.sort(key=lambda p: (self._dim_area(p), name(p)))
-        elif self._sort == "width":
-            rows.sort(key=lambda p: (self._dims.get(p, (0, 0))[0], name(p)))
-        elif self._sort == "height":
-            rows.sort(key=lambda p: (self._dims.get(p, (0, 0))[1], name(p)))
-        elif self._sort == "like_dims":
-            rows.sort(key=self._like_dims_key)
-        elif self._sort == "manual":
-            pass    # preserve the current _all order (set by swap_paths)
+        if self._sort != "manual":
+            # Chain the selected sort keys; a final name component guarantees
+            # a stable, deterministic tiebreak.
+            chain = [m for m in self._sort_chain if m != "manual"]
+            if "name" not in chain:
+                chain = chain + ["name"]
+            funcs = [f for f in (self._key_component(m) for m in chain) if f]
+            rows.sort(key=lambda p: tuple(v for f in funcs for v in f(p)))
+        # manual: preserve the current _all order (set by swap_paths)
         if self._descending:
             rows.reverse()
         self._rows = rows
