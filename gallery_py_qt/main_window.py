@@ -366,6 +366,67 @@ class _FnJob(QRunnable):
             pass
 
 
+class _ProbeSignals(QObject):
+    done = Signal(int, float)     # (scan generation, avg ms per sample read)
+
+
+class _IoProbeJob(QRunnable):
+    """Measure the media drive's small-read latency on a worker.
+
+    Drive-type APIs can't reliably identify an external SSD (most USB
+    enclosures report as fixed disks), so we measure instead: read a small
+    block from a few sample files.  Internal SSDs come in well under a
+    millisecond per read; USB enclosures, hubs, HDDs, network shares and
+    drives waking from autosuspend come in far above the threshold.
+    """
+    SAMPLE_BYTES = 32 * 1024
+
+    def __init__(self, gen: int, paths: list[str], signals: _ProbeSignals):
+        super().__init__()
+        self._gen = gen
+        self._paths = list(paths)
+        self._signals = signals
+
+    def run(self) -> None:
+        import time as _time
+        times: list[float] = []
+        for p in self._paths[:4]:
+            try:
+                t0 = _time.perf_counter()
+                with open(p, "rb") as f:
+                    f.read(self.SAMPLE_BYTES)
+                times.append((_time.perf_counter() - t0) * 1000.0)
+            except OSError:
+                continue
+        avg = (sum(times) / len(times)) if times else 0.0
+        self._signals.done.emit(self._gen, avg)
+
+
+class _RotateSignals(QObject):
+    done = Signal(str, int, bool, int, int)   # path, degrees, ok, new w, new h
+
+
+class _RotateJob(QRunnable):
+    """Permanent rotation on a worker: full decode + re-encode + write."""
+    def __init__(self, path: str, degrees: int, signals: _RotateSignals):
+        super().__init__()
+        self._path = path
+        self._degrees = degrees
+        self._signals = signals
+
+    def run(self) -> None:
+        from .engine import media as _media
+        ok = False
+        w = h = 0
+        try:
+            ok = _media.rotate_image_file(self._path, self._degrees)
+            if ok:
+                w, h = _media.peek_size(self._path)
+        except Exception:
+            ok = False
+        self._signals.done.emit(self._path, self._degrees, ok, w, h)
+
+
 # -- Background trash (cross-device moves copy the whole file) ------------------
 
 class _TrashSignals(QObject):
@@ -457,6 +518,22 @@ class MainWindow(QMainWindow):
         self._scan_pool.setMaxThreadCount(2)
         self._trash_sig = _TrashSignals(self)
         self._trash_sig.done.connect(self._on_trash_moved)
+        self._rotate_sig = _RotateSignals(self)
+        self._rotate_sig.done.connect(self._on_rotate_done)
+        self._rotating: set[str] = set()
+
+        # Slow-storage throttle: probe read latency per folder open and cut
+        # parallel reads when media lives on slow/external storage.  A
+        # "low_io_mode": true/false entry in the prefs file forces the mode
+        # and skips probing.
+        self._probe_sig = _ProbeSignals(self)
+        self._probe_sig.done.connect(self._on_io_probe)
+        self._probed_gen = -1
+        self._low_io = False
+        li = self._prefs.get("low_io_mode")
+        self._low_io_forced = isinstance(li, bool)
+        if self._low_io_forced and li:
+            QTimer.singleShot(0, lambda: self._set_low_io(True, forced=True))
         self._stream_sig = _StreamSignals(self)
         self._stream_sig.batch.connect(self._on_scan_batch)
         self._stream_sig.done.connect(self._on_scan_done)
@@ -465,7 +542,8 @@ class MainWindow(QMainWindow):
         # video reads still serialise on the cv2 lock).  An inflight guard stops
         # redundant full-folder passes from piling up.
         self._dims_pool = QThreadPool(self)
-        self._dims_pool.setMaxThreadCount(min(4, max(1, (os.cpu_count() or 2))))
+        self._dims_default = min(4, max(1, (os.cpu_count() or 2)))
+        self._dims_pool.setMaxThreadCount(self._dims_default)
         self._dims_sig = _DimsSignals(self)
         self._dims_sig.done.connect(self._on_dims_chunk)
         self._dims_done_for: set[str] = set()
@@ -890,6 +968,12 @@ class MainWindow(QMainWindow):
     def _on_scan_batch(self, gen: int, paths: list) -> None:
         if gen != self._scan_gen:
             return
+        if gen != self._probed_gen and not self._low_io_forced and paths:
+            # First batch of this open: measure the drive before the loader
+            # fans out (sample a spread of files, not just the first few).
+            self._probed_gen = gen
+            sample = paths[:: max(1, len(paths) // 4)][:4]
+            self._scan_pool.start(_IoProbeJob(gen, sample, self._probe_sig))
         if self._model.needs_dimensions():
             # Buffer silently — view stays empty until dims arrive and sort can
             # be applied correctly, avoiding the mid-scan reorder flash.
@@ -1025,6 +1109,39 @@ class MainWindow(QMainWindow):
         for c in jobs:
             self._dims_pool.start(_DimsJob(c, self._dims_sig))
 
+    # -- slow-storage throttle -------------------------------------------------
+    _LOW_IO_ON_MS  = 6.0    # avg 32 KB read slower than this → throttle
+    _LOW_IO_OFF_MS = 2.0    # faster than this → restore full parallelism
+
+    def _on_io_probe(self, gen: int, avg_ms: float) -> None:
+        if gen != self._scan_gen or self._low_io_forced or avg_ms <= 0.0:
+            return
+        if avg_ms > self._LOW_IO_ON_MS:
+            self._set_low_io(True)
+        elif avg_ms < self._LOW_IO_OFF_MS:
+            self._set_low_io(False)
+        # In-between (hysteresis): keep whatever mode we're in.
+
+    def _set_low_io(self, on: bool, forced: bool = False) -> None:
+        """Throttle parallel media reads for slow/external storage.
+
+        Over one USB pipe, 8 concurrent readers compete and finish SLOWER in
+        aggregate than 2 — and saturating the bus also starves the video
+        players' own reads, which is felt as stutter and input lag.
+        """
+        if on == self._low_io:
+            return
+        self._low_io = on
+        if on:
+            self._loader.set_max_threads(2)
+            self._dims_pool.setMaxThreadCount(1)
+            src = "(forced by prefs)" if forced else "detected"
+            self._status.setText(
+                f"Slow/external storage {src} — parallel reads reduced")
+        else:
+            self._loader.set_max_threads(self._loader.default_threads())
+            self._dims_pool.setMaxThreadCount(self._dims_default)
+
     def _apply_dims_batch(self) -> None:
         self._dims_apply_timer.stop()
         if self._dims_apply:
@@ -1078,33 +1195,51 @@ class MainWindow(QMainWindow):
     def _on_grid_rotate(self, row: int) -> None:
         path = self._model.path_at(row)
         if path:
-            self._rotate_path(path, 90)
+            self._request_rotate(path, 90)
 
-    def _rotate_path(self, path: str, degrees: int) -> bool:
-        """Permanently rotate an image file on disk and refresh every view.
+    def _request_rotate(self, path: str, degrees: int) -> None:
+        """Rotate an image permanently — decode/encode/write on a worker.
 
-        Returns True on success so the calling viewer can reload its own
-        full-resolution display.  Videos are not supported.
+        The old synchronous version froze the GUI for the whole
+        read+re-encode+write round trip, which on an external drive (or one
+        waking from USB autosuspend) could be seconds.  Videos unsupported.
         """
         from .engine import media as _media
         if _media.is_video(path):
             self._status.setText("Rotating video files isn't supported")
-            return False
-        if not _media.rotate_image_file(path, degrees):
+            return
+        if path in self._rotating:
+            self._status.setText(
+                f"Still rotating {os.path.basename(path)}…")
+            return
+        self._rotating.add(path)
+        self._status.setText(f"Rotating {os.path.basename(path)}…")
+        self._scan_pool.start(
+            _RotateJob(path, degrees, self._rotate_sig))
+
+    def _on_rotate_done(self, path: str, degrees: int, ok: bool,
+                        w: int, h: int) -> None:
+        self._rotating.discard(path)
+        if not ok:
             self._status.setText(f"Couldn't rotate {os.path.basename(path)}")
-            return False
+            return
         # Invalidate cached pixels and the masonry aspect ratio, then push the
         # rotated file's true dimensions so the grid reflows immediately.
         self._model.reload_path(path)
         self._view.forget_path_dims(path)
-        w, h = _media.peek_size(path)
         if w > 0 and h > 0:
             self._dims_done_for.add(path)
             self._model.set_dims({path: (w, h)})
-        # Keep a favourite's Downloads mirror in sync with the rotated original.
+        # Keep a favourite's mirror copy in sync with the rotated original.
         self._favs.resync_mirror(path)
-        self._status.setText(f"Rotated {os.path.basename(path)}")
-        return True
+        # Refresh any viewer currently showing this file.
+        for c in self.children():
+            if isinstance(c, Lightbox) and c.current_path() == path:
+                c.reload_current()
+        if (self._mv is not None
+                and self._content_stack.currentWidget() is self._mv):
+            self._mv.reload_path(path)
+        self._status.setText(f"Rotated {os.path.basename(path)} {degrees}°")
 
     def _on_grid_trash(self, row: int) -> None:
         path = self._model.path_at(row)
@@ -1141,12 +1276,8 @@ class MainWindow(QMainWindow):
         self._trash_paths([path])
 
     def _trash_paths(self, paths: list[str]) -> None:
-        """Trash one or more files as a single undoable batch.
-
-        Same-device moves are instant renames and run inline; cross-device
-        moves (media on another drive than the trash dir) copy the whole file,
-        so those run on a worker with an optimistic model update.
-        """
+        """Trash one or more files as a single undoable batch (worker-side
+        moves, optimistic model update)."""
         for path in paths:
             # Release every open handle on the file first — multiview tiles
             # (including duplicates and the side-scroll buffer) and the
@@ -1156,38 +1287,16 @@ class MainWindow(QMainWindow):
                 self._mv.release_path(path)
             self._view.release_video(path)
 
-        if self._trash_is_cross_device(paths):
-            for path in paths:
-                self._favs.discard(path)
-            self._model.remove_paths(list(paths))
-            self._status.setText(
-                f"Moving {len(paths)} item(s) to trash…")
-            self._scan_pool.start(_TrashJob(paths, self._trash_sig))
-            return
-
-        batch: list[tuple[str, str]] = []
+        # ALL moves run on the worker: even deciding same-vs-cross device
+        # needs an os.stat, and a stat against a drive waking from USB
+        # autosuspend can block for seconds — never pay that on a click.
+        # Same-device renames complete in milliseconds anyway; the undo bar
+        # arms the moment the worker reports back.
         for path in paths:
-            dest = favorites.trash_file(path)
-            if not dest:
-                continue
             self._favs.discard(path)
-            batch.append((path, dest))
-        if not batch:
-            self._status.setText("Delete failed")
-            return
-        # One model update for the whole batch (remove_path per item is O(n·k)).
-        self._model.remove_paths([p for p, _ in batch])
-        self._finish_trash_batch(batch)
-
-    def _trash_is_cross_device(self, paths: list[str]) -> bool:
-        """True when any file lives on a different device than the trash dir
-        (its move would be a full copy, not a rename)."""
-        try:
-            os.makedirs(config.TRASH_DIR, exist_ok=True)
-            tdev = os.stat(config.TRASH_DIR).st_dev
-            return any(os.stat(p).st_dev != tdev for p in paths)
-        except OSError:
-            return False        # unsure — take the simple synchronous path
+        self._model.remove_paths(list(paths))
+        self._status.setText(f"Moving {len(paths)} item(s) to trash…")
+        self._scan_pool.start(_TrashJob(paths, self._trash_sig))
 
     def _on_trash_moved(self, moved: list, failed: list) -> None:
         """Background trash job finished — arm undo and surface failures."""
@@ -1238,8 +1347,9 @@ class MainWindow(QMainWindow):
 
     def _rotate_from_lightbox(self, lb, degrees: int) -> None:
         path = lb.current_path()
-        if path and self._rotate_path(path, degrees):
-            lb.reload_current()
+        if path:
+            self._request_rotate(path, degrees)
+            # The lightbox reloads from _on_rotate_done when the worker lands.
 
     # -- lightbox / multiview --------------------------------------------------
     def _resume_previews_if_gallery_active(self) -> None:
@@ -1314,8 +1424,8 @@ class MainWindow(QMainWindow):
             self._mv._on_model_dims_changed()
 
     def _rotate_from_multiview(self, path: str) -> None:
-        if self._rotate_path(path, 90) and self._mv is not None:
-            self._mv.reload_path(path)
+        self._request_rotate(path, 90)
+        # Multi-view tiles reload from _on_rotate_done when the worker lands.
 
     def _close_multiview(self) -> None:
         if self._mv is not None:

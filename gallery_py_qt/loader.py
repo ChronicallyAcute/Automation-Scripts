@@ -79,6 +79,7 @@ class ThumbnailLoader(QObject):
              else min(max(4, os.cpu_count() or 4), 8))
         self._pool = QThreadPool(self)
         self._pool.setMaxThreadCount(n)
+        self._default_threads = n
         self._inflight: set[tuple[str, int]] = set()
         self._cancelled: set[tuple[str, int]] = set()
         # Guards the two sets above: they get compound check-then-mutate
@@ -117,6 +118,18 @@ class ThumbnailLoader(QObject):
         with self._lock:
             self._inflight = {k for k in self._inflight if k[0] != path}
         self.failed.emit(path)
+
+    def default_threads(self) -> int:
+        return self._default_threads
+
+    def set_max_threads(self, n: int) -> None:
+        """Adjust decode concurrency at runtime.
+
+        Over a saturated USB pipe, 8 parallel readers COMPETE and aggregate
+        throughput drops below what 2-3 achieve — the slow-storage throttle
+        lowers this, and restores the default when storage looks fast again.
+        """
+        self._pool.setMaxThreadCount(max(1, int(n)))
 
     def clear(self) -> None:
         self._pool.clear()
