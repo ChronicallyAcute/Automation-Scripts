@@ -825,6 +825,16 @@ class MultiView(QWidget):
         chrome.addWidget(self._fs_btn)
         self._root.addWidget(self._chrome_widget)
 
+        # Reserved strip for the main window's floating settings bar.  The bar
+        # used to overlay the top edge of the tiles, which covered each tile's
+        # icon-button row AND swallowed its clicks (the rotate/fav/pin buttons
+        # "stopped working").  Giving the bar real layout space pushes the
+        # tiles below it instead.
+        self._top_inset = QWidget()
+        self._top_inset.setFixedHeight(0)
+        self._top_inset.setStyleSheet("background: #000; border: none;")
+        self._root.addWidget(self._top_inset)
+
         # Tile host (takes all remaining space).  Slots are positioned manually
         # by _layout_tiles() — a justified layout where each tile takes exactly
         # its media's aspect box, so media meets media with no internal
@@ -964,6 +974,11 @@ class MultiView(QWidget):
     def toggle_help(self) -> None:
         toggle_help_panel(self._help, self)
 
+    def set_top_inset(self, h: int) -> None:
+        """Reserve `h` px below the chrome strip for the floating settings
+        bar so it never overlaps (or click-blocks) the tiles."""
+        self._top_inset.setFixedHeight(max(0, int(h)))
+
     # -- public API ------------------------------------------------------------
 
     def open(self, start_row: int) -> None:
@@ -1004,6 +1019,19 @@ class MultiView(QWidget):
         self._update_orient_btn()
         self._show_bars()          # visible on entry; auto-hide after idle
         self._render(start_in_list)
+
+    def reopen(self) -> None:
+        """Return to the panel exactly as it was left (same orientation group,
+        page, forced layout and pins) — used by the lightbox's back button.
+
+        Unlike open(), nothing is reset; the lists are refreshed against the
+        model in case items were deleted/rotated while in the viewer.
+        """
+        self._refresh_orientation_lists()
+        self._start = min(self._start, max(0, len(self._current_paths) - 1))
+        self._update_orient_btn()
+        self._show_bars()
+        self._render(self._start)
 
     def stop_autoscroll(self) -> None:
         """Called by main window when navigating away from multi-view."""

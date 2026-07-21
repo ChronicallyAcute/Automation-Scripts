@@ -108,6 +108,7 @@ class Lightbox(QDialog):
     trashed     = Signal(str)
     requestInfo = Signal(str)
     openMulti   = Signal(int)
+    returnToMulti = Signal()      # back to the multi-view page we came from
     rotateRequested = Signal(int)   # degrees clockwise (+90 / -90)
 
     _SPEEDS = (0.25, 0.5, 1.0, 1.25, 1.5, 1.75, 2.0)
@@ -168,10 +169,18 @@ class Lightbox(QDialog):
             b.setToolTip(f"Rotate {deg}° clockwise (permanent)")
         self._tb(config.ICON_INFO, lambda: self.requestInfo.emit(self._path()), bar)
         self._tb(config.ICON_GRID, lambda: self.openMulti.emit(self._row), bar)
+        # Shown only when the viewer was entered FROM multi-view: returns to
+        # the exact page (group/layout/pins) it was opened from.
+        self._back_mv_btn = self._tb(
+            f"{config.ICON_BACK} Multi-view",
+            lambda: (self.returnToMulti.emit(), self.close()), bar)
+        self._back_mv_btn.setToolTip(
+            "Back to the multi-view page you came from (Esc)")
+        self._back_mv_btn.hide()
         self._tb("?", self._toggle_help, bar).setToolTip("Keyboard shortcuts (?)")
         self._tb(config.ICON_TRASH, self._trash, bar)
         self._tb(config.ICON_CLOSE, self.close, bar)
-        bar.insertWidget(bar.count() - 10, self._fav_btn)   # before the 5 rotate + 5 action buttons
+        bar.insertWidget(bar.count() - 11, self._fav_btn)   # before the 5 rotate + 6 action buttons
 
         # Keyboard-shortcuts help overlay (hidden until toggled).
         self._help = self._build_help_overlay()

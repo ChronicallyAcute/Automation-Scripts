@@ -808,7 +808,7 @@ class MainWindow(QMainWindow):
         if (self._mv is not None
                 and self._content_stack.currentWidget() is self._mv
                 and self._mv._chrome_widget.isVisible()):
-            y0 = self._mv._chrome_widget.height() + 10
+            y0 = self._mv._chrome_widget.sizeHint().height() + 4
         self._bar.setGeometry(8, y0, cw - 16, bh)
         if self._undo_bar.isVisible():
             # Deleted-media banner sits at the top, just below the control
@@ -1359,12 +1359,15 @@ class MainWindow(QMainWindow):
                 and self._lightbox_count <= 0):
             self._view.resume_video_previews()
 
-    def _open_lightbox(self, row: int) -> None:
+    def _open_lightbox(self, row: int, from_mv: bool = False) -> None:
         # Hidden gallery previews under the viewer waste GUI-thread frame
         # conversions and starve input handling.
         self._view.suspend_video_previews()
         self._lightbox_count += 1
         lb = Lightbox(self._model, self._favs, self)
+        if from_mv:
+            lb._back_mv_btn.show()
+            lb.returnToMulti.connect(self._reopen_multiview)
         lb.favToggled.connect(self._toggle_fav_path)
         lb.trashed.connect(self._trash_path)
         lb.requestInfo.connect(lambda p: InfoDialog(p, self).exec())
@@ -1392,7 +1395,8 @@ class MainWindow(QMainWindow):
             self._mv.favToggled.connect(self._toggle_fav_path)
             self._mv.trashed.connect(self._trash_path)
             self._mv.rotated.connect(self._rotate_from_multiview)
-            self._mv.openLightbox.connect(self._open_lightbox)
+            self._mv.openLightbox.connect(
+                lambda r: self._open_lightbox(r, from_mv=True))
             self._mv.closeRequested.connect(self._close_multiview)
             self._mv.barsVisibleChanged.connect(self._on_mv_bars_visible)
             self._content_stack.addWidget(self._mv)
@@ -1401,9 +1405,11 @@ class MainWindow(QMainWindow):
         self._mv.set_measuring(self._dims_inflight)
         self._mv.open(start_row)
         self._content_stack.setCurrentWidget(self._mv)
-        # The settings bar stays available in multi-view: it floats just
-        # below the multi-view chrome and follows its auto-hide rhythm.
+        # The settings bar stays available in multi-view: it floats in a
+        # RESERVED strip below the multi-view chrome (never over the tiles)
+        # and follows the chrome's auto-hide rhythm.
         self._bar.show()
+        self._mv.set_top_inset(self._bar.sizeHint().height() + 8)
         self._position_overlays()
         self._bar.raise_()
 
@@ -1412,6 +1418,8 @@ class MainWindow(QMainWindow):
         if self._mv is None or self._content_stack.currentWidget() is not self._mv:
             return
         self._bar.setVisible(on)
+        self._mv.set_top_inset(
+            (self._bar.sizeHint().height() + 8) if on else 0)
         if on:
             self._position_overlays()
             self._bar.raise_()
@@ -1422,6 +1430,18 @@ class MainWindow(QMainWindow):
         if (self._mv is not None
                 and self._content_stack.currentWidget() is self._mv):
             self._mv._on_model_dims_changed()
+
+    def _reopen_multiview(self) -> None:
+        """Restore the multi-view page the lightbox was entered from."""
+        if self._mv is None:
+            return
+        self._view.suspend_video_previews()
+        self._mv.reopen()
+        self._content_stack.setCurrentWidget(self._mv)
+        self._bar.show()
+        self._mv.set_top_inset(self._bar.sizeHint().height() + 8)
+        self._position_overlays()
+        self._bar.raise_()
 
     def _rotate_from_multiview(self, path: str) -> None:
         self._request_rotate(path, 90)
@@ -1434,6 +1454,8 @@ class MainWindow(QMainWindow):
             # kept decoding their videos behind the gallery, and any file last
             # shown in multi-view stayed locked against deletion.
             self._mv.release_all_media()
+        if self._mv is not None:
+            self._mv.set_top_inset(0)
         self._content_stack.setCurrentWidget(self._view)
         self._bar.show()
         self._position_overlays()
