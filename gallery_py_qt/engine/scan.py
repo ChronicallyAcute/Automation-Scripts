@@ -48,6 +48,10 @@ def _iter_folder(folder: str, result: ScanResult,
             result.total += 1
             try:
                 if entry.is_dir(follow_symlinks=True):
+                    # Per-folder favourites mirrors: never re-import the
+                    # copies living in a Favorites subfolder.
+                    if entry.name == "Favorites":
+                        continue
                     if recursive:
                         yield from _iter_folder(entry.path, result,
                                                 recursive=True)

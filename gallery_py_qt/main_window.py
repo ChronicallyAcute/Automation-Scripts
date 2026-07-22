@@ -492,12 +492,6 @@ class MainWindow(QMainWindow):
         config.ensure_dirs()
         self._prefs = prefs.load_prefs()
         config.apply_theme(self._prefs.get("theme", "dark"))
-        # Favourites mirror destination (defaults to G:\X on Windows); a
-        # "favorites_dir" entry in the prefs file overrides it without a
-        # code change.
-        fav_dir = self._prefs.get("favorites_dir")
-        if isinstance(fav_dir, str) and fav_dir.strip():
-            config.FAVORITES_DIR = fav_dir.strip()
         self.setStyleSheet(theme.stylesheet())
         self._recents = prefs.load_recent()
         self._favs = Favorites()
@@ -671,13 +665,22 @@ class MainWindow(QMainWindow):
         h.addWidget(self._sep())
         self._img_btn = self._btn("Images", self._apply_filter, checkable=True)
         self._img_btn.setChecked(True)
+        self._gif_btn = self._btn("GIFs", self._apply_filter, checkable=True)
+        self._gif_btn.setChecked(True)
+        self._gif_btn.setToolTip("Show / hide animated GIFs")
         self._vid_btn = self._btn("Videos", self._apply_filter, checkable=True)
         self._vid_btn.setChecked(True)
         self._favs_btn = self._btn(f"{config.ICON_HEART_FULL} Favs",
                                    self._apply_filter, checkable=True)
         self._favs_btn.setToolTip("Show only favourites")
-        h.addWidget(self._img_btn); h.addWidget(self._vid_btn)
+        self._favdir_btn = self._btn("📁♥", self._toggle_folder_favs,
+                                     checkable=True)
+        self._favdir_btn.setToolTip(
+            "View the Favorites subfolder(s) of the opened folder(s)")
+        h.addWidget(self._img_btn); h.addWidget(self._gif_btn)
+        h.addWidget(self._vid_btn)
         h.addWidget(self._favs_btn)
+        h.addWidget(self._favdir_btn)
 
         self._search = QLineEdit()
         self._search.setPlaceholderText("search\u2026")
@@ -1022,7 +1025,8 @@ class MainWindow(QMainWindow):
         self._model.set_filter(self._img_btn.isChecked(),
                                self._vid_btn.isChecked(),
                                self._search.text(),
-                               self._favs_btn.isChecked())
+                               self._favs_btn.isChecked(),
+                               gifs=self._gif_btn.isChecked())
         self._refresh_mv_after_model_change()
         # If a folder is loaded but the filter hides everything, explain why
         # the grid is blank rather than leaving a bare black screen.
@@ -1034,7 +1038,27 @@ class MainWindow(QMainWindow):
             else:
                 self._view.set_empty_hint(
                     "Nothing matches the current filter",
-                    "Adjust the Images / Videos toggles or clear the search box")
+                    "Adjust the Images / GIFs / Videos toggles or clear the search box")
+
+    def _toggle_folder_favs(self) -> None:
+        """View the per-folder Favorites subfolder(s) of the opened folder(s);
+        toggling off restores the folders that were open before."""
+        if self._favdir_btn.isChecked():
+            favdirs = [os.path.join(f, "Favorites")
+                       for f in self._current_folders]
+            favdirs = [f for f in favdirs if os.path.isdir(f)]
+            if not favdirs:
+                self._favdir_btn.setChecked(False)
+                self._status.setText(
+                    "No Favorites folders yet — favourite something first")
+                return
+            self._folders_before_favdirs = list(self._current_folders)
+            self.open_folders(favdirs)
+        else:
+            back = getattr(self, "_folders_before_favdirs", None)
+            if back:
+                self._folders_before_favdirs = None
+                self.open_folders(back)
 
     def _on_cols(self, n: int) -> None:
         self._view.set_columns(n)

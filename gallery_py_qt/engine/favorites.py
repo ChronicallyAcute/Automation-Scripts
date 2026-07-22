@@ -1,4 +1,4 @@
-"""Favourites (with Downloads mirror) and trash/undo."""
+"""Favourites (mirrored into a per-folder Favorites subfolder) and trash/undo."""
 from __future__ import annotations
 import json
 import os
@@ -9,8 +9,8 @@ from concurrent.futures import ThreadPoolExecutor
 
 from .. import config
 
-# Mirror file operations (copying favourites to FAVORITES_DIR, e.g. G:\X)
-# run on a single background worker: copying a large video to another drive
+# Mirror file operations (copying favourites into each folder's Favorites
+# subfolder) run on a single background worker: copying a large video to another drive
 # froze the GUI for seconds per heart-click.  One worker keeps operations in
 # submission order, so toggle-on -> toggle-off can never race each other.
 _MIRROR_POOL = ThreadPoolExecutor(max_workers=1, thread_name_prefix="favmirror")
@@ -34,17 +34,14 @@ def _same_file(a: str, b: str) -> bool:
         return False
 
 
-def ensure_favorites_dir() -> None:
-    # NOTE: the destination is an explicit user location (e.g. G:\X), so it is
-    # deliberately NOT marked hidden the way the old Downloads mirror was.
-    try:
-        os.makedirs(config.FAVORITES_DIR, exist_ok=True)
-    except OSError as exc:
-        print(f"[favs-dir] {exc}", file=sys.stderr)
+def mirror_dir_for(path: str) -> str:
+    """Favourited media aggregates into a Favorites folder INSIDE the folder
+    the file lives in (per-folder mirrors, not one catch-all location)."""
+    return os.path.join(os.path.dirname(path), "Favorites")
 
 
 class Favorites:
-    """In-memory favourites set with disk persistence + Downloads mirror."""
+    """In-memory favourites set with disk persistence + per-folder mirrors."""
 
     def __init__(self) -> None:
         self._paths: set[str] = set()
@@ -88,12 +85,12 @@ class Favorites:
     def _mirror(self, path: str) -> None:
         # Runs on the mirror worker — never on the GUI thread.
         try:
-            ensure_favorites_dir()
-            dest = os.path.join(config.FAVORITES_DIR, os.path.basename(path))
+            ddir = mirror_dir_for(path)
+            os.makedirs(ddir, exist_ok=True)
+            dest = os.path.join(ddir, os.path.basename(path))
             if os.path.exists(dest) and not _same_file(path, dest):
                 stem, ext = os.path.splitext(os.path.basename(path))
-                dest = os.path.join(config.FAVORITES_DIR,
-                                    f"{stem}_{int(time.time())}{ext}")
+                dest = os.path.join(ddir, f"{stem}_{int(time.time())}{ext}")
             if not os.path.exists(dest):
                 shutil.copy2(path, dest)
         except Exception as exc:
@@ -107,7 +104,7 @@ class Favorites:
 
     def _resync_mirror_now(self, path: str) -> None:
         try:
-            dest = os.path.join(config.FAVORITES_DIR, os.path.basename(path))
+            dest = os.path.join(mirror_dir_for(path), os.path.basename(path))
             if os.path.exists(dest):
                 shutil.copy2(path, dest)
         except Exception as exc:
@@ -115,7 +112,7 @@ class Favorites:
 
     def _unmirror(self, path: str) -> None:
         try:
-            dest = os.path.join(config.FAVORITES_DIR, os.path.basename(path))
+            dest = os.path.join(mirror_dir_for(path), os.path.basename(path))
             if os.path.exists(dest) and _same_file(path, dest):
                 os.remove(dest)
         except Exception as exc:

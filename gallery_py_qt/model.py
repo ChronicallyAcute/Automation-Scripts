@@ -79,6 +79,7 @@ class GalleryModel(QAbstractListModel):
         # filters / sort
         self._show_images = True
         self._show_videos = True
+        self._show_gifs = True
         self._favs_only = False
         self._query = ""
         # Sort chain: keys applied in order (first differentiates, later ones
@@ -155,10 +156,14 @@ class GalleryModel(QAbstractListModel):
 
     # -- filter helpers --------------------------------------------------------
     def _passes_filter(self, p: str) -> bool:
-        vid = media.is_video(p)
-        if vid and not self._show_videos:
-            return False
-        if (not vid) and not self._show_images:
+        # Three media classes: still images, GIFs, and videos.
+        if media.is_video(p):
+            if not self._show_videos:
+                return False
+        elif p.lower().endswith(".gif"):
+            if not self._show_gifs:
+                return False
+        elif not self._show_images:
             return False
         if self._favs_only and not self._favs.is_fav(p):
             return False
@@ -168,8 +173,11 @@ class GalleryModel(QAbstractListModel):
 
     # -- filtering / sorting --------------------------------------------------
     def set_filter(self, images: bool, videos: bool, query: str,
-                   favs_only: bool = False) -> None:
+                   favs_only: bool = False, gifs: bool | None = None) -> None:
         self._show_images, self._show_videos = images, videos
+        # Default: GIFs follow the images toggle (back-compat for callers
+        # that don't pass the separate flag).
+        self._show_gifs = images if gifs is None else gifs
         self._favs_only = favs_only
         self._query = query.strip().lower()
         self._reindex()

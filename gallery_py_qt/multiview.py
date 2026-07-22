@@ -42,7 +42,7 @@ from PySide6.QtMultimedia import QMediaPlayer, QAudioOutput, QtAudio
 from PySide6.QtMultimediaWidgets import QGraphicsVideoItem
 
 from . import config
-from .engine import media
+from .engine import media, tags
 from .help_overlay import make_help_panel, toggle_help_panel
 from .seekbar import SeekBar, fmt_time
 
@@ -194,6 +194,25 @@ class _Slot(QWidget):
         self._img_sig = _ImgSignals(self)
         self._img_sig.ready.connect(self._on_img_decoded)
         self.setAcceptDrops(True)
+
+        # Tiny tag buttons along the bottom of the media: one click toggles
+        # the descriptor on the file's tags metadata (JSON store + best-effort
+        # JPEG EXIF embed).  Highlighted while present.
+        self._tagbar = QWidget(self)
+        tl = QHBoxLayout(self._tagbar)
+        tl.setContentsMargins(2, 1, 2, 1)
+        tl.setSpacing(2)
+        self._tag_btns: dict[str, QToolButton] = {}
+        for t in tags.TAGS:
+            b = QToolButton()
+            b.setText(t)
+            b.setCursor(Qt.CursorShape.PointingHandCursor)
+            b.setToolTip(f'Toggle tag "{t}"')
+            b.clicked.connect(lambda _=False, tg=t: self._toggle_tag(tg))
+            tl.addWidget(b)
+            self._tag_btns[t] = b
+        tl.addStretch(1)
+        self._refresh_tag_styles()
 
         p = self.palette()
         p.setColor(QPalette.ColorRole.Window, QColor("#000"))
@@ -436,6 +455,13 @@ class _Slot(QWidget):
             x, y, dw, dh = self._img_displayed_rect()
         self._btnbar.setGeometry(max(0, x), max(0, y), max(1, dw), bh)
         self._btnbar.raise_()
+        th = self._tagbar.sizeHint().height()
+        seek_h = (max(20, self._seekwrap.sizeHint().height()) + 6
+                  if self._is_video else 0)
+        self._tagbar.setGeometry(max(0, x),
+                                 max(0, y + dh - th - seek_h),
+                                 max(1, dw), th)
+        self._tagbar.raise_()
         if self._is_video:
             self._position_seek()
 
@@ -504,6 +530,22 @@ class _Slot(QWidget):
         self._reset_audio()
         self._position_overlays()
 
+    _TAG_CSS_ON  = ("QToolButton { color: #000; background: %s;"
+                    " border-radius: 2px; font-size: 8px; padding: 0 3px; }")
+    _TAG_CSS_OFF = ("QToolButton { color: %s; background: rgba(0,0,0,110);"
+                    " border-radius: 2px; font-size: 8px; padding: 0 3px; }")
+
+    def _toggle_tag(self, tag: str) -> None:
+        if self._path:
+            tags.toggle_tag(self._path, tag)
+            self._refresh_tag_styles()
+
+    def _refresh_tag_styles(self) -> None:
+        cur = set(tags.tags_for(self._path)) if self._path else set()
+        for t, b in self._tag_btns.items():
+            b.setStyleSheet((self._TAG_CSS_ON % config.ACCENT) if t in cur
+                            else (self._TAG_CSS_OFF % config.OVERLAY_FG))
+
     def refresh_fav(self) -> None:
         """Sync the heart button with the item's current favourite state.
 
@@ -527,6 +569,7 @@ class _Slot(QWidget):
         self._dur_ms   = 0
         self._reset_audio()
         self.refresh_fav()
+        self._refresh_tag_styles()
         self._img_gen += 1                      # invalidate any pending decode
         if media.is_video(path):
             self._is_video = True
