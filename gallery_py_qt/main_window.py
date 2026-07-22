@@ -1256,6 +1256,9 @@ class MainWindow(QMainWindow):
             self._model.set_dims({path: (w, h)})
         # Keep a favourite's mirror copy in sync with the rotated original.
         self._favs.resync_mirror(path)
+        # Rotation re-encoded the file — restore its embedded tags.
+        from .engine import tags as _tags
+        _tags.reembed(path)
         # Refresh any viewer currently showing this file.
         for c in self.children():
             if isinstance(c, Lightbox) and c.current_path() == path:
@@ -1478,6 +1481,10 @@ class MainWindow(QMainWindow):
             # kept decoding their videos behind the gallery, and any file last
             # shown in multi-view stayed locked against deletion.
             self._mv.release_all_media()
+            # Players just released their handles — videos whose tag embeds
+            # failed while playing can be written now.
+            from .engine import tags as _tags
+            _tags.flush_pending()
         if self._mv is not None:
             self._mv.set_top_inset(0)
         self._content_stack.setCurrentWidget(self._view)
