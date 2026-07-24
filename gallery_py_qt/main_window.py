@@ -1254,11 +1254,13 @@ class MainWindow(QMainWindow):
         if w > 0 and h > 0:
             self._dims_done_for.add(path)
             self._model.set_dims({path: (w, h)})
-        # Keep a favourite's mirror copy in sync with the rotated original.
-        self._favs.resync_mirror(path)
-        # Rotation re-encoded the file — restore its embedded tags.
+        # Rotation re-encoded the file and dropped its embedded tags: restore
+        # them FIRST, then resync the favourite mirror — both run on the same
+        # single mirror worker (FIFO), so the mirror copy gets the re-tagged
+        # file rather than a tagless one.
         from .engine import tags as _tags
         _tags.reembed(path)
+        self._favs.resync_mirror(path)
         # Refresh any viewer currently showing this file.
         for c in self.children():
             if isinstance(c, Lightbox) and c.current_path() == path:

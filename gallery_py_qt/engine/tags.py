@@ -7,12 +7,19 @@ the file's EXIF XPKeywords field — the field Windows Explorer shows as
 best-effort and runs on the favourites worker thread, never the GUI.
 """
 from __future__ import annotations
+import errno
 import json
 import os
 import sys
+import threading
+from xml.sax.saxutils import escape as _xml_escape
 
 from .. import config
 from .favorites import _MIRROR_POOL
+
+
+class _Transient(Exception):
+    """A retryable embed failure (file busy / locked / sharing violation)."""
 
 # The fixed descriptor set exposed as buttons in multi-view.
 TAGS = ("T", "BT", "HT", "Az", "Bcs", "WAM", "Jz", "Ahg")
@@ -66,14 +73,37 @@ def toggle_tag(path: str, tag: str) -> bool:
     return present
 
 
-# Embeds that failed (typically a video still held open by a player) wait
-# here and retry on flush_pending() / the next tag toggle.
+# Embeds that failed for a RETRYABLE reason (the file was busy/locked, e.g. a
+# video still held open by a player) wait here and retry on flush_pending() /
+# the next tag toggle.  Permanent failures (unparseable file, no writable
+# property handler, access denied) are dropped, NOT queued — otherwise they
+# would be re-attempted forever and grow this dict without bound.
+_MAX_RETRIES = 6
+_PENDING_CAP = 256
+_pending_lock = threading.Lock()
 _PENDING: dict[str, list[str]] = {}
+_retries: dict[str, int] = {}
+
+
+def _retryable(exc: Exception) -> bool:
+    if isinstance(exc, _Transient):
+        return True
+    if isinstance(exc, PermissionError):
+        return True            # file open elsewhere (player) — try again later
+    win = getattr(exc, "winerror", None)
+    if win in (32, 33):        # ERROR_SHARING_VIOLATION / ERROR_LOCK_VIOLATION
+        return True
+    if isinstance(exc, OSError) and getattr(exc, "errno", None) in (
+            errno.EACCES, errno.EBUSY):
+        return True
+    return False               # ValueError parse fail, decode error, etc.
 
 
 def flush_pending() -> None:
-    """Retry embeds that previously failed (e.g. the file was playing)."""
-    for p, t in list(_PENDING.items()):
+    """Retry embeds that previously failed for a transient reason."""
+    with _pending_lock:
+        items = list(_PENDING.items())
+    for p, t in items:
         _MIRROR_POOL.submit(_embed_tags, p, t)
 
 
@@ -104,11 +134,29 @@ def _embed_tags(path: str, tag_list: list[str]) -> None:
         else:
             return
     except Exception as exc:
-        _PENDING[path] = list(tag_list)
-        print(f"[tags-embed] {os.path.basename(path)}: {exc} (queued for retry)",
+        if _retryable(exc):
+            with _pending_lock:
+                n = _retries.get(path, 0) + 1
+                if n <= _MAX_RETRIES and (
+                        path in _PENDING or len(_PENDING) < _PENDING_CAP):
+                    _retries[path] = n
+                    _PENDING[path] = list(tag_list)
+                    verdict = f"queued for retry ({n}/{_MAX_RETRIES})"
+                else:
+                    _PENDING.pop(path, None)
+                    _retries.pop(path, None)
+                    verdict = "gave up (retry limit/cap reached)"
+        else:
+            with _pending_lock:
+                _PENDING.pop(path, None)
+                _retries.pop(path, None)
+            verdict = "permanent, not retried"
+        print(f"[tags-embed] {os.path.basename(path)}: {exc} ({verdict})",
               file=sys.stderr)
     else:
-        _PENDING.pop(path, None)
+        with _pending_lock:
+            _PENDING.pop(path, None)
+            _retries.pop(path, None)
 
 
 def _embed_jpeg(path: str, tag_list: list[str]) -> None:
@@ -117,8 +165,14 @@ def _embed_jpeg(path: str, tag_list: list[str]) -> None:
     except ImportError:
         return
     exif = piexif.load(path)
-    exif["0th"][piexif.ImageIFD.XPKeywords] = \
-        tuple(";".join(tag_list).encode("utf-16-le"))
+    xp = piexif.ImageIFD.XPKeywords
+    if tag_list:
+        # XPKeywords is a NUL-terminated UTF-16LE string by Windows convention;
+        # without the terminator Explorer reads trailing garbage or nothing.
+        exif["0th"][xp] = tuple(
+            (";".join(tag_list) + "\x00").encode("utf-16-le"))
+    else:
+        exif["0th"].pop(xp, None)          # remove, don't write empty field
     piexif.insert(piexif.dump(exif), path)
 
 
@@ -132,7 +186,9 @@ _XMP_TRAILER = bytes([0x01]) + bytes(range(255, -1, -1)) + b"\x00"
 
 
 def _xmp_packet(tag_list: list[str]) -> bytes:
-    items = "".join(f"<rdf:li>{t}</rdf:li>" for t in tag_list)
+    # Escape tag text: the fixed button set is XML-safe, but the JSON store is
+    # externally editable, so a value with & < > must not break the packet.
+    items = "".join(f"<rdf:li>{_xml_escape(t)}</rdf:li>" for t in tag_list)
     return (
         '<?xpacket begin="﻿" id="W5M0MpCehiHzreSzNTczkc9d"?>'
         '<x:xmpmeta xmlns:x="adobe:ns:meta/">'
@@ -208,6 +264,9 @@ def _embed_gif_xmp(path: str, tag_list: list[str]) -> None:
         last = e
     out += data[last:trailer]
     if tag_list:
+        # An Application Extension is a GIF89a-only construct — normalise the
+        # signature so the written file is spec-valid (some 87a inputs exist).
+        out[0:6] = b"GIF89a"
         out += b"\x21\xff\x0bXMP DataXMP" + _xmp_packet(tag_list) + _XMP_TRAILER
     out += data[trailer:]
     tmp = path + ".tagtmp"
@@ -227,7 +286,8 @@ def read_gif_tags(path: str) -> list[str]:
         s, e = scan[0][0]
         blob = data[s:e].decode("utf-8", "ignore")
         import re
-        return re.findall(r"<rdf:li>([^<]+)</rdf:li>", blob)
+        from xml.sax.saxutils import unescape
+        return [unescape(m) for m in re.findall(r"<rdf:li>(.*?)</rdf:li>", blob)]
     except OSError:
         return []
 
@@ -268,39 +328,52 @@ def _embed_windows_keywords(path: str, tag_list: list[str]) -> None:
         0xF29F85E0, 0x4FF9, 0x1068,
         0xAB, 0x91, 0x08, 0x00, 0x2B, 0x27, 0xB3, 0xD9), 5)
     GPS_READWRITE = 0x2
+    # Sharing/lock violations are transient (video is playing) → retry.
+    # Everything else (no writable handler, access-denied) is permanent → drop.
+    _TRANSIENT_HR = (0x80070020, 0x80070021)
+
+    def _check(where: str, hr: int) -> None:
+        hr &= 0xFFFFFFFF
+        if hr == 0:
+            return
+        if hr in _TRANSIENT_HR:
+            raise _Transient(f"{where} busy (hr=0x{hr:08x})")
+        raise OSError(f"{where} failed (hr=0x{hr:08x})")
 
     ole32 = ctypes.windll.ole32
     propsys = ctypes.windll.propsys
-    ole32.CoInitializeEx(None, 0x2)            # STA on this worker thread
-    store = c_void_p()
-    hr = propsys.SHGetPropertyStoreFromParsingName(
-        c_wchar_p(path), None, GPS_READWRITE,
-        byref(IID_IPropertyStore), byref(store))
-    if hr != 0:
-        raise OSError(f"SHGetPropertyStore failed (hr=0x{hr & 0xFFFFFFFF:08x})")
+    # Own the COM init so we can balance it: 0/1 = we initialised (S_OK/S_FALSE),
+    # anything else (already-init different mode) means don't uninit.
+    co_hr = ole32.CoInitializeEx(None, 0x2) & 0xFFFFFFFF
     try:
-        pv = PROPVARIANT()
-        if tag_list:
-            arr = (c_wchar_p * len(tag_list))(*tag_list)
-            hr = propsys.InitPropVariantFromStringVector(
-                arr, len(tag_list), byref(pv))
-            if hr != 0:
-                raise OSError(f"InitPropVariant failed (hr=0x{hr:08x})")
-        # vt stays VT_EMPTY for an empty list — clears the property.
-        vtbl = ctypes.cast(
-            ctypes.cast(store, POINTER(c_void_p)).contents, POINTER(c_void_p))
-        proto = ctypes.WINFUNCTYPE(ctypes.c_long, c_void_p, c_void_p, c_void_p)
-        set_value = proto(vtbl[6])             # IPropertyStore::SetValue
-        commit = ctypes.WINFUNCTYPE(ctypes.c_long, c_void_p)(vtbl[7])
-        hr = set_value(store, byref(PKEY_Keywords), byref(pv))
-        ole32.PropVariantClear(byref(pv))
-        if hr != 0:
-            raise OSError(f"SetValue failed (hr=0x{hr & 0xFFFFFFFF:08x})")
-        hr = commit(store)
-        if hr != 0:
-            raise OSError(f"Commit failed (hr=0x{hr & 0xFFFFFFFF:08x})")
+        store = c_void_p()
+        _check("SHGetPropertyStore", propsys.SHGetPropertyStoreFromParsingName(
+            c_wchar_p(path), None, GPS_READWRITE,
+            byref(IID_IPropertyStore), byref(store)))
+        if not store.value:                    # guard: never deref NULL (crash)
+            raise OSError("SHGetPropertyStore returned NULL store")
+        try:
+            pv = PROPVARIANT()
+            if tag_list:
+                arr = (c_wchar_p * len(tag_list))(*tag_list)
+                _check("InitPropVariant", propsys.InitPropVariantFromStringVector(
+                    arr, len(tag_list), byref(pv)))
+            # vt stays VT_EMPTY for an empty list — clears the property.
+            vtbl = ctypes.cast(
+                ctypes.cast(store, POINTER(c_void_p)).contents,
+                POINTER(c_void_p))
+            proto = ctypes.WINFUNCTYPE(
+                ctypes.c_long, c_void_p, c_void_p, c_void_p)
+            set_value = proto(vtbl[6])         # IPropertyStore::SetValue
+            commit = ctypes.WINFUNCTYPE(ctypes.c_long, c_void_p)(vtbl[7])
+            hr = set_value(store, byref(PKEY_Keywords), byref(pv))
+            ole32.PropVariantClear(byref(pv))
+            _check("SetValue", hr)
+            _check("Commit", commit(store))
+        finally:
+            ctypes.WINFUNCTYPE(ctypes.c_long, c_void_p)(
+                ctypes.cast(ctypes.cast(store, POINTER(c_void_p)).contents,
+                            POINTER(c_void_p))[2])(store)   # IUnknown::Release
     finally:
-        release = ctypes.WINFUNCTYPE(ctypes.c_long, c_void_p)(
-            ctypes.cast(ctypes.cast(store, POINTER(c_void_p)).contents,
-                        POINTER(c_void_p))[2])
-        release(store)
+        if co_hr in (0, 1):
+            ole32.CoUninitialize()
