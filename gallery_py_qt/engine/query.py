@@ -22,7 +22,8 @@ import re
 _TOKEN = re.compile(r"^([A-Za-z]+)(<=|>=|<|>|=|:)(.+)$")
 _CMP = {"<": operator.lt, ">": operator.gt, "<=": operator.le,
         ">=": operator.ge, "=": operator.eq, ":": operator.eq}
-_NUMERIC = {"w": "w", "width": "w", "h": "h", "height": "h"}
+_NUMERIC = {"w": "w", "width": "w", "h": "h", "height": "h",
+            "rating": "rating", "stars": "rating"}
 _TRUEISH = {"yes", "y", "true", "1", "on", "fav"}
 
 
@@ -39,9 +40,14 @@ def _build(key: str, op: str, val: str):
         field, num, cmp = _NUMERIC[key], _num(val), _CMP[op]
         if num is None:
             return None
-        def pred(info, field=field, num=num, cmp=cmp):
+        # Dimensions: 0/unknown never matches. Rating: 0 (unrated) is a real
+        # value, so allow it.
+        zero_ok = field == "rating"
+        def pred(info, field=field, num=num, cmp=cmp, zero_ok=zero_ok):
             v = info.get(field)
-            return bool(v) and v > 0 and cmp(v, num)
+            if v is None or (not zero_ok and v <= 0):
+                return False
+            return cmp(v, num)
         return pred
     if key in ("fav", "favorite", "favourite"):
         want = val.strip().lower() in _TRUEISH

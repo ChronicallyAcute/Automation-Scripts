@@ -184,7 +184,7 @@ class GalleryModel(QAbstractListModel):
         return True
 
     def _query_info(self, p: str) -> dict:
-        from .engine import tags
+        from .engine import tags, ratings
         w, h = self._dims.get(p, (0, 0))
         ext = os.path.splitext(p.lower())[1]
         typ = ("video" if media.is_video(p)
@@ -192,6 +192,7 @@ class GalleryModel(QAbstractListModel):
         return {"name": os.path.basename(p).lower(),
                 "w": w, "h": h, "type": typ,
                 "fav": self._favs.is_fav(p),
+                "rating": ratings.rating_of(p),
                 "tags": {t.lower() for t in tags.tags_for(p)}}
 
     # -- filtering / sorting --------------------------------------------------
@@ -311,11 +312,13 @@ class GalleryModel(QAbstractListModel):
     def _key_component(self, mode: str):
         """Return a callable producing one comparable tuple for `mode`."""
         name = lambda p: (os.path.basename(p).lower(),)
+        from .engine import ratings
         return {
             "name":      name,
             "img_first": lambda p: (media.is_video(p),),
             "vid_first": lambda p: (not media.is_video(p),),
             "favorites": lambda p: (not self._favs.is_fav(p),),
+            "rating":    lambda p: (-ratings.rating_of(p),),   # highest first
             "area":      lambda p: (self._dim_area(p),),
             "width":     lambda p: (self._dims.get(p, (0, 0))[0],),
             "height":    lambda p: (self._dims.get(p, (0, 0))[1],),

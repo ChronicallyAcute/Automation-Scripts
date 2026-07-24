@@ -159,7 +159,14 @@ class Lightbox(QDialog):
             " border-radius: 4px; padding: 2px 8px;")
         bar.addWidget(self._counter)
         bar.addStretch(1)
-        self._fav_btn = self._tb(config.ICON_HEART_EMPTY, self._toggle_fav)
+        # Right-side action group, added left-to-right in final order.
+        self._fav_btn = self._tb(config.ICON_HEART_EMPTY, self._toggle_fav, bar)
+        # Star rating (0–5): click the Nth star to set N, or clear if already N.
+        self._star_btns = []
+        for n in range(1, 6):
+            b = self._tb("☆", lambda _=False, k=n: self._set_rating(k), bar)
+            b.setToolTip(f"Rate {n} star(s)")
+            self._star_btns.append(b)
         # Permanent rotation in 45° steps — each button rewrites the file on
         # disk (right angles are exact; diagonals grow the canvas).
         for deg in (90, 135, 180, 225, 270):
@@ -180,7 +187,6 @@ class Lightbox(QDialog):
         self._tb("?", self._toggle_help, bar).setToolTip("Keyboard shortcuts (?)")
         self._tb(config.ICON_TRASH, self._trash, bar)
         self._tb(config.ICON_CLOSE, self.close, bar)
-        bar.insertWidget(bar.count() - 11, self._fav_btn)   # before the 5 rotate + 6 action buttons
 
         # Keyboard-shortcuts help overlay (hidden until toggled).
         self._help = self._build_help_overlay()
@@ -386,6 +392,7 @@ class Lightbox(QDialog):
             if is_fav else
             f"QToolButton {{ color: {config.FG_MID}; font-size: 15px; border: none;"
             " background: rgba(0,0,0,90); border-radius: 4px; padding: 4px 8px; }")
+        self._refresh_rating()
         if media.is_video(path):
             # Cancel any in-flight image decode and clear its loading state.
             self._img_gen += 1
@@ -484,6 +491,23 @@ class Lightbox(QDialog):
 
     def _toggle_hold(self) -> None:
         pass
+
+    def _set_rating(self, stars: int) -> None:
+        from .engine import ratings
+        p = self._path()
+        if p:
+            ratings.cycle_rating(p, stars)
+            self._refresh_rating()
+
+    def _refresh_rating(self) -> None:
+        from .engine import ratings
+        cur = ratings.rating_of(self._path()) if self._path() else 0
+        for i, b in enumerate(self._star_btns, start=1):
+            b.setText("★" if i <= cur else "☆")
+            b.setStyleSheet(
+                "QToolButton { border: none; background: rgba(0,0,0,90);"
+                " border-radius: 4px; padding: 4px 4px; font-size: 15px; color: "
+                + (config.ACCENT if i <= cur else config.FG_MID) + "; }")
 
     def _toggle_fav(self) -> None:
         p = self._path()

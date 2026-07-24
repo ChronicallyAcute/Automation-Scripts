@@ -642,6 +642,7 @@ class MainWindow(QMainWindow):
         self._sort.addItem("Images first", "img_first")
         self._sort.addItem("Videos first", "vid_first")
         self._sort.addItem("Favourites", "favorites")
+        self._sort.addItem("Rating", "rating")
         self._sort.addItem("Dimensions \u00b7 area", "area")
         self._sort.addItem("Dimensions \u00b7 width", "width")
         self._sort.addItem("Dimensions \u00b7 height", "height")
@@ -733,6 +734,10 @@ class MainWindow(QMainWindow):
         self._theme_btn.setMenu(self._theme_menu)
         self._theme_btn.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
         h.addWidget(self._theme_btn)
+
+        settings_btn = self._btn("⚙", self._open_settings)
+        settings_btn.setToolTip("Settings")
+        h.addWidget(settings_btn)
 
         h.addWidget(self._btn(config.ICON_FULLSCREEN, self._toggle_fs))
 
@@ -1060,6 +1065,26 @@ class MainWindow(QMainWindow):
         self._tag_menu.addSeparator()
         self._tag_menu.addAction("Manage tags…").triggered.connect(
             self._open_tag_manager)
+
+    def _open_settings(self) -> None:
+        from .settings_dialog import SettingsDialog
+        dlg = SettingsDialog(self._prefs, self,
+                             on_manage_tags=self._open_tag_manager)
+        if dlg.exec() != QDialog.DialogCode.Accepted:
+            return
+        new = dlg.result_prefs()
+        if new.get("theme") != self._prefs.get("theme"):
+            self._set_theme(new["theme"])
+        favorites.set_link_mode(new.get("link_mode", "copy"))
+        li = new.get("low_io_mode")
+        self._low_io_forced = isinstance(li, bool)
+        if self._low_io_forced:
+            self._set_low_io(bool(li), forced=True)
+        elif self._low_io:                 # was forced on, now auto -> restore
+            self._set_low_io(False)
+        self._prefs = new
+        prefs.save_prefs(self._prefs)
+        self._status.setText("Settings saved")
 
     def _open_tag_manager(self) -> None:
         from .tag_manager import TagManagerDialog
