@@ -682,6 +682,26 @@ class MainWindow(QMainWindow):
         h.addWidget(self._favs_btn)
         h.addWidget(self._favdir_btn)
 
+        # Filter-by-tag menu: check any tags to show only items carrying them.
+        from .engine import tags as _tags
+        self._tag_menu_btn = self._btn("Tags ▾", None)
+        self._tag_menu_btn.setToolTip("Show only items with the checked tags")
+        self._tag_menu = QMenu(self._tag_menu_btn)
+        self._tag_filter_actions: dict[str, QAction] = {}
+        for t in _tags.TAGS:
+            act = self._tag_menu.addAction(t)
+            act.setCheckable(True)
+            act.toggled.connect(lambda _=False: self._apply_filter())
+            self._tag_filter_actions[t] = act
+        self._tag_menu.addSeparator()
+        self._tag_matchall_act = self._tag_menu.addAction("Match all (AND)")
+        self._tag_matchall_act.setCheckable(True)
+        self._tag_matchall_act.toggled.connect(lambda _=False: self._apply_filter())
+        clear_act = self._tag_menu.addAction("Clear tag filter")
+        clear_act.triggered.connect(self._clear_tag_filter)
+        self._tag_menu_btn.setMenu(self._tag_menu)
+        h.addWidget(self._tag_menu_btn)
+
         self._search = QLineEdit()
         self._search.setPlaceholderText("search\u2026")
         self._search.setFixedWidth(150)
@@ -1021,12 +1041,27 @@ class MainWindow(QMainWindow):
             self._recent_menu.addAction(act)
 
     # -- filters / columns -----------------------------------------------------
+    def _selected_filter_tags(self) -> set:
+        return {t for t, a in self._tag_filter_actions.items() if a.isChecked()}
+
+    def _clear_tag_filter(self) -> None:
+        for a in self._tag_filter_actions.values():
+            a.setChecked(False)
+        self._tag_matchall_act.setChecked(False)
+        self._apply_filter()
+
     def _apply_filter(self) -> None:
+        tag_filter = self._selected_filter_tags()
         self._model.set_filter(self._img_btn.isChecked(),
                                self._vid_btn.isChecked(),
                                self._search.text(),
                                self._favs_btn.isChecked(),
-                               gifs=self._gif_btn.isChecked())
+                               gifs=self._gif_btn.isChecked(),
+                               tag_filter=tag_filter,
+                               tag_match_all=self._tag_matchall_act.isChecked())
+        # Reflect active tag filtering on the button label.
+        self._tag_menu_btn.setText(
+            f"Tags ({len(tag_filter)}) ▾" if tag_filter else "Tags ▾")
         self._refresh_mv_after_model_change()
         # If a folder is loaded but the filter hides everything, explain why
         # the grid is blank rather than leaving a bare black screen.

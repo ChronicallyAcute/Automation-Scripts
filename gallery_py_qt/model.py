@@ -81,6 +81,8 @@ class GalleryModel(QAbstractListModel):
         self._show_videos = True
         self._show_gifs = True
         self._favs_only = False
+        self._tag_filter: set[str] = set()
+        self._tag_match_all = False
         self._query = ""
         # Sort chain: keys applied in order (first differentiates, later ones
         # break ties).  Default: group by like sizes, then by name.
@@ -167,18 +169,32 @@ class GalleryModel(QAbstractListModel):
             return False
         if self._favs_only and not self._favs.is_fav(p):
             return False
+        if self._tag_filter:
+            from .engine import tags
+            have = set(tags.tags_for(p))
+            if self._tag_match_all:
+                if not self._tag_filter <= have:
+                    return False
+            elif not (self._tag_filter & have):
+                return False
         if self._query and self._query not in os.path.basename(p).lower():
             return False
         return True
 
     # -- filtering / sorting --------------------------------------------------
     def set_filter(self, images: bool, videos: bool, query: str,
-                   favs_only: bool = False, gifs: bool | None = None) -> None:
+                   favs_only: bool = False, gifs: bool | None = None,
+                   tag_filter: "set[str] | None" = None,
+                   tag_match_all: bool = False) -> None:
         self._show_images, self._show_videos = images, videos
         # Default: GIFs follow the images toggle (back-compat for callers
         # that don't pass the separate flag).
         self._show_gifs = images if gifs is None else gifs
         self._favs_only = favs_only
+        # Empty tag_filter = no tag filtering; non-empty requires ANY (default)
+        # or ALL of the selected tags to be present on the item.
+        self._tag_filter = set(tag_filter or ())
+        self._tag_match_all = bool(tag_match_all)
         self._query = query.strip().lower()
         self._reindex()
 
