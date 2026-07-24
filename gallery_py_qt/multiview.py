@@ -538,6 +538,9 @@ class _Slot(QWidget):
     def _toggle_tag(self, tag: str) -> None:
         if self._path:
             tags.toggle_tag(self._path, tag)
+            # A tagged + favourited item is copied into the tag's subfolder
+            # under the Gallery Favorites folder (removed when untagged).
+            tags.sync_tag_folders(self._path, self._favs.is_fav(self._path))
             self._refresh_tag_styles()
 
     def _refresh_tag_styles(self) -> None:

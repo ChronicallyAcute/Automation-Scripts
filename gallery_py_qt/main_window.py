@@ -1195,6 +1195,10 @@ class MainWindow(QMainWindow):
             self._mv.set_measuring(False)
 
     # -- favourites / rotate / trash -------------------------------------------
+    def _sync_tag_folders(self, path: str) -> None:
+        from .engine import tags as _tags
+        _tags.sync_tag_folders(path, self._favs.is_fav(path))
+
     def _on_grid_fav(self, row: int) -> None:
         path = self._model.path_at(row)
         if not path:
@@ -1202,6 +1206,7 @@ class MainWindow(QMainWindow):
         new = self._favs.toggle(path)
         self._model.refresh_fav(path)
         self._view.refresh_overlay_fav(row, new)
+        self._sync_tag_folders(path)     # (un)favouriting changes tag-folder copies
         if self._favs_btn.isChecked():
             self._apply_filter()    # un-favourited item leaves the filtered view
 
@@ -1211,6 +1216,7 @@ class MainWindow(QMainWindow):
         # Update multi-view hearts in place (tiles are not reloaded on toggle).
         if self._mv is not None:
             self._mv.refresh_fav(path)
+        self._sync_tag_folders(path)
         self._status.setText(
             f"{'Favourited' if new else 'Unfavourited'} {os.path.basename(path)}")
         if self._favs_btn.isChecked():
@@ -1286,6 +1292,7 @@ class MainWindow(QMainWindow):
             if self._favs.is_fav(p) != make_fav:
                 self._favs.toggle(p)
                 self._model.refresh_fav(p)
+                self._sync_tag_folders(p)
         verb = "Favourited" if make_fav else "Unfavourited"
         self._status.setText(f"{verb} {len(paths)} item(s)")
         if self._favs_btn.isChecked():

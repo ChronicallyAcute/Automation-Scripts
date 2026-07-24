@@ -10,11 +10,13 @@ from __future__ import annotations
 import errno
 import json
 import os
+import shutil
 import sys
 import threading
 from xml.sax.saxutils import escape as _xml_escape
 
 from .. import config
+from . import media
 from .favorites import _MIRROR_POOL
 
 
@@ -53,6 +55,113 @@ def _save() -> None:
 
 def tags_for(path: str) -> list[str]:
     return list(_load().get(path, []))
+
+
+# -- Tag folders: aggregate tagged + favourited media by tag -------------------
+# Under the Gallery Favorites folder (config.FAVORITES_DIR) we keep one
+# subfolder per tag name.  A file is copied into <FAVORITES_DIR>/<TAG>/ while it
+# is BOTH favourited AND carries <TAG> AND is an image, GIF, or short video
+# (<= 10 min).  Copies are reconciled (added/removed) whenever the file is
+# tagged/untagged or (un)favourited.
+_MAX_VIDEO_TAG_SECONDS = 600      # "small videos (10 min and less)"
+
+
+def _tag_copy_eligible(path: str) -> bool:
+    ext = os.path.splitext(path.lower())[1]
+    if ext in config.VIDEO_EXT:
+        try:
+            dur = media.peek_duration(path)
+        except Exception:
+            dur = 0.0
+        # Only short videos; unknown/zero duration is excluded (can't confirm).
+        return 0 < dur <= _MAX_VIDEO_TAG_SECONDS
+    return ext in config.IMAGE_EXT            # images + GIFs
+
+
+def sync_tag_folders(path: str, favored: bool) -> None:
+    """Reconcile this file's copies across the per-tag Favorites subfolders.
+
+    Reads the current tag set now (GUI thread) and does the copying/removing on
+    the mirror worker (it touches disk and may probe a video's duration).
+    """
+    # Never operate on a file that already lives inside the tag folders.
+    try:
+        if os.path.dirname(os.path.abspath(path)).startswith(
+                os.path.abspath(config.FAVORITES_DIR)):
+            return
+    except Exception:
+        pass
+    _MIRROR_POOL.submit(_sync_tag_folders_now, path, bool(favored),
+                        tags_for(path))
+
+
+# Records each tag-folder copy's EXACT path per (source, tag).  Identifying a
+# copy by content (_same_file) is unreliable — embedding tags / rotation mutate
+# the source so it no longer matches its earlier copy — and basenames can
+# collide across source folders.  The manifest makes add/remove exact.  Only
+# the single mirror worker touches it, so no lock is needed.
+_TAGDB_FILE = os.path.join(config.HOME, ".gallery_py_qt_tagfolders.json")
+
+
+def _load_tagdb() -> dict:
+    try:
+        with open(_TAGDB_FILE, encoding="utf-8") as f:
+            d = json.load(f)
+            return d if isinstance(d, dict) else {}
+    except Exception:
+        return {}
+
+
+def _save_tagdb(db: dict) -> None:
+    try:
+        tmp = _TAGDB_FILE + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(db, f)
+        os.replace(tmp, _TAGDB_FILE)
+    except OSError as exc:
+        print(f"[tag-folder-db] {exc}", file=sys.stderr)
+
+
+def _sync_tag_folders_now(path: str, favored: bool, tag_list: list[str]) -> None:
+    key = os.path.abspath(path)
+    base = os.path.basename(path)
+    eligible = favored and _tag_copy_eligible(path)
+    active = set(tag_list) if eligible else set()
+    db = _load_tagdb()
+    entry = dict(db.get(key, {}))          # {tag: absolute copy path}
+    changed = False
+    for t in TAGS:
+        sub = os.path.join(config.FAVORITES_DIR, t)
+        try:
+            if t in active:
+                cur = entry.get(t)
+                if cur and os.path.exists(cur):
+                    continue               # already mirrored for this tag
+                os.makedirs(sub, exist_ok=True)
+                dest = os.path.join(sub, base)
+                if os.path.exists(dest):   # basename collision across folders
+                    stem, ext = os.path.splitext(base)
+                    i = 1
+                    while os.path.exists(os.path.join(sub, f"{stem}_{i}{ext}")):
+                        i += 1
+                    dest = os.path.join(sub, f"{stem}_{i}{ext}")
+                shutil.copy2(path, dest)
+                entry[t] = dest
+                changed = True
+            else:
+                cur = entry.pop(t, None)
+                if cur is not None:
+                    changed = True
+                    if os.path.exists(cur):
+                        os.remove(cur)
+        except OSError as exc:
+            print(f"[tag-folder] {t}/{base}: {exc}", file=sys.stderr)
+    if changed or key in db:
+        if entry:
+            db[key] = entry
+        else:
+            db.pop(key, None)
+        _save_tagdb(db)
 
 
 def toggle_tag(path: str, tag: str) -> bool:
