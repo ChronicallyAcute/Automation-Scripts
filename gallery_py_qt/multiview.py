@@ -1723,6 +1723,12 @@ class MultiView(QWidget):
             if slot._path == path:
                 slot.refresh_fav()
 
+    def refresh_tag(self, path: str) -> None:
+        """Update the tag-button highlights on every tile showing `path`."""
+        for slot in self._all_slots():
+            if slot._path == path:
+                slot._refresh_tag_styles()
+
     def _on_slot_rotate(self, path: str) -> None:
         if path:
             self.rotated.emit(path)

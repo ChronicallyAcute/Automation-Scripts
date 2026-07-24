@@ -593,6 +593,7 @@ class MainWindow(QMainWindow):
         self._view.favBatch.connect(self._on_grid_fav_batch)
         self._view.trashBatch.connect(self._on_grid_trash_batch)
         self._view.selectionChanged.connect(self._on_selection_changed)
+        self._view.contextMenu.connect(self._show_grid_context_menu)
         # Ctrl+wheel zoom routes through the spin box so UI and view stay in sync.
         self._view.columnsZoom.connect(
             lambda step: self._cols_spin.setValue(self._cols_spin.value() + step))
@@ -1315,6 +1316,59 @@ class MainWindow(QMainWindow):
         path = self._model.path_at(row)
         if path:
             self._trash_path(path)
+
+    # -- grid context menu -----------------------------------------------------
+    def _build_grid_menu(self, rows: list) -> "QMenu | None":
+        """Build (but don't show) the selection context menu — separated from
+        exec() so the contents are testable without a modal event loop."""
+        if not rows:
+            return None
+        from .engine import tags as _tags
+        menu = QMenu(self)
+        n = len(rows)
+        sel = f"{n} item(s)" if n > 1 else os.path.basename(
+            self._model.path_at(rows[0]) or "")
+        menu.addAction(f"{config.ICON_HEART_FULL}  Favourite {sel}",
+                       lambda: self._on_grid_fav_batch(rows))
+        tag_menu = menu.addMenu("Tag")
+        paths = [p for p in (self._model.path_at(r) for r in rows) if p]
+        for t in _tags.TAGS:
+            act = tag_menu.addAction(t)
+            act.setCheckable(True)
+            # Checked only when EVERY selected item already carries the tag.
+            act.setChecked(bool(paths)
+                           and all(t in _tags.tags_for(p) for p in paths))
+            act.triggered.connect(lambda _=False, tg=t: self._batch_tag(rows, tg))
+        menu.addSeparator()
+        menu.addAction(f"{config.ICON_TRASH}  Delete {sel}",
+                       lambda: self._on_grid_trash_batch(rows))
+        return menu
+
+    def _show_grid_context_menu(self, gpos) -> None:
+        menu = self._build_grid_menu(self._view.selected_rows())
+        if menu is not None:
+            menu.exec(gpos)
+
+    def _batch_tag(self, rows: list, tag: str) -> None:
+        """Toggle `tag` across a selection: add to all if any lacks it, else
+        remove from all (mirrors the batch-favourite convention)."""
+        from .engine import tags as _tags
+        paths = [p for p in (self._model.path_at(r) for r in rows) if p]
+        if not paths:
+            return
+        add = any(tag not in _tags.tags_for(p) for p in paths)
+        for p in paths:
+            if (tag in _tags.tags_for(p)) != add:
+                _tags.toggle_tag(p, tag)
+                _tags.sync_tag_folders(p, self._favs.is_fav(p))
+        self._status.setText(
+            f"{'Tagged' if add else 'Untagged'} {len(paths)} item(s): {tag}")
+        if self._mv is not None:
+            for p in paths:
+                self._mv.refresh_tag(p)
+        # A tag filter that's active may now include/exclude these items.
+        if self._selected_filter_tags():
+            self._apply_filter()
 
     # -- batch actions on a multi-selection ------------------------------------
     def _on_grid_fav_batch(self, rows: list) -> None:

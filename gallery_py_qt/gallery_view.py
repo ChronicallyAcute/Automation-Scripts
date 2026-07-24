@@ -157,6 +157,7 @@ class GalleryView(QAbstractScrollArea):
     trashBatch   = Signal(list)   # rows — trash a multi-selection
     selectionChanged = Signal(int)   # current selection count
     columnsZoom  = Signal(int)    # +1 = more columns (smaller), -1 = fewer
+    contextMenu  = Signal(object)    # global QPoint — right-click on the grid
 
     # A portrait image taller than this multiple of the column width is capped
     # so pathologically narrow images don't dominate the layout.
@@ -691,6 +692,15 @@ class GalleryView(QAbstractScrollArea):
             self._selection = set(range(m.rowCount()))
             self.selectionChanged.emit(len(self._selection))
             self.viewport().update()
+
+    def contextMenuEvent(self, e) -> None:
+        # Right-click acts on the selection; if the clicked cell isn't part of
+        # it, make it the (single) selection first — standard file-manager UX.
+        row = self._row_at(e.pos())
+        if row >= 0 and row not in self._selection:
+            self._set_single_selection(row)
+            self.viewport().update()
+        self.contextMenu.emit(e.globalPos())
 
     def _set_single_selection(self, row: int) -> None:
         self._selection = {row}
