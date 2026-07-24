@@ -695,7 +695,10 @@ class MainWindow(QMainWindow):
 
         self._search = QLineEdit()
         self._search.setPlaceholderText("search\u2026")
-        self._search.setFixedWidth(150)
+        self._search.setToolTip(
+            "Filename substring, or filters: tag:BT  fav:yes  type:video  "
+            "w>1920  h<=1080 \u2014 combine freely (all must match)")
+        self._search.setFixedWidth(190)
         # Debounce: each keystroke re-runs the filter, and set_filter does a full
         # sort + model reset \u2014 coalesce rapid typing into one pass every 200 ms.
         self._search_timer = QTimer(self)

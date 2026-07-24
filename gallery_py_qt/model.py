@@ -84,6 +84,7 @@ class GalleryModel(QAbstractListModel):
         self._tag_filter: set[str] = set()
         self._tag_match_all = False
         self._query = ""
+        self._query_pred = None
         # Sort chain: keys applied in order (first differentiates, later ones
         # break ties).  Default: group by like sizes, then by name.
         self._sort_chain: list[str] = ["like_dims", "name"]
@@ -177,9 +178,21 @@ class GalleryModel(QAbstractListModel):
                     return False
             elif not (self._tag_filter & have):
                 return False
-        if self._query and self._query not in os.path.basename(p).lower():
-            return False
+        if self._query_pred is not None:
+            if not self._query_pred(self._query_info(p)):
+                return False
         return True
+
+    def _query_info(self, p: str) -> dict:
+        from .engine import tags
+        w, h = self._dims.get(p, (0, 0))
+        ext = os.path.splitext(p.lower())[1]
+        typ = ("video" if media.is_video(p)
+               else "gif" if ext == ".gif" else "image")
+        return {"name": os.path.basename(p).lower(),
+                "w": w, "h": h, "type": typ,
+                "fav": self._favs.is_fav(p),
+                "tags": {t.lower() for t in tags.tags_for(p)}}
 
     # -- filtering / sorting --------------------------------------------------
     def set_filter(self, images: bool, videos: bool, query: str,
@@ -195,7 +208,9 @@ class GalleryModel(QAbstractListModel):
         # or ALL of the selected tags to be present on the item.
         self._tag_filter = set(tag_filter or ())
         self._tag_match_all = bool(tag_match_all)
-        self._query = query.strip().lower()
+        self._query = query.strip()
+        from .engine.query import compile_query
+        self._query_pred = compile_query(self._query)
         self._reindex()
 
     def set_sort(self, mode: str) -> None:
