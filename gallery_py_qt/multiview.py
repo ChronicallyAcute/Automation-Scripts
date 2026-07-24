@@ -197,22 +197,13 @@ class _Slot(QWidget):
 
         # Tiny tag buttons along the bottom of the media: one click toggles
         # the descriptor on the file's tags metadata (JSON store + best-effort
-        # JPEG EXIF embed).  Highlighted while present.
+        # embed).  Rebuilt when the user customises the tag set.
         self._tagbar = QWidget(self)
-        tl = QHBoxLayout(self._tagbar)
-        tl.setContentsMargins(2, 1, 2, 1)
-        tl.setSpacing(2)
+        self._taglay = QHBoxLayout(self._tagbar)
+        self._taglay.setContentsMargins(2, 1, 2, 1)
+        self._taglay.setSpacing(2)
         self._tag_btns: dict[str, QToolButton] = {}
-        for t in tags.TAGS:
-            b = QToolButton()
-            b.setText(t)
-            b.setCursor(Qt.CursorShape.PointingHandCursor)
-            b.setToolTip(f'Toggle tag "{t}"')
-            b.clicked.connect(lambda _=False, tg=t: self._toggle_tag(tg))
-            tl.addWidget(b)
-            self._tag_btns[t] = b
-        tl.addStretch(1)
-        self._refresh_tag_styles()
+        self.rebuild_tag_buttons()
 
         p = self.palette()
         p.setColor(QPalette.ColorRole.Window, QColor("#000"))
@@ -534,6 +525,25 @@ class _Slot(QWidget):
                     " border-radius: 2px; font-size: 8px; padding: 0 3px; }")
     _TAG_CSS_OFF = ("QToolButton { color: %s; background: rgba(0,0,0,110);"
                     " border-radius: 2px; font-size: 8px; padding: 0 3px; }")
+
+    def rebuild_tag_buttons(self) -> None:
+        """(Re)create the tag buttons from the current tag set."""
+        while self._taglay.count():
+            item = self._taglay.takeAt(0)
+            w = item.widget()
+            if w is not None:
+                w.deleteLater()
+        self._tag_btns = {}
+        for t in tags.get_tags():
+            b = QToolButton()
+            b.setText(t)
+            b.setCursor(Qt.CursorShape.PointingHandCursor)
+            b.setToolTip(f'Toggle tag "{t}"')
+            b.clicked.connect(lambda _=False, tg=t: self._toggle_tag(tg))
+            self._taglay.addWidget(b)
+            self._tag_btns[t] = b
+        self._taglay.addStretch(1)
+        self._refresh_tag_styles()
 
     def _toggle_tag(self, tag: str) -> None:
         if self._path:
@@ -1728,6 +1738,12 @@ class MultiView(QWidget):
         for slot in self._all_slots():
             if slot._path == path:
                 slot._refresh_tag_styles()
+
+    def rebuild_tag_buttons(self) -> None:
+        """Rebuild every tile's tag buttons after the tag set changed."""
+        for slot in self._all_slots():
+            slot.rebuild_tag_buttons()
+            slot._position_overlays()
 
     def _on_slot_rotate(self, path: str) -> None:
         if path:

@@ -684,22 +684,12 @@ class MainWindow(QMainWindow):
         h.addWidget(self._favdir_btn)
 
         # Filter-by-tag menu: check any tags to show only items carrying them.
-        from .engine import tags as _tags
         self._tag_menu_btn = self._btn("Tags ▾", None)
         self._tag_menu_btn.setToolTip("Show only items with the checked tags")
         self._tag_menu = QMenu(self._tag_menu_btn)
         self._tag_filter_actions: dict[str, QAction] = {}
-        for t in _tags.TAGS:
-            act = self._tag_menu.addAction(t)
-            act.setCheckable(True)
-            act.toggled.connect(lambda _=False: self._apply_filter())
-            self._tag_filter_actions[t] = act
-        self._tag_menu.addSeparator()
-        self._tag_matchall_act = self._tag_menu.addAction("Match all (AND)")
-        self._tag_matchall_act.setCheckable(True)
-        self._tag_matchall_act.toggled.connect(lambda _=False: self._apply_filter())
-        clear_act = self._tag_menu.addAction("Clear tag filter")
-        clear_act.triggered.connect(self._clear_tag_filter)
+        self._tag_matchall_act = None
+        self._rebuild_tag_filter_menu()
         self._tag_menu_btn.setMenu(self._tag_menu)
         h.addWidget(self._tag_menu_btn)
 
@@ -1042,6 +1032,40 @@ class MainWindow(QMainWindow):
             self._recent_menu.addAction(act)
 
     # -- filters / columns -----------------------------------------------------
+    def _rebuild_tag_filter_menu(self) -> None:
+        """(Re)populate the Tags filter menu from the current tag set."""
+        from .engine import tags as _tags
+        match_all = (self._tag_matchall_act.isChecked()
+                     if self._tag_matchall_act is not None else False)
+        self._tag_menu.clear()
+        self._tag_filter_actions = {}
+        for t in _tags.get_tags():
+            act = self._tag_menu.addAction(t)
+            act.setCheckable(True)
+            act.toggled.connect(lambda _=False: self._apply_filter())
+            self._tag_filter_actions[t] = act
+        self._tag_menu.addSeparator()
+        self._tag_matchall_act = self._tag_menu.addAction("Match all (AND)")
+        self._tag_matchall_act.setCheckable(True)
+        self._tag_matchall_act.setChecked(match_all)
+        self._tag_matchall_act.toggled.connect(lambda _=False: self._apply_filter())
+        self._tag_menu.addAction("Clear tag filter").triggered.connect(
+            self._clear_tag_filter)
+        self._tag_menu.addSeparator()
+        self._tag_menu.addAction("Manage tags…").triggered.connect(
+            self._open_tag_manager)
+
+    def _open_tag_manager(self) -> None:
+        from .tag_manager import TagManagerDialog
+        dlg = TagManagerDialog(self)
+        dlg.exec()
+        if dlg.changed:
+            self._rebuild_tag_filter_menu()
+            self._tag_menu_btn.setText("Tags ▾")
+            if self._mv is not None:
+                self._mv.rebuild_tag_buttons()
+            self._apply_filter()
+
     def _selected_filter_tags(self) -> set:
         return {t for t, a in self._tag_filter_actions.items() if a.isChecked()}
 

@@ -38,10 +38,15 @@ def isolated(tmp_path, monkeypatch):
     monkeypatch.setattr(favorites, "_MANIFEST", str(tmp_path / "trash_manifest.json"))
     monkeypatch.setattr(tags, "_TAGS_FILE", str(tmp_path / "tags.json"))
     monkeypatch.setattr(tags, "_TAGDB_FILE", str(tmp_path / "tagfolders.json"))
+    monkeypatch.setattr(tags, "_TAGSET_FILE", str(tmp_path / "tagset.json"))
     monkeypatch.setattr(tags, "_store", None)
+    monkeypatch.setattr(tags, "TAGS", tags.DEFAULT_TAGS)
     tags._PENDING.clear()
     tags._retries.clear()
     yield
+    # Drain the shared single-worker mirror pool so background copies/embeds
+    # submitted by this test can't bleed into (and slow down) the next one.
+    favorites.flush_mirror_ops(timeout=15)
 
 
 @pytest.fixture

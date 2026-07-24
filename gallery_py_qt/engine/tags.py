@@ -23,11 +23,142 @@ from .favorites import _MIRROR_POOL
 class _Transient(Exception):
     """A retryable embed failure (file busy / locked / sharing violation)."""
 
-# The fixed descriptor set exposed as buttons in multi-view.
-TAGS = ("T", "BT", "HT", "Az", "Bcs", "WAM", "Jz", "Ahg", "Bp")
+# The descriptor set exposed as buttons in multi-view / filter / batch menus.
+# User-customisable (add / remove / rename) and persisted to _TAGSET_FILE; the
+# shipped default is these nine.  `TAGS` mirrors the live set for the many
+# `for t in tags.TAGS` call sites.
+DEFAULT_TAGS = ("T", "BT", "HT", "Az", "Bcs", "WAM", "Jz", "Ahg", "Bp")
 
 _TAGS_FILE = os.path.join(config.HOME, ".gallery_py_qt_tags.json")
+_TAGSET_FILE = os.path.join(config.HOME, ".gallery_py_qt_tagset.json")
 _store: dict[str, list[str]] | None = None
+
+
+def _load_tagset() -> tuple[str, ...]:
+    try:
+        with open(_TAGSET_FILE, encoding="utf-8") as f:
+            d = json.load(f)
+        if isinstance(d, list) and d and all(isinstance(x, str) for x in d):
+            # de-dup preserving order
+            return tuple(dict.fromkeys(x for x in d if x.strip()))
+    except Exception:
+        pass
+    return DEFAULT_TAGS
+
+
+TAGS = _load_tagset()
+
+
+def get_tags() -> tuple[str, ...]:
+    return tuple(TAGS)
+
+
+def _save_tagset() -> None:
+    try:
+        tmp = _TAGSET_FILE + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(list(TAGS), f, indent=1)
+        os.replace(tmp, _TAGSET_FILE)
+    except OSError as exc:
+        print(f"[tagset] {exc}", file=sys.stderr)
+
+
+def set_tags(new: "list[str] | tuple[str, ...]") -> None:
+    """Replace the whole tag set (deduped, order-preserving, non-empty)."""
+    global TAGS
+    TAGS = tuple(dict.fromkeys(t.strip() for t in new if t and t.strip()))
+    _save_tagset()
+
+
+def add_tag(name: str) -> bool:
+    name = name.strip()
+    if not name or name in TAGS:
+        return False
+    set_tags(list(TAGS) + [name])
+    return True
+
+
+def remove_tag(name: str) -> None:
+    """Drop a tag everywhere: the set, the JSON store, and its Favorites
+    subfolder / manifest entries."""
+    if name not in TAGS:
+        return
+    set_tags([t for t in TAGS if t != name])
+    store = _load()
+    for p, lst in list(store.items()):
+        if name in lst:
+            store[p] = [t for t in lst if t != name]
+            if not store[p]:
+                store.pop(p, None)
+    _save()
+    _MIRROR_POOL.submit(_remove_tag_folder, name)
+
+
+def rename_tag(old: str, new: str) -> bool:
+    """Rename a tag, migrating the JSON store and the Favorites subfolder +
+    manifest.  Embedded metadata (GIF/JPEG) refreshes on the file's next tag
+    change; the store is the source of truth."""
+    new = new.strip()
+    if old not in TAGS or not new or (new in TAGS and new != old) or old == new:
+        return False
+    set_tags([new if t == old else t for t in TAGS])
+    store = _load()
+    for p, lst in list(store.items()):
+        if old in lst:
+            store[p] = [new if t == old else t for t in lst]
+    _save()
+    _MIRROR_POOL.submit(_rename_tag_folder, old, new)
+    return True
+
+
+def _remove_tag_folder(name: str) -> None:
+    folder = os.path.join(config.FAVORITES_DIR, name)
+    try:
+        if os.path.isdir(folder):
+            shutil.rmtree(folder)
+    except OSError as exc:
+        print(f"[tag-folder-rm] {name}: {exc}", file=sys.stderr)
+    db = _load_tagdb()
+    changed = False
+    for key in list(db):
+        if name in db[key]:
+            db[key].pop(name, None)
+            changed = True
+            if not db[key]:
+                db.pop(key, None)
+    if changed:
+        _save_tagdb(db)
+
+
+def _rename_tag_folder(old: str, new: str) -> None:
+    src = os.path.join(config.FAVORITES_DIR, old)
+    dst = os.path.join(config.FAVORITES_DIR, new)
+    try:
+        if os.path.isdir(src):
+            os.makedirs(dst, exist_ok=True)
+            for fn in os.listdir(src):
+                s = os.path.join(src, fn)
+                d = os.path.join(dst, fn)
+                if os.path.exists(d):          # collision on merge
+                    stem, ext = os.path.splitext(fn)
+                    i = 1
+                    while os.path.exists(os.path.join(dst, f"{stem}_{i}{ext}")):
+                        i += 1
+                    d = os.path.join(dst, f"{stem}_{i}{ext}")
+                shutil.move(s, d)
+            os.rmdir(src)
+    except OSError as exc:
+        print(f"[tag-folder-mv] {old}->{new}: {exc}", file=sys.stderr)
+    # Repoint manifest entries from old/ to new/.
+    db = _load_tagdb()
+    changed = False
+    for entry in db.values():
+        if old in entry:
+            path = entry.pop(old)
+            entry[new] = os.path.join(dst, os.path.basename(path))
+            changed = True
+    if changed:
+        _save_tagdb(db)
 
 
 def _load() -> dict[str, list[str]]:
