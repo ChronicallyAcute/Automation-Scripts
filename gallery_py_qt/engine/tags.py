@@ -17,7 +17,7 @@ from xml.sax.saxutils import escape as _xml_escape
 
 from .. import config
 from . import media
-from .favorites import _MIRROR_POOL
+from .favorites import _MIRROR_POOL, place_file
 
 
 class _Transient(Exception):
@@ -270,13 +270,13 @@ def _sync_tag_folders_now(path: str, favored: bool, tag_list: list[str]) -> None
                     continue               # already mirrored for this tag
                 os.makedirs(sub, exist_ok=True)
                 dest = os.path.join(sub, base)
-                if os.path.exists(dest):   # basename collision across folders
+                if os.path.lexists(dest):  # basename collision across folders
                     stem, ext = os.path.splitext(base)
                     i = 1
-                    while os.path.exists(os.path.join(sub, f"{stem}_{i}{ext}")):
+                    while os.path.lexists(os.path.join(sub, f"{stem}_{i}{ext}")):
                         i += 1
                     dest = os.path.join(sub, f"{stem}_{i}{ext}")
-                shutil.copy2(path, dest)
+                place_file(path, dest)     # copy or link per LINK_MODE
                 entry[t] = dest
                 changed = True
             else:

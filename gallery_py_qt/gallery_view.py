@@ -42,23 +42,31 @@ class _VideoPreviewPool(QWidget):
         self._max_px = 640
         self._free: list[tuple[QMediaPlayer, QVideoSink]] = []
         self._used: dict[str, tuple[QMediaPlayer, QVideoSink]] = {}
-        for _ in range(self.MAX):
+        # Players are created lazily up to MAX on first use: constructing them
+        # eagerly opened media pipelines for every gallery even when no video
+        # was ever previewed (a real cost, and headless it can stall).
+        self._created = 0
+
+    def _acquire(self) -> "tuple[QMediaPlayer, QVideoSink]":
+        if self._free:
+            return self._free.pop()
+        if self._created < self.MAX:
             p = QMediaPlayer(self)
-            # No audio output is attached: these previews only pull video frames
-            # through the sink, so leaving audio unset skips audio-stream
-            # decoding entirely (cheaper than decoding into a muted output) and
-            # avoids holding open four audio device handles.
+            # No audio output: previews only pull video frames through the sink,
+            # skipping audio-stream decoding and avoiding open audio handles.
             p.setLoops(QMediaPlayer.Loops.Infinite)
             s = QVideoSink(self)
             p.setVideoSink(s)
-            self._free.append((p, s))
+            self._created += 1
+            return (p, s)
+        # Pool exhausted — recycle the oldest in-use player.
+        self.stop(next(iter(self._used)))
+        return self._free.pop()
 
     def play(self, path: str) -> None:
         if path in self._used:
             return
-        if not self._free:
-            self.stop(next(iter(self._used)))
-        player, sink = self._free.pop()
+        player, sink = self._acquire()
         sink.videoFrameChanged.connect(
             lambda frame, p=path: self._on_frame(p, frame))
         player.setSource(QUrl.fromLocalFile(path))

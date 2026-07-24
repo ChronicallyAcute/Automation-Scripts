@@ -492,6 +492,9 @@ class MainWindow(QMainWindow):
         config.ensure_dirs()
         self._prefs = prefs.load_prefs()
         config.apply_theme(self._prefs.get("theme", "dark"))
+        # How favourites / tag folders place files: copy (default) or
+        # hardlink / symlink to save disk space. Set via the Settings dialog.
+        favorites.set_link_mode(self._prefs.get("link_mode", "copy"))
         self.setStyleSheet(theme.stylesheet())
         self._recents = prefs.load_recent()
         self._favs = Favorites()

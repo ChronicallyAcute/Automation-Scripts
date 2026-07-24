@@ -8,6 +8,9 @@ from __future__ import annotations
 import os
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+# Force the multi-view raster viewport instead of QOpenGLWidget: creating many
+# GL contexts across the suite intermittently stalls under offscreen.
+os.environ.setdefault("GALLERY_NO_GL", "1")
 
 import pytest
 from PIL import Image, ImageSequence  # noqa: F401  (re-exported for tests)
@@ -47,6 +50,17 @@ def isolated(tmp_path, monkeypatch):
     # Drain the shared single-worker mirror pool so background copies/embeds
     # submitted by this test can't bleed into (and slow down) the next one.
     favorites.flush_mirror_ops(timeout=15)
+    # Destroy any widgets the test created so their media pipelines / thread
+    # pools are freed — otherwise QMediaPlayers accumulate across the suite and
+    # eventually stall Qt's media init under the offscreen platform.
+    from PySide6.QtWidgets import QApplication
+    app = QApplication.instance()
+    if app is not None:
+        for w in list(app.topLevelWidgets()):
+            w.close()
+            w.deleteLater()
+        app.processEvents()
+        app.processEvents()
 
 
 @pytest.fixture

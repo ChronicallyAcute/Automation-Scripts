@@ -260,11 +260,10 @@ class _Slot(QWidget):
         self._player.positionChanged.connect(self._on_pos)
         self._player.durationChanged.connect(self._on_dur)
 
-        # Per-tile audio output — muted by default; user enables per tile.
-        self._audio = QAudioOutput(self)
-        self._audio.setMuted(True)
-        self._audio.setVolume(1.0)
-        self._player.setAudioOutput(self._audio)
+        # Per-tile audio output is created LAZILY on first unmute: opening the
+        # audio device per slot (5+ per multi-view) is slow and, headless,
+        # can stall.  Tiles are muted by default, so most never need one.
+        self._audio = None
         self._muted = True
 
         # Stack: page 0 = image, page 1 = video.
@@ -621,9 +620,18 @@ class _Slot(QWidget):
         self._img.set_source(self._pm)
         self._position_overlays()
 
+    def _ensure_audio(self):
+        """Create the audio device on demand (see __init__ note)."""
+        if self._audio is None:
+            self._audio = QAudioOutput(self)
+            self._audio.setVolume(1.0)
+            self._player.setAudioOutput(self._audio)
+        return self._audio
+
     def _reset_audio(self) -> None:
         self._muted = True
-        self._audio.setMuted(True)
+        if self._audio is not None:
+            self._audio.setMuted(True)
         self._vol_popup.hide()
         self._mute_btn.setText(config.ICON_MUTE)
         self._mute_btn.setStyleSheet(
@@ -696,7 +704,7 @@ class _Slot(QWidget):
     # -- audio -----------------------------------------------------------------
     def _toggle_mute(self) -> None:
         self._muted = not self._muted
-        self._audio.setMuted(self._muted)
+        self._ensure_audio().setMuted(self._muted)
         if self._muted:
             self._mute_btn.setText(config.ICON_MUTE)
             self._mute_btn.setStyleSheet(
@@ -714,7 +722,7 @@ class _Slot(QWidget):
         self._vol_label.setText(f"{val}%")
         # Standard log→linear remap so the slider feels uniform end to end
         # (matches the lightbox transport's volume behaviour).
-        self._audio.setVolume(QtAudio.convertVolume(
+        self._ensure_audio().setVolume(QtAudio.convertVolume(
             val / 100.0,
             QtAudio.VolumeScale.LogarithmicVolumeScale,
             QtAudio.VolumeScale.LinearVolumeScale))

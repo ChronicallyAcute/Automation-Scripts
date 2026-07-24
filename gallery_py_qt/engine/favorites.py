@@ -40,6 +40,41 @@ def mirror_dir_for(path: str) -> str:
     return os.path.join(os.path.dirname(path), "Favorites")
 
 
+# How favourites / tag-folder aggregation place their files.  "copy" duplicates
+# the bytes (default, always works); "hardlink" / "symlink" reference the
+# original to save disk space — huge for videos.  Set from prefs at startup.
+LINK_MODE = "copy"
+
+
+def set_link_mode(mode: str) -> None:
+    global LINK_MODE
+    LINK_MODE = mode if mode in ("copy", "hardlink", "symlink") else "copy"
+
+
+def place_file(src: str, dst: str) -> None:
+    """Put a copy-or-link of `src` at `dst` per LINK_MODE, replacing whatever
+    is there.  Links fall back to a real copy when unsupported (cross-device
+    hardlink, no symlink privilege, FS without link support)."""
+    try:
+        if os.path.lexists(dst):
+            os.remove(dst)
+    except OSError:
+        pass
+    if LINK_MODE == "hardlink":
+        try:
+            os.link(src, dst)
+            return
+        except OSError:
+            pass
+    elif LINK_MODE == "symlink":
+        try:
+            os.symlink(os.path.abspath(src), dst)
+            return
+        except OSError:
+            pass
+    shutil.copy2(src, dst)
+
+
 class Favorites:
     """In-memory favourites set with disk persistence + per-folder mirrors."""
 
@@ -88,16 +123,17 @@ class Favorites:
             ddir = mirror_dir_for(path)
             os.makedirs(ddir, exist_ok=True)
             dest = os.path.join(ddir, os.path.basename(path))
-            if os.path.exists(dest) and not _same_file(path, dest):
+            if os.path.lexists(dest) and not _same_file(path, dest):
                 stem, ext = os.path.splitext(os.path.basename(path))
                 dest = os.path.join(ddir, f"{stem}_{int(time.time())}{ext}")
-            if not os.path.exists(dest):
-                shutil.copy2(path, dest)
+            if not os.path.lexists(dest):
+                place_file(path, dest)         # copy or link per LINK_MODE
         except Exception as exc:
             print(f"[favs-mirror] {exc}", file=sys.stderr)
 
     def resync_mirror(self, path: str) -> None:
-        """Refresh the mirror copy after a favourited file changed on disk."""
+        """Refresh the mirror after a favourited file changed on disk (rotation
+        re-encodes it; a hardlink would otherwise point at the old content)."""
         if path not in self._paths:
             return
         _MIRROR_POOL.submit(self._resync_mirror_now, path)
@@ -105,15 +141,18 @@ class Favorites:
     def _resync_mirror_now(self, path: str) -> None:
         try:
             dest = os.path.join(mirror_dir_for(path), os.path.basename(path))
-            if os.path.exists(dest):
-                shutil.copy2(path, dest)
+            if os.path.lexists(dest):
+                place_file(path, dest)
         except Exception as exc:
             print(f"[favs-resync] {exc}", file=sys.stderr)
 
     def _unmirror(self, path: str) -> None:
         try:
             dest = os.path.join(mirror_dir_for(path), os.path.basename(path))
-            if os.path.exists(dest) and _same_file(path, dest):
+            # Remove our managed entry: a link we placed, or a same-content copy
+            # (guards against nuking an unrelated file with the same name).
+            if os.path.islink(dest) or (os.path.exists(dest)
+                                        and _same_file(path, dest)):
                 os.remove(dest)
         except Exception as exc:
             print(f"[favs-unmirror] {exc}", file=sys.stderr)
