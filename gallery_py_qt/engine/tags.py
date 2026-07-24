@@ -24,7 +24,7 @@ class _Transient(Exception):
     """A retryable embed failure (file busy / locked / sharing violation)."""
 
 # The fixed descriptor set exposed as buttons in multi-view.
-TAGS = ("T", "BT", "HT", "Az", "Bcs", "WAM", "Jz", "Ahg")
+TAGS = ("T", "BT", "HT", "Az", "Bcs", "WAM", "Jz", "Ahg", "Bp")
 
 _TAGS_FILE = os.path.join(config.HOME, ".gallery_py_qt_tags.json")
 _store: dict[str, list[str]] | None = None
