@@ -651,6 +651,10 @@ class MainWindow(QMainWindow):
         self._dupes_btn.setToolTip(
             "Find byte-identical copies among the loaded media")
         h.addWidget(self._dupes_btn)
+        self._album_tags_btn = self._btn("Tag albums", self._open_album_tags)
+        self._album_tags_btn.setToolTip(
+            "Tag whole folders; each mirrors into a folder-tags subfolder")
+        h.addWidget(self._album_tags_btn)
         h.addWidget(self._sep())
 
         h.addWidget(QLabel("cols"))
@@ -1573,6 +1577,12 @@ class MainWindow(QMainWindow):
         # It may be filtered out of the current view.
         self._status.setText(
             f"{os.path.basename(path)} is hidden by the current filter.")
+
+    # -- album (folder) tagging ------------------------------------------------
+    def _open_album_tags(self) -> None:
+        from .album_tags_dialog import AlbumTagsDialog
+        dlg = AlbumTagsDialog(list(self._current_folders), self)
+        dlg.exec()
 
     def _rotate_from_lightbox(self, lb, degrees: int) -> None:
         path = lb.current_path()

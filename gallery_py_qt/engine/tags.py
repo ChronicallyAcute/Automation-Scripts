@@ -92,6 +92,8 @@ def remove_tag(name: str) -> None:
                 store.pop(p, None)
     _save()
     _MIRROR_POOL.submit(_remove_tag_folder, name)
+    from . import foldertags        # lazy: avoid an import cycle at module load
+    foldertags.remove_folder_tag(name)
 
 
 def rename_tag(old: str, new: str) -> bool:
@@ -108,6 +110,8 @@ def rename_tag(old: str, new: str) -> bool:
             store[p] = [new if t == old else t for t in lst]
     _save()
     _MIRROR_POOL.submit(_rename_tag_folder, old, new)
+    from . import foldertags        # lazy: avoid an import cycle at module load
+    foldertags.rename_folder_tag(old, new)
     return True
 
 
