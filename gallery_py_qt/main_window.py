@@ -647,6 +647,10 @@ class MainWindow(QMainWindow):
                                     self._open_trash)
         self._trash_btn.setToolTip("Browse, restore, or empty trashed items")
         h.addWidget(self._trash_btn)
+        self._dupes_btn = self._btn("Duplicates", self._open_dupes)
+        self._dupes_btn.setToolTip(
+            "Find byte-identical copies among the loaded media")
+        h.addWidget(self._dupes_btn)
         h.addWidget(self._sep())
 
         h.addWidget(QLabel("cols"))
@@ -1545,6 +1549,30 @@ class MainWindow(QMainWindow):
         if dlg.auto_purge_days != days:
             self._prefs["trash_purge_days"] = dlg.auto_purge_days
             prefs.save_prefs(self._prefs)
+
+    # -- duplicate finder ------------------------------------------------------
+    def _open_dupes(self) -> None:
+        from .dupes_dialog import DuplicatesDialog
+        paths = self._model.all_paths()
+        if not paths:
+            self._status.setText("No media loaded to scan for duplicates.")
+            return
+        dlg = DuplicatesDialog(paths, self)
+        dlg.revealRequested.connect(self._reveal_path)
+        # Route trashing through the existing pipeline (worker move + undo bar).
+        dlg.trashRequested.connect(lambda ps: self._trash_paths(list(ps)))
+        dlg.exec()
+
+    def _reveal_path(self, path: str) -> None:
+        """Select the given path in the grid and scroll it into view."""
+        for row in range(self._model.rowCount()):
+            if self._model.path_at(row) == path:
+                self._view.reveal_row(row)
+                self._status.setText(os.path.basename(path))
+                return
+        # It may be filtered out of the current view.
+        self._status.setText(
+            f"{os.path.basename(path)} is hidden by the current filter.")
 
     def _rotate_from_lightbox(self, lb, degrees: int) -> None:
         path = lb.current_path()

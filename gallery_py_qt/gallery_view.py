@@ -718,6 +718,18 @@ class GalleryView(QAbstractScrollArea):
             self.selectionChanged.emit(0)
             self.viewport().update()
 
+    def reveal_row(self, row: int) -> None:
+        """Make *row* the sole selection and scroll it into view."""
+        m = self._model
+        if not m or not (0 <= row < m.rowCount()):
+            return
+        self._selection = {row}
+        self._anchor = row
+        self._cur_row = row
+        self._scroll_to(row)
+        self.selectionChanged.emit(1)
+        self.viewport().update()
+
     def select_all(self) -> None:
         m = self._model
         if m and m.rowCount():
