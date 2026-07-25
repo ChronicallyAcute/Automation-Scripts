@@ -89,6 +89,28 @@ class _VideoPreviewPool(QWidget):
         for path in list(self._used):
             self.stop(path)
 
+    def scrub(self, path: str, frac: float) -> bool:
+        """Seek the preview for `path` to frac (0..1) of its duration and pause
+        there, so hovering across the thumbnail scrubs the timeline.  Returns
+        False if the video isn't previewing yet or its duration is unknown."""
+        pair = self._used.get(path)
+        if pair is None:
+            return False
+        player, _sink = pair
+        dur = player.duration()
+        if dur <= 0:
+            return False                      # not loaded yet — caller retries
+        if player.playbackState() == QMediaPlayer.PlaybackState.PlayingState:
+            player.pause()
+        player.setPosition(int(max(0.0, min(1.0, frac)) * dur))
+        return True
+
+    def resume(self, path: str) -> None:
+        """Resume looping playback of a previously-scrubbed preview."""
+        pair = self._used.get(path)
+        if pair is not None:
+            pair[0].play()
+
     def _on_frame(self, path: str, frame) -> None:
         img = frame.toImage()
         if img.isNull():
@@ -229,6 +251,7 @@ class GalleryView(QAbstractScrollArea):
         self._vid_pool = _VideoPreviewPool(self._on_video_frame, self)
         self._pending_frames: dict[str, object] = {}
         self._previews_suspended = False
+        self._scrub_path = None            # video currently being hover-scrubbed
 
         self._frame_flush = QTimer(self)
         self._frame_flush.setInterval(50)
@@ -281,6 +304,7 @@ class GalleryView(QAbstractScrollArea):
         restart the timer otherwise.
         """
         self._previews_suspended = True
+        self._scrub_path = None
         self._vid_update.stop()
         self._frame_flush.stop()
         self._vid_pool.stop_all()
@@ -766,17 +790,26 @@ class GalleryView(QAbstractScrollArea):
     def leaveEvent(self, e) -> None:
         super().leaveEvent(e)
         self._hide_timer.start()
+        if self._scrub_path is not None:
+            self._vid_pool.resume(self._scrub_path)
+            self._scrub_path = None
 
     def _update_hover(self, pos: QPoint) -> None:
         row = self._row_at(pos)
         if row < 0:
             self._hide_timer.start()
+            self._scrub_at(None, pos)
             return
         self._hide_timer.stop()
         rect = self._rect_for(row)
         if rect is None:
             return
         m = self._model
+        # Hover-scrub: moving the mouse across a video preview seeks its timeline.
+        if m is not None and m.data(m.index(row), IsVideoRole):
+            self._scrub_at(m.data(m.index(row), PathRole), pos, rect)
+        else:
+            self._scrub_at(None, pos)
         self._overlay.row = row
         is_fav = bool(m.data(m.index(row), FavRole)) if m else False
         self._overlay.set_fav(is_fav)
@@ -787,6 +820,22 @@ class GalleryView(QAbstractScrollArea):
         self._overlay.move(max(0, ox), max(0, oy))
         self._overlay.show()
         self._overlay.raise_()
+
+    def _scrub_at(self, path, pos, rect=None) -> None:
+        """Seek `path`'s preview to the mouse x-position within `rect`.  When
+        `path` is None (off a video), resume the previously-scrubbed preview."""
+        if self._previews_suspended:
+            return
+        if path != self._scrub_path and self._scrub_path is not None:
+            self._vid_pool.resume(self._scrub_path)   # released — play again
+            self._scrub_path = None
+        if path is None or rect is None or rect.width() <= 0:
+            return
+        # Ensure the hovered video is loaded in the pool, then scrub it.
+        self._vid_pool.play(path)
+        frac = (pos.x() - rect.x()) / rect.width()
+        if self._vid_pool.scrub(path, frac):
+            self._scrub_path = path
 
     # -- keyboard --------------------------------------------------------------
     def keyPressEvent(self, e) -> None:

@@ -46,9 +46,21 @@ class _CheckFSModel(QFileSystemModel):
         self.setFilter(QDir.Filter.AllDirs | QDir.Filter.Files
                        | QDir.Filter.NoDotAndDotDot)
         # Only media files are relevant; hide everything else entirely.
-        self.setNameFilters([f"*{ext}" for ext in sorted(config.SUPPORTED)])
         self.setNameFilterDisables(False)
+        self.set_media_class("all")
         self.setRootPath("")
+
+    def set_media_class(self, cls: str) -> None:
+        """Restrict which media files are shown/importable (all/images/gifs/
+        videos).  Directories always remain visible so the tree stays browsable."""
+        by_class = {
+            "all":    config.SUPPORTED,
+            "images": {e for e in config.IMAGE_EXT if e != ".gif"},
+            "gifs":   {".gif"},
+            "videos": config.VIDEO_EXT,
+        }
+        exts = by_class.get(cls, config.SUPPORTED)
+        self.setNameFilters([f"*{ext}" for ext in sorted(exts)])
 
     def flags(self, index: QModelIndex):
         base = super().flags(index)
@@ -154,6 +166,15 @@ class _FolderPickDlg(QDialog):
             b.clicked.connect(lambda _=False, pp=p: self._goto(pp))
             quick.addWidget(b)
         quick.addStretch(1)
+        # Media-type filter for what the tree shows/imports.
+        quick.addWidget(QLabel("Show:"))
+        self._type_combo = QComboBox()
+        for label, val in (("All media", "all"), ("Images", "images"),
+                           ("GIFs", "gifs"), ("Videos", "videos")):
+            self._type_combo.addItem(label, val)
+        self._type_combo.currentIndexChanged.connect(
+            lambda _=0: self._fs.set_media_class(self._type_combo.currentData()))
+        quick.addWidget(self._type_combo)
 
         # Checked-paths list
         self._list = QListView()
