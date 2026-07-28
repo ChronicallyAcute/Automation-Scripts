@@ -13,7 +13,7 @@ from __future__ import annotations
 import os
 
 from PySide6.QtCore import (Qt, QUrl, Signal, QTimer, QObject, QRunnable,
-                            QThreadPool)
+                            QThreadPool, QEvent)
 from PySide6.QtGui import QPixmap, QImage, QKeySequence, QShortcut
 from PySide6.QtWidgets import (QDialog, QGraphicsView, QGraphicsScene,
                                QGraphicsPixmapItem, QVBoxLayout, QHBoxLayout,
@@ -150,6 +150,19 @@ class Lightbox(QDialog):
         self._bar_widget.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
         bar = QHBoxLayout(self._bar_widget)
         bar.setContentsMargins(8, 6, 8, 6)
+        # Leftmost: return to whatever this viewer was opened from — the
+        # multi-view set, or the gallery.  Always present and labelled, so
+        # full-screening one item is never a one-way trip.
+        self._back_btn = self._tb(f"{config.ICON_BACK} Back", self._go_back, bar)
+        # Legacy alias: earlier code addressed this button as _back_mv_btn.
+        self._back_mv_btn = self._back_btn
+        self._return_kind = "gallery"
+        self._apply_return_kind()
+        # Leave OS full screen without leaving the viewer (F11 equivalent).
+        self._exit_fs_btn = self._tb(
+            config.ICON_CLOSE + " Full screen", self._toggle_fs, bar)
+        self._exit_fs_btn.setToolTip("Leave full screen (F11)")
+        self._exit_fs_btn.hide()
         self._hold = self._tb("HOLD", self._toggle_hold, checkable=True)
         bar.addWidget(self._hold)
         bar.addStretch(1)
@@ -176,14 +189,6 @@ class Lightbox(QDialog):
             b.setToolTip(f"Rotate {deg}° clockwise (permanent)")
         self._tb(config.ICON_INFO, lambda: self.requestInfo.emit(self._path()), bar)
         self._tb(config.ICON_GRID, lambda: self.openMulti.emit(self._row), bar)
-        # Shown only when the viewer was entered FROM multi-view: returns to
-        # the exact page (group/layout/pins) it was opened from.
-        self._back_mv_btn = self._tb(
-            f"{config.ICON_BACK} Multi-view",
-            lambda: (self.returnToMulti.emit(), self.close()), bar)
-        self._back_mv_btn.setToolTip(
-            "Back to the multi-view page you came from (Esc)")
-        self._back_mv_btn.hide()
         self._tb("?", self._toggle_help, bar).setToolTip("Keyboard shortcuts (?)")
         self._tb(config.ICON_TRASH, self._trash, bar)
         self._tb(config.ICON_CLOSE, self.close, bar)
@@ -276,6 +281,36 @@ class Lightbox(QDialog):
         self._player.durationChanged.connect(self._on_dur)
         self._set_volume_pct(self._vol_slider.value())
 
+    # -- returning to where the viewer was opened from -------------------------
+    def set_return_kind(self, kind: str) -> None:
+        """Say what the Back button returns to: "multiview" or "gallery"."""
+        self._return_kind = "multiview" if kind == "multiview" else "gallery"
+        self._apply_return_kind()
+
+    def _apply_return_kind(self) -> None:
+        if self._return_kind == "multiview":
+            self._back_btn.setText(f"{config.ICON_BACK} Multi-view")
+            self._back_btn.setToolTip(
+                "Back to the multi-view set you came from (Esc)")
+        else:
+            self._back_btn.setText(f"{config.ICON_BACK} Gallery")
+            self._back_btn.setToolTip("Back to the gallery (Esc)")
+
+    def _go_back(self) -> None:
+        """Leave the viewer, restoring the set it was opened from."""
+        if self._return_kind == "multiview":
+            self.returnToMulti.emit()
+        self.close()
+
+    def _sync_fs_btn(self) -> None:
+        """The exit-full-screen button only makes sense while full screen."""
+        self._exit_fs_btn.setVisible(self.isFullScreen())
+
+    def changeEvent(self, e) -> None:
+        super().changeEvent(e)
+        if e.type() == QEvent.Type.WindowStateChange:
+            self._sync_fs_btn()
+
     def _tb(self, glyph, cb, layout=None, checkable=False) -> QToolButton:
         b = QToolButton()
         b.setText(glyph)
@@ -340,11 +375,16 @@ class Lightbox(QDialog):
             self._help.raise_()
 
     def _on_escape(self) -> None:
-        """Esc dismisses the help overlay first, then closes the viewer."""
+        """Esc dismisses the help overlay first, then leaves the viewer.
+
+        Leaving goes back the same way the Back button does, so Esc from a
+        multi-view-launched viewer lands on that same set rather than the
+        gallery.
+        """
         if self._help.isVisible():
             self._help.hide()
         else:
-            self.close()
+            self._go_back()
 
     def _install_shortcuts(self) -> None:
         for keys, fn in [

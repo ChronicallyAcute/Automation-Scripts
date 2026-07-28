@@ -31,71 +31,11 @@ BAR_HIDE_MS = 2000
 # Custom folder picker with checkbox support
 # ---------------------------------------------------------------------------
 
-class _CheckFSModel(QFileSystemModel):
-    """QFileSystemModel extended with per-item checkbox state.
-
-    Column 0 gets Qt.ItemFlag.ItemIsUserCheckable so the view draws a native
-    checkbox on every entry.  Both directories AND individual media files are
-    shown and checkable (non-media files are hidden via name filters).
-    Checked paths are tracked in a set and survive expansion/collapsing.
-    """
-
-    def __init__(self, parent=None):
-        super().__init__(parent)
-        self._checked: set[str] = set()
-        self.setFilter(QDir.Filter.AllDirs | QDir.Filter.Files
-                       | QDir.Filter.NoDotAndDotDot)
-        # Only media files are relevant; hide everything else entirely.
-        self.setNameFilterDisables(False)
-        self.set_media_class("all")
-        self.setRootPath("")
-
-    def set_media_class(self, cls: str) -> None:
-        """Restrict which media files are shown/importable (all/images/gifs/
-        videos).  Directories always remain visible so the tree stays browsable."""
-        by_class = {
-            "all":    config.SUPPORTED,
-            "images": {e for e in config.IMAGE_EXT if e != ".gif"},
-            "gifs":   {".gif"},
-            "videos": config.VIDEO_EXT,
-        }
-        exts = by_class.get(cls, config.SUPPORTED)
-        self.setNameFilters([f"*{ext}" for ext in sorted(exts)])
-
-    def flags(self, index: QModelIndex):
-        base = super().flags(index)
-        if index.isValid() and index.column() == 0:
-            base |= Qt.ItemFlag.ItemIsUserCheckable
-        return base
-
-    def data(self, index: QModelIndex, role=Qt.ItemDataRole.DisplayRole):
-        if (role == Qt.ItemDataRole.CheckStateRole
-                and index.isValid() and index.column() == 0):
-            return (Qt.CheckState.Checked if self.filePath(index) in self._checked
-                    else Qt.CheckState.Unchecked)
-        return super().data(index, role)
-
-    def setData(self, index: QModelIndex, value, role=Qt.ItemDataRole.EditRole) -> bool:
-        if (role == Qt.ItemDataRole.CheckStateRole
-                and index.isValid() and index.column() == 0):
-            path = self.filePath(index)
-            cs = Qt.CheckState(value) if isinstance(value, int) else value
-            if cs == Qt.CheckState.Checked:
-                self._checked.add(path)
-            else:
-                self._checked.discard(path)
-            self.dataChanged.emit(index, index, [role])
-            return True
-        return super().setData(index, value, role)
-
-    def checked_paths(self) -> list[str]:
-        return [p for p in sorted(self._checked) if os.path.isdir(p)]
-
-    def checked_files(self) -> list[str]:
-        return [p for p in sorted(self._checked) if os.path.isfile(p)]
-
-    def checked_all(self) -> list[str]:
-        return [p for p in sorted(self._checked) if os.path.exists(p)]
+# _CheckFSModel now lives in fs_picker so the album-tagging dialog can
+# reuse it without importing this module.  Re-exported here because
+# existing callers/tests address it as main_window._CheckFSModel.
+from .fs_picker import (_CheckFSModel, HoverPreview,  # noqa: E402
+                        quick_access_row)
 
 
 class _FolderPickDlg(QDialog):
@@ -135,46 +75,11 @@ class _FolderPickDlg(QDialog):
 
         # Hover thumbnail preview for individual files: a small floating
         # tooltip-style label fed by the shared async thumbnail loader.
-        self._tree.setMouseTracking(True)
-        self._tree.entered.connect(self._on_hover_index)
-        self._tree.viewport().installEventFilter(self)
-        self._preview = QLabel(self, Qt.WindowType.ToolTip)
-        self._preview.setStyleSheet(
-            "background: #101010; border: 1px solid #333; padding: 3px;")
-        self._preview.hide()
-        self._preview_path = ""
-        self._preview_timer = QTimer(self)
-        self._preview_timer.setSingleShot(True)
-        self._preview_timer.setInterval(140)     # debounce fast hover sweeps
-        self._preview_timer.timeout.connect(self._request_preview)
-        if self._loader is not None:
-            self._loader.ready.connect(self._on_preview_ready)
+        self._hover = HoverPreview(self, self._tree, self._fs, self._loader)
 
-        # Quick access: common media locations, one click to jump the tree.
-        quick = QHBoxLayout()
-        quick.setSpacing(4)
-        ql = QLabel("Go to:")
-        ql.setStyleSheet(f"color: {config.FG_MID};")
-        quick.addWidget(ql)
-        home_dir = QDir.homePath()
-        for name in ("Downloads", "Pictures", "Videos", "Desktop", "Home"):
-            p = home_dir if name == "Home" else os.path.join(home_dir, name)
-            if not os.path.isdir(p):
-                continue
-            b = QPushButton(name)
-            b.setToolTip(p)
-            b.clicked.connect(lambda _=False, pp=p: self._goto(pp))
-            quick.addWidget(b)
-        quick.addStretch(1)
-        # Media-type filter for what the tree shows/imports.
-        quick.addWidget(QLabel("Show:"))
-        self._type_combo = QComboBox()
-        for label, val in (("All media", "all"), ("Images", "images"),
-                           ("GIFs", "gifs"), ("Videos", "videos")):
-            self._type_combo.addItem(label, val)
-        self._type_combo.currentIndexChanged.connect(
-            lambda _=0: self._fs.set_media_class(self._type_combo.currentData()))
-        quick.addWidget(self._type_combo)
+        # Quick access: common media locations, one click to jump the tree,
+        # plus the media-type filter for what the tree shows/imports.
+        quick, self._type_combo = quick_access_row(self._fs, self._goto)
 
         # Checked-paths list
         self._list = QListView()
@@ -253,54 +158,20 @@ class _FolderPickDlg(QDialog):
         if os.path.isdir(path) or os.path.isfile(path):
             self._add_path(path)
 
-    # -- hover thumbnail preview -----------------------------------------------
-    def _on_hover_index(self, index: QModelIndex) -> None:
-        path = self._fs.filePath(index)
-        if (os.path.isfile(path)
-                and os.path.splitext(path.lower())[1] in config.SUPPORTED):
-            if path != self._preview_path:
-                self._preview_path = path
-                self._preview.hide()
-                self._preview_timer.start()
-        else:
-            self._hide_preview()
-
-    def _request_preview(self) -> None:
-        if self._preview_path and self._loader is not None:
-            self._loader.request(self._preview_path, 160)
-
-    def _on_preview_ready(self, path: str, max_px: int, qim) -> None:
-        if path != self._preview_path or max_px != 160 or qim.isNull():
-            return
-        from PySide6.QtGui import QCursor
-        self._preview.setPixmap(QPixmap.fromImage(qim))
-        self._preview.adjustSize()
-        pos = QCursor.pos()
-        self._preview.move(pos.x() + 18, pos.y() + 12)
-        self._preview.show()
-
+    # -- hover thumbnail preview (delegated to fs_picker.HoverPreview) ---------
     def _hide_preview(self) -> None:
-        self._preview_path = ""
-        self._preview_timer.stop()
-        self._preview.hide()
-
-    def eventFilter(self, obj, event):
-        from PySide6.QtCore import QEvent
-        if (obj is self._tree.viewport()
-                and event.type() in (QEvent.Type.Leave, QEvent.Type.Hide)):
-            self._hide_preview()
-        return super().eventFilter(obj, event)
+        self._hover.hide()
 
     def done(self, result: int) -> None:
-        self._hide_preview()
+        self._hover.hide()
         super().done(result)
 
     def _add_path(self, path: str) -> None:
-        self._fs._checked.add(path)
+        self._fs.add(path)
         self._refresh_list()
 
     def _clear_all(self) -> None:
-        self._fs._checked.clear()
+        self._fs.clear()
         self._refresh_list()
         # Force repaint of checkboxes
         self._fs.dataChanged.emit(
@@ -1581,7 +1452,8 @@ class MainWindow(QMainWindow):
     # -- album (folder) tagging ------------------------------------------------
     def _open_album_tags(self) -> None:
         from .album_tags_dialog import AlbumTagsDialog
-        dlg = AlbumTagsDialog(list(self._current_folders), self)
+        dlg = AlbumTagsDialog(list(self._current_folders), self,
+                              loader=self._loader)
         dlg.exec()
 
     def _rotate_from_lightbox(self, lb, degrees: int) -> None:
@@ -1604,8 +1476,8 @@ class MainWindow(QMainWindow):
         self._view.suspend_video_previews()
         self._lightbox_count += 1
         lb = Lightbox(self._model, self._favs, self)
+        lb.set_return_kind("multiview" if from_mv else "gallery")
         if from_mv:
-            lb._back_mv_btn.show()
             lb.returnToMulti.connect(self._reopen_multiview)
         lb.favToggled.connect(self._toggle_fav_path)
         lb.trashed.connect(self._trash_path)
@@ -1682,8 +1554,8 @@ class MainWindow(QMainWindow):
         self._position_overlays()
         self._bar.raise_()
 
-    def _rotate_from_multiview(self, path: str) -> None:
-        self._request_rotate(path, 90)
+    def _rotate_from_multiview(self, path: str, degrees: int = 90) -> None:
+        self._request_rotate(path, degrees)
         # Multi-view tiles reload from _on_rotate_done when the worker lands.
 
     def _close_multiview(self) -> None:

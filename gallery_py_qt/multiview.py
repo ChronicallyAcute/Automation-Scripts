@@ -34,7 +34,8 @@ from PySide6.QtCore import (Qt, QUrl, Signal, QSizeF, QSize, QRectF, QTimer,
                             QMimeData, QObject, QRunnable, QThreadPool, QEvent)
 from PySide6.QtWidgets import (QWidget, QVBoxLayout,
                                QHBoxLayout, QLabel, QToolButton, QStackedWidget,
-                               QGraphicsScene, QGraphicsView,
+                               QGraphicsScene, QGraphicsView, QMenu,
+                               QGraphicsDropShadowEffect,
                                QSpinBox, QSlider, QApplication)
 from PySide6.QtGui import (QPixmap, QImage, QKeySequence, QShortcut, QPalette,
                            QColor, QPainter, QIcon, QDrag)
@@ -42,7 +43,7 @@ from PySide6.QtMultimedia import QMediaPlayer, QAudioOutput, QtAudio
 from PySide6.QtMultimediaWidgets import QGraphicsVideoItem
 
 from . import config
-from .engine import media, tags
+from .engine import media, shell, tags
 from .help_overlay import make_help_panel, toggle_help_panel
 from .seekbar import SeekBar, fmt_time
 
@@ -112,11 +113,14 @@ class _AspectLabel(QLabel):
 
     Fit mode (default) scales to keep the whole image visible (letterboxed);
     fill mode scales to cover the whole label and crops the overflow.
+    A zoom factor scales the fit/fill target box, so the user can dial the
+    media's coverage of its tile up or down without changing the mode.
     """
     def __init__(self, parent=None):
         super().__init__(parent)
         self._src = None
         self._fill = False
+        self._zoom = 1.0
         self.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.setMinimumSize(1, 1)
         # Clip an oversized (cover-scaled) pixmap to the label bounds.
@@ -138,20 +142,30 @@ class _AspectLabel(QLabel):
         self._fill = fill
         self._apply()
 
+    def set_zoom(self, zoom: float) -> None:
+        self._zoom = max(0.05, float(zoom))
+        self._apply()
+
     def _apply(self) -> None:
         if self._src is not None and not self._src.isNull():
             sz = self.size()
             if sz.width() > 0 and sz.height() > 0:
                 mode = (Qt.AspectRatioMode.KeepAspectRatioByExpanding
                         if self._fill else Qt.AspectRatioMode.KeepAspectRatio)
+                # Zoom scales the target box; >100% therefore overflows the
+                # label and is centre-cropped, <100% letterboxes further.
+                target = QSize(max(1, int(round(sz.width() * self._zoom))),
+                               max(1, int(round(sz.height() * self._zoom))))
                 scaled = self._src.scaled(
-                    sz, mode, Qt.TransformationMode.SmoothTransformation)
-                if self._fill and (scaled.width() > sz.width()
-                                   or scaled.height() > sz.height()):
-                    # Centre-crop the overflow so the cover fill is exact.
-                    x = max(0, (scaled.width() - sz.width()) // 2)
-                    y = max(0, (scaled.height() - sz.height()) // 2)
-                    scaled = scaled.copy(x, y, sz.width(), sz.height())
+                    target, mode, Qt.TransformationMode.SmoothTransformation)
+                if (scaled.width() > sz.width()
+                        or scaled.height() > sz.height()):
+                    # Centre-crop whatever overflows the label bounds.
+                    cw = min(scaled.width(), sz.width())
+                    ch = min(scaled.height(), sz.height())
+                    x = max(0, (scaled.width() - cw) // 2)
+                    y = max(0, (scaled.height() - ch) // 2)
+                    scaled = scaled.copy(x, y, cw, ch)
                 self.setPixmap(scaled)
 
     def resizeEvent(self, e):
@@ -166,7 +180,7 @@ class _Slot(QWidget):
     enlarge    = Signal(int)        # model row
     pinned     = Signal(int)        # slot index
     reordered  = Signal(str, str)   # (dragged path, drop-target path)
-    rotated    = Signal(str)        # path — request permanent rotation
+    rotated    = Signal(str, int)   # (path, degrees clockwise) — permanent
 
     _SPEEDS = (0.25, 0.5, 1.0, 1.25, 1.5, 1.75, 2.0)
 
@@ -188,6 +202,7 @@ class _Slot(QWidget):
         self._speed_idx = 2          # index into _SPEEDS → 1.0×
         self._drag_start = None
         self._fill = False           # False = fit (letterbox), True = cover-crop
+        self._zoom = 1.0             # media coverage of the tile (±10% steps)
         # Off-thread still decoding (set by MultiView after construction).
         self._img_pool: "QThreadPool | None" = None
         self._img_gen = 0
@@ -198,7 +213,17 @@ class _Slot(QWidget):
         # Tiny tag buttons along the bottom of the media: one click toggles
         # the descriptor on the file's tags metadata (JSON store + best-effort
         # embed).  Rebuilt when the user customises the tag set.
+        # The bar itself never paints — it is a bare positioning container, so
+        # the media shows through between the tag chips (matching _btnbar).
         self._tagbar = QWidget(self)
+        self._tagbar.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
+        # With no bar behind them the chips would vanish on bright media, so a
+        # tight dark shadow gives every glyph its own contrast instead.
+        _tagshadow = QGraphicsDropShadowEffect(self._tagbar)
+        _tagshadow.setBlurRadius(4)
+        _tagshadow.setOffset(0, 1)
+        _tagshadow.setColor(QColor(0, 0, 0, 230))
+        self._tagbar.setGraphicsEffect(_tagshadow)
         self._taglay = QHBoxLayout(self._tagbar)
         self._taglay.setContentsMargins(2, 1, 2, 1)
         self._taglay.setSpacing(2)
@@ -301,7 +326,21 @@ class _Slot(QWidget):
         self._fav_btn = self._mk(config.ICON_HEART_EMPTY, self._toggle_fav)
         ol.addWidget(self._fav_btn)
         self._mk(config.ICON_ENLARGE,   lambda: self.enlarge.emit(self._row), ol)
-        self._mk(config.ICON_ROTATE_CW, self._rotate, ol)
+        # Rotate: a click still does the common 90°, but the drop-down offers
+        # 180°/270° too, so a tile no longer has to be maximised to be
+        # straightened by an arbitrary right angle.
+        self._rot_btn = self._mk(config.ICON_ROTATE_CW,
+                                 lambda: self._rotate(90), ol)
+        self._rot_menu = QMenu(self._rot_btn)
+        for _deg in (90, 180, 270):
+            act = self._rot_menu.addAction(f"Rotate {_deg}°")
+            act.setToolTip(f"Rotate {_deg}° clockwise (permanent)")
+            act.triggered.connect(lambda _=False, d=_deg: self._rotate(d))
+        self._rot_btn.setMenu(self._rot_menu)
+        self._rot_btn.setPopupMode(
+            QToolButton.ToolButtonPopupMode.MenuButtonPopup)
+        self._rot_btn.setToolTip(
+            "Rotate 90° clockwise — use the arrow for 180° / 270°")
         self._mk(config.ICON_TRASH,     self._trash, ol)
 
         self._bar_hide_timer = QTimer(self)
@@ -309,6 +348,22 @@ class _Slot(QWidget):
         self._bar_hide_timer.setInterval(400)
         self._bar_hide_timer.timeout.connect(self._maybe_hide_bar)
         self._btnbar.hide()
+
+        # Source header: a minimal, always-visible hyperlink naming the file,
+        # which reveals it in the OS file manager.  Deliberately chrome-free —
+        # no bar, no box — so it reads as part of the media, not over it.
+        # Side-scroll reuses these same slots, so this covers both views.
+        self._srclink = QLabel(self)
+        self._srclink.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
+        self._srclink.setTextFormat(Qt.TextFormat.RichText)
+        self._srclink.setOpenExternalLinks(False)
+        self._srclink.setTextInteractionFlags(
+            Qt.TextInteractionFlag.LinksAccessibleByMouse)
+        self._srclink.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._srclink.setStyleSheet(
+            "QLabel { background: transparent; padding: 1px 4px; }")
+        self._srclink.linkActivated.connect(self._open_source)
+        self._srclink.hide()
 
         # Seek bar (floating, video only)
         self._seekwrap = QWidget(self)
@@ -390,6 +445,12 @@ class _Slot(QWidget):
         self._bar_hide_timer.start()
 
     def _maybe_hide_bar(self) -> None:
+        # Opening the rotate drop-down moves the pointer off the tile, which
+        # would otherwise hide the very bar the popup belongs to.  Keep the bar
+        # while any popup is up and re-arm (mirrors MultiView._maybe_hide_bars).
+        if QApplication.activePopupWidget() is not None:
+            self._bar_hide_timer.start()
+            return
         if not self._is_pinned:
             self._btnbar.hide()
 
@@ -407,6 +468,7 @@ class _Slot(QWidget):
                 scale = max(vw / ns.width(), vh / ns.height())
             else:
                 scale = min(vw / ns.width(), vh / ns.height())
+            scale *= self._zoom          # ±10% coverage steps
             disp_w, disp_h = ns.width() * scale, ns.height() * scale
         self._video_item.setSize(QSizeF(disp_w, disp_h))
         self._video_item.setPos((vw - disp_w) / 2.0, (vh - disp_h) / 2.0)
@@ -424,12 +486,20 @@ class _Slot(QWidget):
             return 0, 0, max(cw, 1), max(ch, 1)
         if self._pm.isNull() or cw <= 0 or ch <= 0:
             return 0, 0, max(cw, 1), max(ch, 1)
+        # Read the pixmap the label actually rendered rather than recomputing
+        # the scale: duplicating the maths drifted a pixel against _apply()'s
+        # rounding, leaving the overlays slightly wider than the media.
+        shown = self._img.pixmap()
+        if shown is not None and not shown.isNull():
+            dw = min(max(1, shown.width()), cw)
+            dh = min(max(1, shown.height()), ch)
+            return (cw - dw) // 2, (ch - dh) // 2, dw, dh
         pw, ph = self._pm.width(), self._pm.height()
         if pw <= 0 or ph <= 0:
             return 0, 0, cw, ch
-        scale = min(cw / pw, ch / ph)
-        dw = max(1, int(pw * scale))
-        dh = max(1, int(ph * scale))
+        scale = min(cw / pw, ch / ph) * self._zoom
+        dw = min(max(1, int(pw * scale)), cw)
+        dh = min(max(1, int(ph * scale)), ch)
         return (cw - dw) // 2, (ch - dh) // 2, dw, dh
 
     def _position_overlays(self) -> None:
@@ -445,6 +515,12 @@ class _Slot(QWidget):
             x, y, dw, dh = self._img_displayed_rect()
         self._btnbar.setGeometry(max(0, x), max(0, y), max(1, dw), bh)
         self._btnbar.raise_()
+        # Source link sits just under the button bar, left-aligned to the media.
+        if self._srclink.isVisible():
+            lh = self._srclink.sizeHint().height()
+            lw = min(self._srclink.sizeHint().width(), max(1, dw))
+            self._srclink.setGeometry(max(0, x), max(0, y + bh), lw, lh)
+            self._srclink.raise_()
         th = self._tagbar.sizeHint().height()
         seek_h = (max(20, self._seekwrap.sizeHint().height()) + 6
                   if self._is_video else 0)
@@ -497,6 +573,14 @@ class _Slot(QWidget):
             self._fit_video()
         self._position_overlays()
 
+    def set_zoom(self, zoom: float) -> None:
+        """Scale how much of the tile the media covers (1.0 = plain fit/fill)."""
+        self._zoom = max(0.05, float(zoom))
+        self._img.set_zoom(self._zoom)
+        if self._is_video:
+            self._fit_video()
+        self._position_overlays()
+
     # -- content ---------------------------------------------------------------
     def release_media(self) -> None:
         """Stop playback AND release the file handle.
@@ -518,12 +602,24 @@ class _Slot(QWidget):
         self._path = ""
         self._pm   = QPixmap()
         self._reset_audio()
+        self._refresh_srclink()
+        self._sync_rotate_btn()
         self._position_overlays()
 
-    _TAG_CSS_ON  = ("QToolButton { color: #000; background: %s;"
-                    " border-radius: 2px; font-size: 8px; padding: 0 3px; }")
-    _TAG_CSS_OFF = ("QToolButton { color: %s; background: rgba(0,0,0,110);"
-                    " border-radius: 2px; font-size: 8px; padding: 0 3px; }")
+    # Tag chips float directly on the media: both states have a fully
+    # transparent background, so the row of dark pills that used to read as a
+    # bar across the bottom of every tile is gone.  State is carried by colour
+    # and weight instead of by a fill — accent + bold + a hairline outline when
+    # set, plain overlay-white when not.  Legibility on bright media comes from
+    # the drop shadow installed on _tagbar, not from a backing plate.
+    _TAG_CSS_ON  = ("QToolButton { color: %s; background: transparent;"
+                    " border: 1px solid %s; border-radius: 2px;"
+                    " font-size: 8px; font-weight: bold; padding: 0 3px; }"
+                    " QToolButton:hover { background: rgba(0,0,0,90); }")
+    _TAG_CSS_OFF = ("QToolButton { color: %s; background: transparent;"
+                    " border: 1px solid transparent; border-radius: 2px;"
+                    " font-size: 8px; padding: 0 3px; }"
+                    " QToolButton:hover { background: rgba(0,0,0,90); }")
 
     def rebuild_tag_buttons(self) -> None:
         """(Re)create the tag buttons from the current tag set."""
@@ -544,6 +640,33 @@ class _Slot(QWidget):
         self._taglay.addStretch(1)
         self._refresh_tag_styles()
 
+    # -- source link -----------------------------------------------------------
+    _SRC_MAX_CHARS = 44
+
+    def _refresh_srclink(self) -> None:
+        """Point the header at the current file (hidden when the tile is empty)."""
+        if not self._path:
+            self._srclink.hide()
+            return
+        name = os.path.basename(self._path)
+        if len(name) > self._SRC_MAX_CHARS:
+            name = name[:self._SRC_MAX_CHARS - 1] + "…"
+        # Escape so a filename containing & or < can't corrupt the rich text.
+        safe = (name.replace("&", "&amp;").replace("<", "&lt;")
+                    .replace(">", "&gt;"))
+        self._srclink.setText(
+            f'<a href="reveal" style="color:{config.OVERLAY_FG};'
+            ' text-decoration:none; font-size:10px;">'
+            f'↗︎ {safe}</a>')
+        self._srclink.setToolTip(f"Show in file manager:\n{self._path}")
+        self._srclink.adjustSize()
+        self._srclink.show()
+        self._srclink.raise_()
+
+    def _open_source(self, _href: str = "") -> None:
+        if self._path:
+            shell.reveal_path(self._path)
+
     def _toggle_tag(self, tag: str) -> None:
         if self._path:
             tags.toggle_tag(self._path, tag)
@@ -555,8 +678,9 @@ class _Slot(QWidget):
     def _refresh_tag_styles(self) -> None:
         cur = set(tags.tags_for(self._path)) if self._path else set()
         for t, b in self._tag_btns.items():
-            b.setStyleSheet((self._TAG_CSS_ON % config.ACCENT) if t in cur
-                            else (self._TAG_CSS_OFF % config.OVERLAY_FG))
+            b.setStyleSheet(
+                (self._TAG_CSS_ON % (config.ACCENT, config.ACCENT)) if t in cur
+                else (self._TAG_CSS_OFF % config.OVERLAY_FG))
 
     def refresh_fav(self) -> None:
         """Sync the heart button with the item's current favourite state.
@@ -582,6 +706,7 @@ class _Slot(QWidget):
         self._reset_audio()
         self.refresh_fav()
         self._refresh_tag_styles()
+        self._refresh_srclink()
         self._img_gen += 1                      # invalidate any pending decode
         if media.is_video(path):
             self._is_video = True
@@ -591,6 +716,7 @@ class _Slot(QWidget):
             self._player.setSource(QUrl.fromLocalFile(path))
             self._player.play()
             self._player.setPlaybackRate(self._SPEEDS[self._speed_idx])
+            self._sync_rotate_btn()
             self._fit_video()
         else:
             self._is_video = False
@@ -610,6 +736,7 @@ class _Slot(QWidget):
                 qim = media.load_full_qimage(path, max_px=tile_px)
                 self._on_img_decoded(self._img_gen,
                                      qim if qim is not None else QImage())
+            self._sync_rotate_btn()
             self._position_overlays()
 
     def _on_img_decoded(self, gen: int, qim: QImage) -> None:
@@ -658,11 +785,19 @@ class _Slot(QWidget):
             self._bar_hide_timer.start()
         self.pinned.emit(self._idx)
 
-    def _rotate(self) -> None:
+    def _rotate(self, degrees: int = 90) -> None:
         # Permanent rotation is handled by the main window (rewrites the file
         # and reloads the slot); video tiles have no still to rotate.
         if self._path and not self._is_video:
-            self.rotated.emit(self._path)
+            self.rotated.emit(self._path, int(degrees) % 360)
+
+    def _sync_rotate_btn(self) -> None:
+        """Rotation is image-only — don't offer a menu that can't do anything."""
+        ok = bool(self._path) and not self._is_video
+        self._rot_btn.setEnabled(ok)
+        self._rot_btn.setToolTip(
+            "Rotate 90° clockwise — use the arrow for 180° / 270°" if ok
+            else "Rotating video files isn't supported")
 
     def _toggle_fav(self) -> None:
         if self._path:
@@ -805,7 +940,7 @@ class MultiView(QWidget):
     """
     favToggled     = Signal(str)   # path
     trashed        = Signal(str)   # path
-    rotated        = Signal(str)   # path — request permanent rotation
+    rotated        = Signal(str, int)  # (path, degrees) — permanent rotation
     openLightbox   = Signal(int)   # row
     closeRequested = Signal()      # user wants to go back to gallery
     barsVisibleChanged = Signal(bool)   # chrome bars shown/hidden (auto-hide)
@@ -819,6 +954,8 @@ class MultiView(QWidget):
         # (3 = 3×1, 4 = 2×2).  Fill mode crops media to cover each tile.
         self._forced_layout = None
         self._fill_mode = False
+        # Media coverage of each tile, adjustable in 10% steps by the ± buttons.
+        self._zoom = 1.0
 
         # Shared, bounded pool for off-thread tile decoding (all tiles share it,
         # so at most 2 full decodes run at once — never one-per-tile on the GUI).
@@ -967,11 +1104,32 @@ class MultiView(QWidget):
             "Fit", self._toggle_fill, "Fit (letterbox) / Fill (crop) tiles (F)")
         self._fill_btn.setFixedWidth(46)
 
-        # Orientation toggle: switch between portrait and landscape groups
+        # Zoom: grow / shrink how much of each tile the media covers, 10% a step.
+        self._zoom_out_btn = self._chrome_btn(
+            "−", self.zoom_out, "Shrink media coverage 10% (−)")
+        self._zoom_out_btn.setFixedWidth(30)
+        # Readout doubles as the reset control (click → back to 100%).
+        self._zoom_lbl = self._chrome_btn(
+            "100%", self.reset_zoom,
+            "Media coverage of each tile — click to reset to 100% (0)")
+        self._zoom_lbl.setFixedWidth(52)
+        self._zoom_lbl.setStyleSheet(
+            f"QToolButton {{ color: {config.FG_MID}; font-size: 12px;"
+            " background: rgba(0,0,0,90); border: none; border-radius: 4px;"
+            " padding: 2px 4px; }"
+            " QToolButton:hover { color: #ffffff; background: rgba(0,0,0,160); }")
+        self._zoom_in_btn = self._chrome_btn(
+            "+", self.zoom_in, "Grow media coverage 10% (+)")
+        self._zoom_in_btn.setFixedWidth(30)
+        self._update_zoom_lbl()
+
+        # Orientation toggle: switch between portrait and landscape groups.
+        # Its label carries the count of the OTHER group (e.g. "↔ 128") so the
+        # size of the alternative layout is visible without hovering.
         self._orient_btn = self._chrome_btn(
-            "↔", self._switch_orientation,
+            "↔ 0", self._switch_orientation,
             "Switch orientation group (⇔ portrait / landscape)")
-        self._orient_btn.setFixedWidth(46)
+        self._orient_btn.setMinimumWidth(62)
 
         asl.addStretch(1)
         asl.addWidget(self._mode_btn)
@@ -983,6 +1141,9 @@ class MultiView(QWidget):
         asl.addStretch(1)
         asl.addWidget(self._layout_btn)
         asl.addWidget(self._fill_btn)
+        asl.addWidget(self._zoom_out_btn)
+        asl.addWidget(self._zoom_lbl)
+        asl.addWidget(self._zoom_in_btn)
         asl.addWidget(self._orient_btn)
         self._root.addWidget(self._autoscroll_widget)
 
@@ -999,6 +1160,10 @@ class MultiView(QWidget):
                   activated=self._cycle_layout)
         QShortcut(QKeySequence(Qt.Key.Key_F),     self,
                   activated=self._toggle_fill)
+        for _k in (Qt.Key.Key_Plus, Qt.Key.Key_Equal):
+            QShortcut(QKeySequence(_k), self, activated=self.zoom_in)
+        QShortcut(QKeySequence(Qt.Key.Key_Minus), self, activated=self.zoom_out)
+        QShortcut(QKeySequence(Qt.Key.Key_0),     self, activated=self.reset_zoom)
         # NOTE: 'H' is deliberately NOT bound here.  MainWindow also binds H
         # (gallery bar toggle); two window-context shortcuts on the same key
         # make it ambiguous and Qt fires NEITHER.  MainWindow dispatches H to
@@ -1026,6 +1191,7 @@ class MultiView(QWidget):
             ("S", "Slideshow style (Set ⇄ Scroll)"),
             ("L", "Layout: Auto / 3×1 / 2×2"),
             ("F", "Fit (no crop) / Fill (cover)"),
+            ("+  /  −  /  0", "Media coverage: bigger / smaller / reset"),
             ("H", "Show / hide the bars"),
             ("Ctrl+M", "Unmute all visible videos"),
             ("Delete", "Trash the hovered tile (undoable)"),
@@ -1056,6 +1222,7 @@ class MultiView(QWidget):
         # visit must not stop portrait media from getting its 3×1 grid.
         self._forced_layout = None
         self._update_layout_btn()
+        self.reset_zoom()          # a previous visit's zoom shouldn't linger
 
         for s in self._slots:
             if s.is_pinned:
@@ -1182,6 +1349,7 @@ class MultiView(QWidget):
         slot.rotated.connect(self._on_slot_rotate)
         slot.pinned.connect(lambda *_: None)
         slot.set_fill(self._fill_mode)
+        slot.set_zoom(self._zoom)
         slot._img_pool = self._img_pool
         slot.setMouseTracking(True)
         slot.installEventFilter(self)     # mouse activity re-shows the bars
@@ -1464,6 +1632,9 @@ class MultiView(QWidget):
             return
         self._measuring = on
         self._apply_counter()
+        # Unmeasured items provisionally bucket as landscape, so the alternative
+        # group's count is only trustworthy once probing stops — refresh it.
+        self._update_orient_btn()
         if not on and self.isVisible():
             # Final sizes are in — settle the groups one last time.
             self._on_model_dims_changed()
@@ -1576,6 +1747,46 @@ class MultiView(QWidget):
             self._ss_buf.set_fill(self._fill_mode)
         self._layout_tiles()      # geometry philosophy changes with the mode
 
+    # -- zoom (media coverage of each tile) ------------------------------------
+
+    ZOOM_STEP = 0.10
+    ZOOM_MIN  = 0.50
+    # Capped at 200%: tiles are decoded to tile size (show_item's tile_px), so
+    # zooming further only upsamples — it would promise detail that isn't there.
+    ZOOM_MAX  = 2.00
+
+    def zoom_in(self) -> None:
+        self.set_zoom(self._zoom + self.ZOOM_STEP)
+
+    def zoom_out(self) -> None:
+        self.set_zoom(self._zoom - self.ZOOM_STEP)
+
+    def reset_zoom(self) -> None:
+        self.set_zoom(1.0)
+
+    def set_zoom(self, zoom: float) -> None:
+        """Apply a clamped zoom to every tile (and the side-scroll buffer).
+
+        Rounded to whole 10% steps so repeated ± clicks can't drift off the
+        grid through float accumulation.
+        """
+        zoom = round(max(self.ZOOM_MIN, min(self.ZOOM_MAX, float(zoom))), 2)
+        zoom = round(round(zoom / self.ZOOM_STEP) * self.ZOOM_STEP, 2)
+        if zoom == self._zoom:
+            self._update_zoom_lbl()
+            return
+        self._zoom = zoom
+        for slot in self._slots:
+            slot.set_zoom(zoom)
+        if self._ss_buf is not None:
+            self._ss_buf.set_zoom(zoom)
+        self._update_zoom_lbl()
+
+    def _update_zoom_lbl(self) -> None:
+        self._zoom_lbl.setText(f"{round(self._zoom * 100):d}%")
+        self._zoom_out_btn.setEnabled(self._zoom > self.ZOOM_MIN + 1e-9)
+        self._zoom_in_btn.setEnabled(self._zoom < self.ZOOM_MAX - 1e-9)
+
     def _toggle_mode(self) -> None:
         """Switch slideshow style (Set ⇄ Side-scroll); stops any active run."""
         self._stop_slideshow()
@@ -1639,18 +1850,26 @@ class MultiView(QWidget):
         self._render(0)
 
     def _update_orient_btn(self) -> None:
+        """Label the orientation toggle with how much media the OTHER group
+        holds, so the count is visible without hovering for a tooltip."""
         if self._current_paths is self._portrait_paths:
-            other_n = len(self._landscape_paths)
-            self._orient_btn.setText("↔")
-            self._orient_btn.setToolTip(
-                f"Switch to landscape media ({other_n} items)")
-            self._orient_btn.setEnabled(bool(self._landscape_paths))
+            other_n, other_name, glyph = (
+                len(self._landscape_paths), "landscape", "↔")
         else:
-            other_n = len(self._portrait_paths)
-            self._orient_btn.setText("↕")
-            self._orient_btn.setToolTip(
-                f"Switch to portrait media ({other_n} items)")
-            self._orient_btn.setEnabled(bool(self._portrait_paths))
+            other_n, other_name, glyph = (
+                len(self._portrait_paths), "portrait", "↕")
+        # While dimensions are still being probed, unmeasured items provisionally
+        # bucket as landscape, so mark the count as not yet final.
+        pending = "~" if self._measuring else ""
+        self._orient_btn.setText(f"{glyph} {pending}{other_n}")
+        if other_n:
+            tip = f"Switch to {other_name} media ({other_n} items)"
+        else:
+            tip = f"No {other_name} media in this set"
+        if self._measuring:
+            tip += "  ·  still measuring, count may change"
+        self._orient_btn.setToolTip(tip)
+        self._orient_btn.setEnabled(bool(other_n))
 
     def resizeEvent(self, e) -> None:
         super().resizeEvent(e)
@@ -1753,9 +1972,9 @@ class MultiView(QWidget):
             slot.rebuild_tag_buttons()
             slot._position_overlays()
 
-    def _on_slot_rotate(self, path: str) -> None:
+    def _on_slot_rotate(self, path: str, degrees: int = 90) -> None:
         if path:
-            self.rotated.emit(path)
+            self.rotated.emit(path, int(degrees) % 360)
 
     def _all_slots(self) -> list["_Slot"]:
         return self._slots + ([self._ss_buf] if self._ss_buf is not None else [])
