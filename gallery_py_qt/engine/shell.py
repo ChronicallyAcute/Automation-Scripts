@@ -13,9 +13,16 @@ import os
 import shutil
 import subprocess
 import sys
+import urllib.parse
 
 
-def _run(cmd: "list[str]") -> bool:
+def _run(cmd) -> bool:
+    """Launch `cmd` (an argv list, or — on Windows — a command-line string).
+
+    A string is required for the Windows reveal so the shell quotes only the
+    path: an argv list would be quoted as one token by list2cmdline and
+    Explorer would ignore /select.  Popen accepts either form.
+    """
     try:
         subprocess.Popen(cmd, stdout=subprocess.DEVNULL,
                          stderr=subprocess.DEVNULL)
@@ -48,22 +55,29 @@ def reveal_path(path: str) -> bool:
     folder = path if os.path.isdir(path) else os.path.dirname(path)
 
     if sys.platform.startswith("win"):
-        # explorer /select, <path> — returns non-zero even on success, so this
-        # is fire-and-forget by design.
-        if _run(["explorer", f"/select,{path}"]):
+        # explorer /select,"<path>" — passed as ONE command-line string so the
+        # shell quotes only the path.  An argv list would let list2cmdline wrap
+        # the whole "/select,<path with spaces>" token in quotes, which
+        # Explorer ignores (it then just opens Documents).  A double-quote is
+        # an illegal path character, so embedding the path can't break out.
+        # Explorer returns non-zero even on success, so this is fire-and-forget.
+        if _run(f'explorer /select,"{path}"'):
             return True
     elif sys.platform == "darwin":
         if _run(["open", "-R", path]):
             return True
     else:
         # Freedesktop: the file manager D-Bus interface is the portable way to
-        # select an item; fall back to whatever can open the folder.
+        # select an item; fall back to whatever can open the folder.  The path
+        # must be a valid URI — percent-encode spaces, '#', '%' and non-ASCII,
+        # or the receiver resolves the wrong path and selects nothing.
+        uri = "file://" + urllib.parse.quote(path)
         if shutil.which("dbus-send") and _run([
                 "dbus-send", "--session", "--print-reply",
                 "--dest=org.freedesktop.FileManager1",
                 "--type=method_call", "/org/freedesktop/FileManager1",
                 "org.freedesktop.FileManager1.ShowItems",
-                f"array:string:file://{path}", "string:"]):
+                f"array:string:{uri}", "string:"]):
             return True
         for tool in ("nautilus", "dolphin", "thunar", "nemo"):
             if shutil.which(tool) and _run([tool, path]):

@@ -1,5 +1,6 @@
 """Cross-platform reveal / open helpers backing the media source link."""
 from __future__ import annotations
+import os
 import sys
 
 from gallery_py_qt.engine import shell
@@ -49,3 +50,43 @@ def test_reveal_of_a_directory_targets_itself(tmp_path, monkeypatch):
 
 def test_run_never_raises_on_a_missing_binary():
     assert shell._run(["definitely-not-a-real-binary-xyz"]) is False
+
+
+def test_dbus_uri_is_percent_encoded(tmp_path, monkeypatch):
+    """A path with spaces / '#' / '%' / non-ASCII must reach ShowItems as a
+    valid percent-encoded URI, else the file manager selects nothing."""
+    monkeypatch.setattr(shell.sys, "platform", "linux")
+    d = tmp_path / "My Pictures"
+    d.mkdir()
+    p = d / "beach day #1 100%.jpg"
+    p.write_bytes(b"\x00")
+    calls = []
+    monkeypatch.setattr(shell, "_run", lambda cmd: calls.append(cmd) or True)
+    monkeypatch.setattr(shell.shutil, "which",
+                        lambda n: "/usr/bin/dbus-send" if n == "dbus-send" else None)
+    assert shell.reveal_path(str(p)) is True
+    arg = next(a for a in calls[0] if a.startswith("array:string:"))
+    assert " " not in arg                       # every space encoded
+    assert "%20" in arg and "%23" in arg and "%25" in arg
+    assert arg.startswith("array:string:file:///")
+
+
+def test_windows_select_passes_a_single_quoted_path(tmp_path, monkeypatch):
+    """explorer /select must be one command string so only the path is quoted;
+    an argv list gets the whole token quoted and Explorer ignores it."""
+    monkeypatch.setattr(shell.sys, "platform", "win32")
+    p = tmp_path / "My Photos" / "pic 1.jpg"
+    p.parent.mkdir()
+    p.write_bytes(b"\x00")
+    calls = []
+    monkeypatch.setattr(shell, "_run", lambda cmd: calls.append(cmd) or True)
+    assert shell.reveal_path(str(p)) is True
+    cmd = calls[0]
+    assert isinstance(cmd, str)                 # string, not a list
+    assert cmd.startswith('explorer /select,"') and cmd.endswith('"')
+    assert str(os.path.abspath(p)) in cmd
+
+
+def test_run_accepts_a_command_string():
+    # Popen(str) form used by the Windows reveal must not raise here either.
+    assert shell._run("definitely-not-a-real-binary-xyz --nope") is False

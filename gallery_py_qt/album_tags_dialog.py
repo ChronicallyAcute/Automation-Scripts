@@ -345,9 +345,14 @@ class AlbumTagsDialog(QDialog):
 
     @staticmethod
     def _inside_favorites(folder: str) -> bool:
+        # Boundary-aware containment: a bare startswith would also match
+        # siblings that merely share the leaf-name prefix (e.g. a folder named
+        # "Gallery Favorites_backup" next to "Gallery Favorites"), wrongly
+        # skipping them from tagging.
         try:
-            return os.path.abspath(folder).startswith(
-                os.path.abspath(config.FAVORITES_DIR))
+            f = os.path.abspath(folder)
+            fav = os.path.abspath(config.FAVORITES_DIR)
+            return f == fav or f.startswith(fav + os.sep)
         except Exception:
             return False
 

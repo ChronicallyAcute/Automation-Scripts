@@ -275,3 +275,25 @@ def test_close_releases_loader_and_tiles(qapp, tmp_path):
     dlg.done(0)
     assert dlg._loader is None and dlg._hover._loader is None
     assert dlg._tiles == {} and dlg._contents_model.rowCount() == 0
+
+
+def test_sibling_of_favorites_is_not_skipped(qapp, tmp_path, flush, monkeypatch):
+    """A folder that only shares the Favorites leaf-name prefix (a sibling, not
+    a child) must still be taggable — not misreported as 'inside Favorites'."""
+    from gallery_py_qt import config
+    favorites.set_link_mode("copy")
+    # Sibling whose path starts with the Favorites path string but isn't under it.
+    sibling = config.FAVORITES_DIR + "_backup"
+    os.makedirs(sibling)
+    Image.new("RGB", (8, 8)).save(os.path.join(sibling, "p.jpg"))
+    dlg = AlbumTagsDialog([sibling])
+    assert not dlg._inside_favorites(sibling)
+    warned = []
+    monkeypatch.setattr(
+        "gallery_py_qt.album_tags_dialog.QMessageBox.information",
+        lambda *a, **k: warned.append(a))
+    dlg._toggle_tag("Az")
+    flush()
+    assert warned == []                          # no bogus "skipped" dialog
+    assert foldertags.tags_for(sibling) == ["Az"]
+    dlg.done(0)
