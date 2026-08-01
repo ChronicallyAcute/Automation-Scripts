@@ -44,6 +44,7 @@ from PySide6.QtMultimediaWidgets import QGraphicsVideoItem
 
 from . import config
 from .engine import media, shell, tags
+from .gifplayer import GifPlayer
 from .help_overlay import make_help_panel, toggle_help_panel
 from .seekbar import SeekBar, fmt_time
 
@@ -407,6 +408,8 @@ class _Slot(QWidget):
         # Active A–B loop bounds in ms (None = not looping).
         self._loop_a_ms: "int | None" = None
         self._loop_b_ms: "int | None" = None
+        # Animated-GIF playback (frames pushed into _img).
+        self._gif = GifPlayer(self)
         self._seekwrap.hide()
 
         # Volume popup — floating child, shown when unmuted
@@ -592,6 +595,7 @@ class _Slot(QWidget):
         stop() alone keeps the source open — on Windows that locks the file
         and makes deleting a video that is (or recently was) playing fail.
         """
+        self._gif.stop()                        # release the GIF's file handle too
         self._player.stop()
         self._player.setSource(QUrl())
 
@@ -715,6 +719,7 @@ class _Slot(QWidget):
         self._refresh_srclink()
         self._img_gen += 1                      # invalidate any pending decode
         if media.is_video(path):
+            self._gif.stop()
             self._is_video = True
             self._pm = QPixmap()
             self._stack.setCurrentIndex(1)
@@ -730,20 +735,31 @@ class _Slot(QWidget):
             self._stack.setCurrentIndex(0)
             self._seekwrap.hide()
             self._pm = QPixmap()
-            self._img.clear_source()            # blank while decoding off-thread
-            # Decode only to the tile's pixel size, not the source resolution.
-            tile_px = max(self.width(), self.height()) or 1280
-            tile_px = max(640, min(tile_px, 2048))
-            if self._img_pool is not None:
-                self._img_pool.start(
-                    _ImgJob(self._img_gen, path, tile_px, self._img_sig,
-                            gen_now=lambda: self._img_gen))
+            if media.is_gif(path) and self._gif.play(path, self._on_gif_frame):
+                # Animated GIF: QMovie drives frames into _img.
+                pass
             else:
-                qim = media.load_full_qimage(path, max_px=tile_px)
-                self._on_img_decoded(self._img_gen,
-                                     qim if qim is not None else QImage())
+                self._gif.stop()
+                self._img.clear_source()        # blank while decoding off-thread
+                # Decode only to the tile's pixel size, not the source resolution.
+                tile_px = max(self.width(), self.height()) or 1280
+                tile_px = max(640, min(tile_px, 2048))
+                if self._img_pool is not None:
+                    self._img_pool.start(
+                        _ImgJob(self._img_gen, path, tile_px, self._img_sig,
+                                gen_now=lambda: self._img_gen))
+                else:
+                    qim = media.load_full_qimage(path, max_px=tile_px)
+                    self._on_img_decoded(self._img_gen,
+                                         qim if qim is not None else QImage())
             self._sync_rotate_btn()
             self._position_overlays()
+
+    def _on_gif_frame(self, pm: QPixmap, _first: bool) -> None:
+        # Frames flow through the normal image path, so fit/fill/zoom all apply.
+        self._pm = pm
+        self._img.set_source(pm)
+        self._position_overlays()
 
     def _on_img_decoded(self, gen: int, qim: QImage) -> None:
         if gen != self._img_gen or self._is_video:

@@ -86,6 +86,11 @@ class _ImageView(QGraphicsView):
         self._scene.setSceneRect(self._item.boundingRect())
         self.reset_view()
 
+    def set_frame(self, pm: QPixmap) -> None:
+        """Swap the pixmap WITHOUT refitting — for animation frames, so any
+        zoom/pan set on the first frame is preserved across the animation."""
+        self._item.setPixmap(pm)
+
     def reset_view(self) -> None:
         self._zoom = 1.0
         self.resetTransform()
@@ -239,6 +244,9 @@ class Lightbox(QDialog):
         # Active A–B loop bounds in ms (None = not looping).
         self._loop_a_ms: "int | None" = None
         self._loop_b_ms: "int | None" = None
+        # Animated-GIF playback (frames pushed into _img).
+        from .gifplayer import GifPlayer
+        self._gif = GifPlayer(self)
 
         # Free everything (dialog, players, thread pool, retained pixmap) as
         # soon as the viewer closes — otherwise every open leaked a full
@@ -443,6 +451,7 @@ class Lightbox(QDialog):
             " background: rgba(0,0,0,90); border-radius: 4px; padding: 4px 8px; }")
         self._refresh_rating()
         if media.is_video(path):
+            self._gif.stop()
             # Cancel any in-flight image decode and clear its loading state.
             self._img_gen += 1
             self._loaded_img_path = None
@@ -455,7 +464,19 @@ class Lightbox(QDialog):
             self._player.play()
             self._player.setPlaybackRate(self._SPEEDS[self._speed_idx])
             self._play_btn.setText(config.ICON_PAUSE)
+        elif media.is_gif(path) and self._gif.play(path, self._on_gif_frame):
+            # Animated GIF: QMovie drives frames into _img (with a static
+            # fallback below if the file isn't a decodable animation).
+            if self._player is not None:
+                self._player.stop()
+            self._img_gen += 1
+            self._loaded_img_path = None
+            self._loading_timer.stop()
+            self._loading_lbl.hide()
+            self._stack.setCurrentIndex(0)
+            self._transport.setVisible(False)
         else:
+            self._gif.stop()
             if self._player is not None:
                 self._player.stop()
             self._stack.setCurrentIndex(0)
@@ -471,6 +492,14 @@ class Lightbox(QDialog):
                                   self._img_sig,
                                   gen_now=lambda: self._img_gen))
         self._position_overlays()
+
+    def _on_gif_frame(self, pm: QPixmap, first: bool) -> None:
+        # Fit-to-view on the first frame; later frames just swap the pixmap so
+        # the fit (and any user zoom) is preserved.
+        if first:
+            self._img.set_pixmap(pm)
+        else:
+            self._img.set_frame(pm)
 
     def _on_full_image(self, gen: int, path: str, qim: QImage) -> None:
         if gen != self._img_gen:
@@ -607,6 +636,9 @@ class Lightbox(QDialog):
         self._audio.setVolume(amp)
 
     def _toggle_play(self) -> None:
+        if self._gif.is_playing():
+            self._gif.toggle_pause()      # Space pauses/resumes an animated GIF
+            return
         if self._player is None:
             return
         if self._player.playbackState() == QMediaPlayer.PlaybackState.PlayingState:
@@ -679,6 +711,7 @@ class Lightbox(QDialog):
         self._img_pool.clear()
         self._img_pool.waitForDone(3000)
         # Release the heavy resources explicitly.
+        self._gif.stop()
         if self._player is not None:
             self._player.stop()
             self._player.setSource(QUrl())

@@ -54,6 +54,10 @@ def is_video(path: str) -> bool:
     return os.path.splitext(path.lower())[1] in config.VIDEO_EXT
 
 
+def is_gif(path: str) -> bool:
+    return os.path.splitext(path.lower())[1] == ".gif"
+
+
 def screen_max_px(fallback: int = 2560) -> int:
     """Largest useful decode size = the biggest screen's long side (device px),
     clamped.  A viewer never needs more pixels than the display can show, so
