@@ -104,14 +104,36 @@ def test_same_basename_albums_dont_collide(tmp_path, flush):
 
 
 # -- guard ---------------------------------------------------------------------
-def test_folder_inside_favorites_not_mirrored(tmp_path, flush, monkeypatch):
+def test_mirror_tree_folder_not_re_mirrored(tmp_path, flush, monkeypatch):
+    # A folder that is itself a mirror copy (under "folder tags") must not be
+    # mirrored again — that would nest copies inside copies.
     inside = os.path.join(config.FAVORITES_DIR, "folder tags", "Az", "Nested")
     os.makedirs(inside)
     Image.new("RGB", (8, 8)).save(os.path.join(inside, "n.jpg"))
-    # Assigning a tag is recorded but no mirror is made (would recurse).
-    foldertags.toggle_folder_tag(inside, "Bp")
+    assert foldertags.is_mirror_path(inside)
+    foldertags.toggle_folder_tag(inside, "Bp")     # recorded, but not mirrored
     flush()
     assert not os.path.exists(_mirror_dir("Bp", "Nested"))
+
+
+def test_folder_under_favorites_still_mirrors(tmp_path, flush, monkeypatch):
+    # Regression: a folder that merely lives under FAVORITES_DIR (but outside
+    # the "folder tags" mirror) IS mirrored — the old guard wrongly skipped it.
+    favorites.set_link_mode("copy")
+    album = os.path.join(config.FAVORITES_DIR, "Albums", "Trip")
+    os.makedirs(album)
+    Image.new("RGB", (8, 8)).save(os.path.join(album, "p.jpg"))
+    assert not foldertags.is_mirror_path(album)
+    foldertags.toggle_folder_tag(album, "Bp")
+    flush()
+    assert os.path.isdir(_mirror_dir("Bp", "Trip"))
+
+
+def test_mirror_root_sibling_is_not_guarded(tmp_path):
+    # Boundary check: ".../folder tags_old" is a sibling, not inside the mirror.
+    sibling = foldertags.folder_tags_root() + "_old"
+    assert not foldertags.is_mirror_path(sibling)
+    assert foldertags.is_mirror_path(foldertags.folder_tags_root())
 
 
 # -- tag lifecycle -------------------------------------------------------------

@@ -103,15 +103,30 @@ def toggle_folder_tag(folder: str, tag: str) -> bool:
     return present
 
 
+def is_mirror_path(folder: str) -> bool:
+    """True if `folder` is the folder-tags mirror root or lives inside it.
+
+    Those are the only folders unsafe to (re-)mirror — copying a mirror back
+    into the mirror tree nests copies inside copies.  A folder that merely
+    lives elsewhere under FAVORITES_DIR is fine to tag: place_folder already
+    skips the “folder tags” and “Favorites” names, so a mirror never descends
+    into its own output.  (Boundary-aware so a sibling like
+    ".../folder tags_old" is not mistaken for being inside it.)
+    """
+    try:
+        f = os.path.abspath(os.path.normpath(folder))
+        root = os.path.abspath(os.path.normpath(folder_tags_root()))
+        return f == root or f.startswith(root + os.sep)
+    except Exception:
+        return False
+
+
 def sync_folder_tags(folder: str) -> None:
     """Reconcile this album's mirrors across the per-tag folder-tag subdirs."""
-    # Never mirror an album that already lives inside the Favorites tree
-    # (that would recurse the mirrors into themselves).
-    try:
-        if _key(folder).startswith(os.path.abspath(config.FAVORITES_DIR)):
-            return
-    except Exception:
-        pass
+    # Skip only the mirror tree itself — re-mirroring a mirror nests copies.
+    # Folders elsewhere (even under FAVORITES_DIR) mirror safely.
+    if is_mirror_path(folder):
+        return
     _MIRROR_POOL.submit(_sync_folder_tags_now, folder, tags_for(folder))
 
 

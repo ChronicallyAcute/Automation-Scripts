@@ -209,10 +209,10 @@ def test_main_window_passes_loader(qapp, tmp_path):
 
 
 # -- regressions caught in review ---------------------------------------------
-def test_folders_inside_favorites_are_reported_not_silently_skipped(
+def test_mirror_folders_are_reported_not_silently_skipped(
         qapp, tmp_path, flush, monkeypatch):
-    """foldertags refuses to mirror anything under Favorites; the tree makes
-    such folders easy to tick, so the dialog must say so."""
+    """foldertags refuses to re-mirror a folder that is itself a mirror copy;
+    the tree makes those easy to tick, so the dialog must say so."""
     from gallery_py_qt import config
     inside = os.path.join(config.FAVORITES_DIR, "folder tags", "Az", "Nested")
     os.makedirs(inside)
@@ -233,17 +233,42 @@ def test_folders_inside_favorites_are_reported_not_silently_skipped(
 def test_mixed_batch_tags_the_valid_folders(qapp, tmp_path, flush, monkeypatch):
     from gallery_py_qt import config
     favorites.set_link_mode("copy")
-    inside = os.path.join(config.FAVORITES_DIR, "Nested")
-    os.makedirs(inside)
+    # A genuine mirror-tree folder (under "folder tags") is the only thing skipped.
+    mirror = os.path.join(config.FAVORITES_DIR, "folder tags", "Az", "Nested")
+    os.makedirs(mirror)
     good = _album(tmp_path, "Good")
-    dlg = AlbumTagsDialog([inside, good])
+    dlg = AlbumTagsDialog([mirror, good])
     monkeypatch.setattr(
         "gallery_py_qt.album_tags_dialog.QMessageBox.information",
         lambda *a, **k: None)
     dlg._toggle_tag("Az")
     flush()
     assert foldertags.tags_for(good) == ["Az"]     # the valid one still tagged
-    assert foldertags.tags_for(inside) == []
+    assert foldertags.tags_for(mirror) == []       # the mirror copy is skipped
+    dlg.done(0)
+
+
+def test_folder_under_favorites_is_taggable(qapp, tmp_path, flush, monkeypatch):
+    """Regression: a library folder that merely lives under the Gallery
+    Favorites directory (but outside the 'folder tags' mirror) must tag
+    normally — it previously tripped a bogus 'skipped' message every time."""
+    from gallery_py_qt import config
+    favorites.set_link_mode("copy")
+    album = os.path.join(config.FAVORITES_DIR, "My Library", "Trip")
+    os.makedirs(album)
+    Image.new("RGB", (8, 8)).save(os.path.join(album, "p.jpg"))
+    dlg = AlbumTagsDialog([album])
+    assert not dlg._is_mirror_folder(album)
+    warned = []
+    monkeypatch.setattr(
+        "gallery_py_qt.album_tags_dialog.QMessageBox.information",
+        lambda *a, **k: warned.append(a))
+    dlg._toggle_tag("Az")
+    flush()
+    assert warned == []                            # no bogus skip dialog
+    assert foldertags.tags_for(album) == ["Az"]
+    assert os.path.isdir(
+        os.path.join(foldertags.folder_tags_root(), "Az", "Trip"))
     dlg.done(0)
 
 
@@ -287,7 +312,7 @@ def test_sibling_of_favorites_is_not_skipped(qapp, tmp_path, flush, monkeypatch)
     os.makedirs(sibling)
     Image.new("RGB", (8, 8)).save(os.path.join(sibling, "p.jpg"))
     dlg = AlbumTagsDialog([sibling])
-    assert not dlg._inside_favorites(sibling)
+    assert not dlg._is_mirror_folder(sibling)
     warned = []
     monkeypatch.setattr(
         "gallery_py_qt.album_tags_dialog.QMessageBox.information",

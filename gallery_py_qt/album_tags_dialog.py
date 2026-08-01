@@ -344,33 +344,25 @@ class AlbumTagsDialog(QDialog):
         self._tag_row.addStretch(1)
 
     @staticmethod
-    def _inside_favorites(folder: str) -> bool:
-        # Boundary-aware containment: a bare startswith would also match
-        # siblings that merely share the leaf-name prefix (e.g. a folder named
-        # "Gallery Favorites_backup" next to "Gallery Favorites"), wrongly
-        # skipping them from tagging.
-        try:
-            f = os.path.abspath(folder)
-            fav = os.path.abspath(config.FAVORITES_DIR)
-            return f == fav or f.startswith(fav + os.sep)
-        except Exception:
-            return False
+    def _is_mirror_folder(folder: str) -> bool:
+        # Only the folder-tags mirror tree itself is off-limits (re-mirroring a
+        # mirror nests copies).  Ordinary folders — even ones that happen to
+        # live under the Gallery Favorites directory — tag fine.
+        return foldertags.is_mirror_path(folder)
 
     def _toggle_tag(self, tag: str) -> None:
         albums = self._checked_albums()
         if not albums:
             return
-        # foldertags refuses to mirror anything already under the Favorites
-        # tree (it would recurse into its own output) — and the tree makes
-        # those folders easy to tick, so say so rather than silently no-op.
-        skipped = [a for a in albums if self._inside_favorites(a)]
+        # The only folders that can't be tagged are the folder-tags mirror
+        # copies themselves; skip those and tell the user, but tag the rest.
+        skipped = [a for a in albums if self._is_mirror_folder(a)]
         albums = [a for a in albums if a not in skipped]
         if skipped:
             QMessageBox.information(
                 self, "Tag albums",
-                f"{len(skipped)} folder(s) live inside your Gallery Favorites "
-                "and can't be mirrored into the folder-tags subfolder — they "
-                "were skipped.")
+                f"{len(skipped)} folder(s) are inside the “folder tags” mirror "
+                "and can't be tagged again — they were skipped.")
             if not albums:
                 return
         if len(albums) > _CONFIRM_ABOVE and QMessageBox.question(
