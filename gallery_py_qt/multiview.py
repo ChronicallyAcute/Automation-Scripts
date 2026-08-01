@@ -403,6 +403,10 @@ class _Slot(QWidget):
         sl.addWidget(self._mute_btn)
 
         self._scrub.seeked.connect(self._on_seek)
+        self._scrub.loopChanged.connect(self._on_loop_changed)
+        # Active A–B loop bounds in ms (None = not looping).
+        self._loop_a_ms: "int | None" = None
+        self._loop_b_ms: "int | None" = None
         self._seekwrap.hide()
 
         # Volume popup — floating child, shown when unmuted
@@ -597,6 +601,7 @@ class _Slot(QWidget):
         self._img.clear_source()
         self._seekwrap.hide()
         self._vol_popup.hide()
+        self._clear_loop()
         self._is_video = False
         self._row  = -1
         self._path = ""
@@ -703,6 +708,7 @@ class _Slot(QWidget):
         self._path = path
         self._rotation = 0
         self._dur_ms   = 0
+        self._clear_loop()
         self._reset_audio()
         self.refresh_fav()
         self._refresh_tag_styles()
@@ -818,8 +824,25 @@ class _Slot(QWidget):
             self._player.play()
 
     def _on_pos(self, pos):
+        # A–B loop: jump back to A the moment playback reaches B.
+        if (self._loop_a_ms is not None and self._loop_b_ms is not None
+                and pos >= self._loop_b_ms):
+            self._player.setPosition(self._loop_a_ms)
+            pos = self._loop_a_ms
         self._scrub.set_position(pos)
         self._time.setText(fmt_time(pos))
+
+    def _on_loop_changed(self, a_frac: float, b_frac: float) -> None:
+        dur = self._dur_ms or self._player.duration()
+        self._loop_a_ms = int(a_frac * dur) if a_frac >= 0 and dur > 0 else None
+        self._loop_b_ms = int(b_frac * dur) if b_frac >= 0 and dur > 0 else None
+        if (self._loop_a_ms is not None and self._loop_b_ms is not None
+                and self._player.position() >= self._loop_b_ms):
+            self._player.setPosition(self._loop_a_ms)
+
+    def _clear_loop(self) -> None:
+        self._loop_a_ms = self._loop_b_ms = None
+        self._scrub.clear_loop()
 
     def _on_dur(self, dur):
         self._dur_ms = dur
@@ -1196,6 +1219,7 @@ class MultiView(QWidget):
             ("Ctrl+M", "Unmute all visible videos"),
             ("Delete", "Trash the hovered tile (undoable)"),
             ("Double-click", "Open tile in the viewer"),
+            ("Right-click seek bar", "Loop between two points (A → B → clear)"),
             ("Drag tile → tile", "Swap positions"),
             ("Esc", "Back to gallery"),
             ("?  /  F1", "Show / hide this help"),

@@ -235,6 +235,10 @@ class Lightbox(QDialog):
         tlay.addWidget(self._vol_slider)
 
         self._scrub.seeked.connect(self._on_seek)
+        self._scrub.loopChanged.connect(self._on_loop_changed)
+        # Active A–B loop bounds in ms (None = not looping).
+        self._loop_a_ms: "int | None" = None
+        self._loop_b_ms: "int | None" = None
 
         # Free everything (dialog, players, thread pool, retained pixmap) as
         # soon as the viewer closes — otherwise every open leaked a full
@@ -328,6 +332,7 @@ class Lightbox(QDialog):
     _HELP_ROWS = [
         ("←  /  →", "Previous / next item"),
         ("Space", "Play / pause video"),
+        ("Right-click bar", "Set A–B loop (A → B → clear)"),
         ("+  /  −", "Zoom in / out (image)"),
         (",  /  .", "Step 1 s back / forward"),
         ("Shift+← / →", "Skip 5 s"),
@@ -418,6 +423,10 @@ class Lightbox(QDialog):
     def show_row(self, row: int) -> None:
         self._row = row
         self._dur_ms = 0
+        # A fresh item starts unlooped.
+        self._loop_a_ms = self._loop_b_ms = None
+        self._scrub.clear_loop()
+        self._time.setToolTip("")
         path = self._path()
         if not path:
             return
@@ -608,8 +617,31 @@ class Lightbox(QDialog):
             self._play_btn.setText(config.ICON_PAUSE)
 
     def _on_pos(self, pos: int) -> None:
+        # A–B loop: jump back to A the moment playback reaches B.
+        if (self._loop_a_ms is not None and self._loop_b_ms is not None
+                and pos >= self._loop_b_ms and self._player is not None):
+            self._player.setPosition(self._loop_a_ms)
+            pos = self._loop_a_ms
         self._scrub.set_position(pos)
         self._time.setText(f"{fmt_time(pos)} / {fmt_time(self._dur_ms)}")
+
+    def _on_loop_changed(self, a_frac: float, b_frac: float) -> None:
+        """A–B loop points changed on the scrubber (fractions; <0 = unset)."""
+        dur = self._dur_ms or (self._player.duration() if self._player else 0)
+        self._loop_a_ms = int(a_frac * dur) if a_frac >= 0 and dur > 0 else None
+        self._loop_b_ms = int(b_frac * dur) if b_frac >= 0 and dur > 0 else None
+        if self._loop_a_ms is not None and self._loop_b_ms is not None:
+            self._time.setToolTip(
+                f"Looping {fmt_time(self._loop_a_ms)}–{fmt_time(self._loop_b_ms)}")
+            # Snap into the span if we're already past B.
+            if (self._player is not None
+                    and self._player.position() >= self._loop_b_ms):
+                self._player.setPosition(self._loop_a_ms)
+        elif self._loop_a_ms is not None:
+            self._time.setToolTip(
+                f"Loop start {fmt_time(self._loop_a_ms)} — right-click to set end")
+        else:
+            self._time.setToolTip("")
 
     def _on_dur(self, dur: int) -> None:
         self._dur_ms = dur

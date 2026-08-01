@@ -63,6 +63,9 @@ SECTIONS: "list[tuple[str, list[tuple[str, str]]]]" = [
         ("Hover-scrub",
          "Hover a video in the grid and drag across it to scrub its timeline "
          "without opening it."),
+        ("A–B loop",
+         "Right-click a video's seek bar to drop loop-in and loop-out points; "
+         "playback then repeats only that span. Right-click again to clear."),
         ("↗  Source link",
          "Every tile shows a link that reveals the original file in your "
          "system file manager."),

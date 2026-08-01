@@ -1,7 +1,14 @@
-"""SeekBar \u2014 a click-to-seek time tracker for video objects."""
+"""SeekBar \u2014 a click-to-seek time tracker for video objects.
+
+Left-click / drag seeks.  Right-click sets an A\u2013B loop: the first right-click
+drops the loop-in point (A), the second the loop-out point (B) \u2014 after which
+the owning player replays only the A\u2013B span \u2014 and a third right-click clears it.
+The selected span is painted as a translucent band over the groove.
+"""
 from __future__ import annotations
 
 from PySide6.QtCore import Qt, Signal, QPoint
+from PySide6.QtGui import QColor, QPainter
 from PySide6.QtWidgets import QSlider, QToolTip
 
 from . import config
@@ -18,6 +25,9 @@ def fmt_time(ms: int) -> str:
 
 class SeekBar(QSlider):
     seeked = Signal(float)
+    # (a, b) as fractions 0..1; a value < 0 means that point is unset.  Both < 0
+    # means the loop was cleared.
+    loopChanged = Signal(float, float)
 
     def __init__(self, parent=None):
         super().__init__(Qt.Orientation.Horizontal, parent)
@@ -25,6 +35,9 @@ class SeekBar(QSlider):
         self.setMouseTracking(True)
         self._duration_ms = 0
         self._dragging = False
+        # A–B loop points as fractions (None = unset).
+        self._loop_a: "float | None" = None
+        self._loop_b: "float | None" = None
         self.setStyleSheet(f"""
             QSlider::groove:horizontal {{
                 height: 5px; background: #2a2a2a; border-radius: 2px;
@@ -66,8 +79,62 @@ class SeekBar(QSlider):
             self._dragging = True
             self._seek_to(e.position().x())
             e.accept()
+        elif e.button() == Qt.MouseButton.RightButton:
+            self._cycle_loop(self._fraction_at(e.position().x()))
+            e.accept()
         else:
             super().mousePressEvent(e)
+
+    # -- A–B loop --------------------------------------------------------------
+    def _cycle_loop(self, frac: float) -> None:
+        """Right-click state machine: set A → set B → clear."""
+        if self._loop_a is None:
+            self._loop_a, self._loop_b = frac, None
+        elif self._loop_b is None:
+            a, b = self._loop_a, frac
+            if b < a:                       # dropped B before A → swap
+                a, b = b, a
+            self._loop_a, self._loop_b = a, b
+        else:
+            self._loop_a = self._loop_b = None
+        self.update()
+        self._emit_loop()
+
+    def _emit_loop(self) -> None:
+        self.loopChanged.emit(
+            self._loop_a if self._loop_a is not None else -1.0,
+            self._loop_b if self._loop_b is not None else -1.0)
+
+    def loop_points(self) -> "tuple[float, float] | None":
+        """The active (a, b) loop as fractions, or None if not fully set."""
+        if self._loop_a is not None and self._loop_b is not None:
+            return self._loop_a, self._loop_b
+        return None
+
+    def clear_loop(self) -> None:
+        """Drop any A–B loop (e.g. when the media changes).  Silent by default."""
+        had = self._loop_a is not None or self._loop_b is not None
+        self._loop_a = self._loop_b = None
+        if had:
+            self.update()
+
+    def paintEvent(self, e) -> None:
+        super().paintEvent(e)
+        if self._loop_a is None:
+            return
+        w = max(1, self.width())
+        h = self.height()
+        p = QPainter(self)
+        accent = QColor(config.ACCENT)
+        xa = int(self._loop_a * w)
+        if self._loop_b is not None:
+            xb = int(self._loop_b * w)
+            band = QColor(accent)
+            band.setAlpha(70)
+            p.fillRect(xa, 0, max(1, xb - xa), h, band)
+            p.fillRect(xb - 1, 0, 2, h, accent)     # B marker
+        p.fillRect(xa, 0, 2, h, accent)             # A marker
+        p.end()
 
     def mouseMoveEvent(self, e) -> None:
         if self._dragging:
