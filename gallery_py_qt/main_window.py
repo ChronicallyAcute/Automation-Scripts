@@ -639,6 +639,11 @@ class MainWindow(QMainWindow):
         settings_btn.setToolTip("Settings")
         h.addWidget(settings_btn)
 
+        self._guide_btn = self._btn(f"{config.ICON_INFO} Guide",
+                                    self.show_welcome)
+        self._guide_btn.setToolTip("What this program can do (welcome guide)")
+        h.addWidget(self._guide_btn)
+
         h.addWidget(self._btn(config.ICON_FULLSCREEN, self._toggle_fs))
 
         # -- Floating undo bar ------------------------------------------------
@@ -985,6 +990,26 @@ class MainWindow(QMainWindow):
         self._prefs = new
         prefs.save_prefs(self._prefs)
         self._status.setText("Settings saved")
+
+    # -- welcome / guide -------------------------------------------------------
+    def show_welcome(self) -> None:
+        """Open the feature guide.  Persists the 'show at startup' choice so
+        first-run auto-display and the manual button share one setting."""
+        from .welcome_dialog import WelcomeDialog
+        at_startup = not self._prefs.get("welcome_seen", False)
+        dlg = WelcomeDialog(at_startup, self)
+        dlg.exec()
+        # welcome_seen is the inverse of "show at startup".
+        self._prefs["welcome_seen"] = not dlg.show_at_startup()
+        prefs.save_prefs(self._prefs)
+
+    def maybe_show_welcome(self) -> None:
+        """Show the guide once, on the first launch (until the user opts out).
+
+        Called from the app bootstrap after the window is up — never during
+        construction, so building a MainWindow (e.g. in tests) has no popup."""
+        if not self._prefs.get("welcome_seen", False):
+            self.show_welcome()
 
     def _open_tag_manager(self) -> None:
         from .tag_manager import TagManagerDialog

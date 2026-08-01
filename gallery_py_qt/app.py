@@ -30,11 +30,14 @@ def main(argv: list[str] | None = None) -> int:
     win = MainWindow()
     win.show()
 
+    from PySide6.QtCore import QTimer
+    # First-run feature guide, shown after the window has painted.
+    QTimer.singleShot(0, win.maybe_show_welcome)
+
     target = None
     if args.folder and os.path.isdir(args.folder):
         target = args.folder
     if target:
-        from PySide6.QtCore import QTimer
         QTimer.singleShot(150, lambda: win.open_folder(target))
 
     return app.exec()
