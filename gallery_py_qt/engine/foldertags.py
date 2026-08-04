@@ -322,3 +322,46 @@ def _rename_folder_tag_disk(old: str, new: str) -> None:
             changed = True
     if changed:
         _save_db(db)
+
+
+# -- folder lifecycle (album manager renames / moves / deletes) ---------------
+def forget_folder(folder: str) -> None:
+    """Drop a folder's tags AND its mirror copies — call before deleting it, so
+    a deleted album leaves no orphan mirrors behind.
+
+    Store mutation happens here (caller thread); mirror removal + DB cleanup on
+    the worker.  Returns nothing; a no-op if the folder wasn't tagged.
+    """
+    key = _key(folder)
+    store = _load()
+    if store.pop(key, None) is None:
+        return
+    _save()
+    _MIRROR_POOL.submit(_forget_folder_disk, key)
+
+
+def _forget_folder_disk(key: str) -> None:
+    db = _load_db()
+    entry = db.pop(key, None)
+    if entry is None:
+        return
+    for _tag, mirror in entry.items():
+        _remove_mirror(mirror)
+    _save_db(db)
+
+
+def relocate_folder(old: str, new: str) -> None:
+    """A tagged album was renamed/moved on disk: re-mirror it at its new path.
+
+    Simple and link-mode-safe: forget the old mirrors, then re-tag the new
+    location with the same tags (which rebuilds the mirrors, following whatever
+    LINK_MODE is active).  A no-op if the folder wasn't tagged.
+    """
+    prev = tags_for(old)
+    if not prev:
+        return
+    forget_folder(old)
+    store = _load()
+    store[_key(new)] = list(prev)
+    _save()
+    sync_folder_tags(new)

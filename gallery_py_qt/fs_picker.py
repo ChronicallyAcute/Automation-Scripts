@@ -90,6 +90,11 @@ class _CheckFSModel(QFileSystemModel):
     def clear(self) -> None:
         self._checked.clear()
 
+    def is_checked(self, path: str) -> bool:
+        """Raw membership — unlike checked_paths(), does NOT require the path to
+        still exist on disk (needed to re-key a tick across a rename/move)."""
+        return path in self._checked
+
     def checked_paths(self) -> list[str]:
         return [p for p in sorted(self._checked) if os.path.isdir(p)]
 

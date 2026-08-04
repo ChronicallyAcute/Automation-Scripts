@@ -237,13 +237,14 @@ def list_trash() -> list[dict]:
         if name == os.path.basename(_MANIFEST):
             continue
         full = os.path.join(config.TRASH_DIR, name)
-        if not os.path.isfile(full):
-            continue
         try:
             st = os.stat(full)
         except OSError:
             continue
-        out.append({"name": name, "path": full, "size": st.st_size,
+        # Directories are trashable too (folder deletes from the album manager);
+        # they carry no meaningful single size.
+        size = st.st_size if os.path.isfile(full) else 0
+        out.append({"name": name, "path": full, "size": size,
                     "mtime": st.st_mtime, "orig": man.get(name, {}).get("orig")})
     out.sort(key=lambda d: d["mtime"], reverse=True)
     return out
@@ -272,9 +273,12 @@ def restore_from_trash(trashed_path: str) -> str | None:
 
 
 def purge_item(trashed_path: str) -> bool:
-    """Permanently delete one trashed file."""
+    """Permanently delete one trashed file or folder."""
     try:
-        os.remove(trashed_path)
+        if os.path.isdir(trashed_path) and not os.path.islink(trashed_path):
+            shutil.rmtree(trashed_path)
+        else:
+            os.remove(trashed_path)
     except OSError as exc:
         print(f"[trash-purge] {exc}", file=sys.stderr)
         return False

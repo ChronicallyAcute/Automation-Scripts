@@ -322,3 +322,139 @@ def test_sibling_of_favorites_is_not_skipped(qapp, tmp_path, flush, monkeypatch)
     assert warned == []                          # no bogus "skipped" dialog
     assert foldertags.tags_for(sibling) == ["Az"]
     dlg.done(0)
+
+
+# -- file management (rename / delete / cut-paste / new folder) ----------------
+def _mk_album(tmp_path, name, n=2):
+    d = tmp_path / name
+    d.mkdir()
+    for i in range(n):
+        Image.new("RGB", (8, 8)).save(d / f"p{i}.jpg")
+    return str(d)
+
+
+def test_do_rename_updates_disk_and_tick(qapp, tmp_path):
+    a = _mk_album(tmp_path, "Old")
+    dlg = AlbumTagsDialog([a])
+    assert dlg._checked_albums() == [a]
+    assert dlg._do_rename(a, "New") is True
+    new = os.path.join(str(tmp_path), "New")
+    assert os.path.isdir(new) and not os.path.isdir(a)
+    assert dlg._checked_albums() == [new]        # tick followed the rename
+    dlg.done(0)
+
+
+def test_do_rename_relocates_folder_tag(qapp, tmp_path, flush):
+    from gallery_py_qt.engine import foldertags
+    favorites.set_link_mode("copy")
+    a = _mk_album(tmp_path, "Old")
+    foldertags.toggle_folder_tag(a, "Az")
+    flush()
+    assert os.path.isdir(os.path.join(foldertags.folder_tags_root(), "Az", "Old"))
+    dlg = AlbumTagsDialog([a])
+    dlg._do_rename(a, "New")
+    flush()
+    new = os.path.join(str(tmp_path), "New")
+    assert foldertags.tags_for(new) == ["Az"]
+    assert os.path.isdir(os.path.join(foldertags.folder_tags_root(), "Az", "New"))
+    assert not os.path.exists(os.path.join(foldertags.folder_tags_root(), "Az", "Old"))
+    dlg.done(0)
+
+
+def test_do_delete_moves_to_trash_and_unticks(qapp, tmp_path, monkeypatch):
+    a = _mk_album(tmp_path, "Gone")
+    dlg = AlbumTagsDialog([a])
+    dlg._do_delete([a])
+    assert not os.path.isdir(a)
+    assert dlg._checked_albums() == []
+    names = {it["name"] for it in favorites.list_trash()}
+    assert "Gone" in names
+    dlg.done(0)
+
+
+def test_do_delete_forgets_folder_tag(qapp, tmp_path, flush):
+    from gallery_py_qt.engine import foldertags
+    favorites.set_link_mode("copy")
+    a = _mk_album(tmp_path, "Tagged")
+    foldertags.toggle_folder_tag(a, "Az")
+    flush()
+    assert os.path.isdir(os.path.join(foldertags.folder_tags_root(), "Az", "Tagged"))
+    dlg = AlbumTagsDialog([a])
+    dlg._do_delete([a])
+    flush()
+    assert foldertags.tags_for(a) == []
+    assert not os.path.exists(
+        os.path.join(foldertags.folder_tags_root(), "Az", "Tagged"))
+    dlg.done(0)
+
+
+def test_cut_paste_moves_selection(qapp, tmp_path):
+    a = _mk_album(tmp_path, "One")
+    b = _mk_album(tmp_path, "Two")
+    dest = tmp_path / "Dest"
+    dest.mkdir()
+    dlg = AlbumTagsDialog([])
+    dlg._cut_paths = [a, b]
+    dlg._do_move(dlg._cut_paths, str(dest))
+    assert sorted(os.listdir(dest)) == ["One", "Two"]
+    assert not os.path.isdir(a) and not os.path.isdir(b)
+    dlg.done(0)
+
+
+def test_move_keeps_tick_and_relocates_tag(qapp, tmp_path, flush):
+    from gallery_py_qt.engine import foldertags
+    favorites.set_link_mode("copy")
+    a = _mk_album(tmp_path, "Album")
+    foldertags.toggle_folder_tag(a, "Bp")
+    flush()
+    dest = tmp_path / "Dest"
+    dest.mkdir()
+    dlg = AlbumTagsDialog([a])                    # 'a' ticked
+    dlg._do_move([a], str(dest))
+    flush()
+    moved = os.path.join(str(dest), "Album")
+    assert os.path.isdir(moved)
+    assert dlg._checked_albums() == [moved]      # tick followed the move
+    assert foldertags.tags_for(moved) == ["Bp"]
+    assert os.path.isdir(os.path.join(foldertags.folder_tags_root(), "Bp", "Album"))
+    dlg.done(0)
+
+
+def test_new_folder_creates_dir(qapp, tmp_path):
+    dlg = AlbumTagsDialog([])
+    new = dlg._do_new_folder(str(tmp_path), "Fresh")
+    assert new and os.path.isdir(new)
+    dlg.done(0)
+
+
+def test_deleting_browsed_folder_clears_contents(qapp, tmp_path, monkeypatch):
+    a = _mk_album(tmp_path, "Browsed", n=3)
+    dlg = AlbumTagsDialog([a])
+    dlg._show_contents(a)
+    assert dlg._contents_model.rowCount() == 3
+    dlg._do_delete([a])
+    assert dlg._browsing == ""
+    assert dlg._contents_model.rowCount() == 0
+    dlg.done(0)
+
+
+def test_selected_paths_reads_tree_selection(qapp, tmp_path):
+    a = _mk_album(tmp_path, "One")
+    dlg = AlbumTagsDialog([a])
+    _settle(qapp, dlg._fs, str(tmp_path))
+    dlg._tree.setCurrentIndex(dlg._fs.index(a))
+    assert a in dlg._selected_paths()
+    dlg.done(0)
+
+
+def test_move_errors_surface(qapp, tmp_path, monkeypatch):
+    a = _mk_album(tmp_path, "One")
+    warned = []
+    monkeypatch.setattr(
+        "gallery_py_qt.album_tags_dialog.QMessageBox.warning",
+        lambda *a, **k: warned.append(a[2]))
+    dlg = AlbumTagsDialog([])
+    # Move a folder into its own subtree → refused, surfaced.
+    dlg._do_move([a], os.path.join(a))
+    assert warned and "could not be completed" in warned[0]
+    dlg.done(0)

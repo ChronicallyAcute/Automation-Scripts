@@ -16,14 +16,15 @@ from __future__ import annotations
 import os
 
 from PySide6.QtCore import Qt, QModelIndex, QSize
-from PySide6.QtGui import QIcon, QPixmap, QStandardItem, QStandardItemModel
+from PySide6.QtGui import (QIcon, QPixmap, QStandardItem, QStandardItemModel,
+                           QKeySequence, QShortcut)
 from PySide6.QtWidgets import (QDialog, QVBoxLayout, QHBoxLayout, QLabel,
                                QListView, QTreeView, QAbstractItemView,
                                QPushButton, QSplitter, QWidget, QFrame,
-                               QMessageBox)
+                               QMessageBox, QMenu, QInputDialog)
 
 from . import config
-from .engine import cache, favorites, foldertags, scan, tags
+from .engine import cache, favorites, fileops, foldertags, scan, tags
 from .fs_picker import _CheckFSModel, HoverPreview, quick_access_row
 
 # Thumbnail edge for the contents pane.  Deliberately different from the hover
@@ -48,13 +49,15 @@ class AlbumTagsDialog(QDialog):
         self._tile_gen = 0
         self._pending_goto = ""
         self._tiles: "dict[str, QStandardItem]" = {}
+        self._cut_paths: "list[str]" = []      # Cut clipboard (move on Paste)
 
         root = QVBoxLayout(self)
 
         intro = QLabel(
             "Tagging an album mirrors the whole folder into "
             f"“{foldertags.FOLDER_TAGS_DIRNAME}/&lt;tag&gt;/” inside your "
-            "Gallery Favorites.  Tick as many folders as you like.")
+            "Gallery Favorites.  Tick folders to tag them; right-click (or use "
+            "F2 / Del / Ctrl+X / Ctrl+V) to rename, delete, cut and paste.")
         intro.setWordWrap(True)
         intro.setStyleSheet(f"color: {config.FG_MID}; padding: 2px;")
         root.addWidget(intro)
@@ -73,6 +76,19 @@ class AlbumTagsDialog(QDialog):
         sel = self._tree.selectionModel()
         if sel is not None:
             sel.currentChanged.connect(lambda cur, _prev: self._on_browse(cur))
+
+        # File-explorer management: right-click menu + shortcuts on the tree.
+        self._tree.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self._tree.customContextMenuRequested.connect(self._tree_menu)
+        _ctx = Qt.ShortcutContext.WidgetWithChildrenShortcut
+        QShortcut(QKeySequence(Qt.Key.Key_F2), self._tree, context=_ctx,
+                  activated=self._rename_prompt)
+        QShortcut(QKeySequence(Qt.Key.Key_Delete), self._tree, context=_ctx,
+                  activated=self._delete_prompt)
+        QShortcut(QKeySequence("Ctrl+X"), self._tree, context=_ctx,
+                  activated=self._cut_selected)
+        QShortcut(QKeySequence("Ctrl+V"), self._tree, context=_ctx,
+                  activated=self._paste_here)
 
         self._hover = HoverPreview(self, self._tree, self._fs, loader)
         quick, self._type_combo = quick_access_row(self._fs, self._goto)
@@ -221,6 +237,146 @@ class AlbumTagsDialog(QDialog):
         if not os.path.isdir(path):
             path = os.path.dirname(path)
         self._show_contents(path)
+
+    # -- file management (rename / delete / cut / paste / new folder) ----------
+    def _selected_paths(self) -> "list[str]":
+        """Distinct column-0 paths of the tree's current selection."""
+        out: "list[str]" = []
+        for idx in self._tree.selectedIndexes():
+            if idx.column() != 0:
+                continue
+            p = self._fs.filePath(idx)
+            if p and p not in out:
+                out.append(p)
+        return out
+
+    def _paste_target(self) -> str:
+        """Folder that a paste / new-folder lands in: the selected folder, the
+        selected file's parent, else the folder being browsed."""
+        idx = self._tree.currentIndex()
+        p = self._fs.filePath(idx) if idx.isValid() else ""
+        if p and os.path.isdir(p):
+            return p
+        if p:
+            return os.path.dirname(p)
+        return self._browsing or ""
+
+    def _tree_menu(self, pos) -> None:
+        sel = self._selected_paths()
+        menu = QMenu(self)
+        if sel:
+            act = menu.addAction("Rename…", self._rename_prompt)
+            act.setEnabled(len(sel) == 1)
+            menu.addAction(f"Cut  ({len(sel)})", self._cut_selected)
+        if self._cut_paths:
+            menu.addAction(f"Paste  ({len(self._cut_paths)}) here",
+                           self._paste_here)
+        menu.addAction("New folder…", self._new_folder_prompt)
+        if sel:
+            menu.addSeparator()
+            menu.addAction(f"Delete  ({len(sel)})", self._delete_prompt)
+        menu.exec(self._tree.viewport().mapToGlobal(pos))
+
+    # -- prompts (menu / shortcut entry points) --------------------------------
+    def _rename_prompt(self) -> None:
+        sel = self._selected_paths()
+        if len(sel) != 1:
+            return
+        name, ok = QInputDialog.getText(
+            self, "Rename", "New name:", text=os.path.basename(sel[0]))
+        if ok and name:
+            self._do_rename(sel[0], name)
+
+    def _delete_prompt(self) -> None:
+        sel = self._selected_paths()
+        if not sel:
+            return
+        if QMessageBox.question(
+                self, "Delete",
+                f"Move {len(sel)} item(s) to the trash? "
+                "You can restore them from the Trash browser.",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
+                ) == QMessageBox.StandardButton.Yes:
+            self._do_delete(sel)
+
+    def _new_folder_prompt(self) -> None:
+        parent = self._paste_target()
+        if not parent:
+            return
+        name, ok = QInputDialog.getText(self, "New folder", "Folder name:")
+        if ok and name:
+            self._do_new_folder(parent, name)
+
+    def _cut_selected(self) -> None:
+        self._cut_paths = self._selected_paths()
+
+    def _paste_here(self) -> None:
+        dest = self._paste_target()
+        if dest and self._cut_paths:
+            self._do_move(self._cut_paths, dest)
+            self._cut_paths = []
+
+    # -- operations (testable cores; no modal prompts) -------------------------
+    def _do_rename(self, path: str, new_name: str) -> bool:
+        new, err = fileops.rename_path(path, new_name)
+        if err:
+            QMessageBox.warning(self, "Rename", f"Couldn't rename: {err}")
+            return False
+        self._rekey_checked(path, new)
+        foldertags.relocate_folder(path, new)     # no-op if untagged
+        if self._browsing == path:
+            self._browsing = new
+        self._after_fs_change([])
+        return True
+
+    def _do_delete(self, paths: "list[str]") -> None:
+        for p in paths:                           # drop tags + mirrors first
+            foldertags.forget_folder(p)
+        deleted, errors = fileops.delete_paths(paths)
+        for src, _trash in deleted:
+            self._fs.discard(src)
+        self._after_fs_change(errors)
+
+    def _do_move(self, paths: "list[str]", dest_dir: str) -> None:
+        moved, errors = fileops.move_paths(paths, dest_dir)
+        for src, new in moved:
+            self._rekey_checked(src, new)
+            foldertags.relocate_folder(src, new)  # no-op if untagged
+        self._after_fs_change(errors)
+
+    def _do_new_folder(self, parent: str, name: str) -> "str | None":
+        new, err = fileops.make_folder(parent, name)
+        if err:
+            QMessageBox.warning(self, "New folder", f"Couldn't create: {err}")
+            return None
+        self._after_fs_change([])
+        return new
+
+    def _rekey_checked(self, old: str, new: str) -> None:
+        """Preserve a folder's ticked state across a rename/move (the old path
+        no longer exists, so raw membership — not checked_all() — is checked)."""
+        if self._fs.is_checked(old):
+            self._fs.discard(old)
+            self._fs.add(new)
+
+    def _after_fs_change(self, errors: "list[tuple[str, str]]") -> None:
+        # The browsed folder may have vanished (deleted / moved / renamed).
+        if self._browsing and not os.path.isdir(self._browsing):
+            self._browsing = ""
+            self._tiles.clear()
+            self._contents_model.clear()
+            self._contents_hdr.setText("Select a folder to preview its contents")
+        elif self._browsing:
+            browsed, self._browsing = self._browsing, ""
+            self._show_contents(browsed)          # contents may have changed
+        self._repaint_checks()
+        self._refresh()
+        if errors:
+            lines = "\n".join(f"• {os.path.basename(p)}: {m}"
+                              for p, m in errors[:8])
+            QMessageBox.warning(
+                self, "Some items were skipped",
+                f"{len(errors)} item(s) could not be completed:\n{lines}")
 
     # -- contents thumbnails ---------------------------------------------------
     def _show_contents(self, folder: str) -> None:
