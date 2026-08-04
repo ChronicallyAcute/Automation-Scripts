@@ -122,6 +122,10 @@ class _AspectLabel(QLabel):
         self._src = None
         self._fill = False
         self._zoom = 1.0
+        self._ox = 0.5           # horizontal pan (0..1) when overflowing
+        self._oy = 0.5           # vertical pan
+        self._ovx = False        # currently overflows horizontally / vertically
+        self._ovy = False
         self.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.setMinimumSize(1, 1)
         # Clip an oversized (cover-scaled) pixmap to the label bounds.
@@ -147,6 +151,18 @@ class _AspectLabel(QLabel):
         self._zoom = max(0.05, float(zoom))
         self._apply()
 
+    def set_offset(self, ox: float, oy: float) -> None:
+        """Which part of an overflowing image is shown: 0..1 per axis
+        (0 = left/top edge, 0.5 = centred, 1 = right/bottom edge)."""
+        self._ox = min(1.0, max(0.0, float(ox)))
+        self._oy = min(1.0, max(0.0, float(oy)))
+        self._apply()
+
+    def overflow(self) -> "tuple[bool, bool]":
+        """(horizontal, vertical) — whether the fitted image exceeds the label
+        on each axis, i.e. whether panning that axis does anything."""
+        return self._ovx, self._ovy
+
     def _apply(self) -> None:
         if self._src is not None and not self._src.isNull():
             sz = self.size()
@@ -154,18 +170,19 @@ class _AspectLabel(QLabel):
                 mode = (Qt.AspectRatioMode.KeepAspectRatioByExpanding
                         if self._fill else Qt.AspectRatioMode.KeepAspectRatio)
                 # Zoom scales the target box; >100% therefore overflows the
-                # label and is centre-cropped, <100% letterboxes further.
+                # label and is cropped, <100% letterboxes further.
                 target = QSize(max(1, int(round(sz.width() * self._zoom))),
                                max(1, int(round(sz.height() * self._zoom))))
                 scaled = self._src.scaled(
                     target, mode, Qt.TransformationMode.SmoothTransformation)
-                if (scaled.width() > sz.width()
-                        or scaled.height() > sz.height()):
-                    # Centre-crop whatever overflows the label bounds.
+                self._ovx = scaled.width() > sz.width()
+                self._ovy = scaled.height() > sz.height()
+                if self._ovx or self._ovy:
+                    # Crop the overflow, offset by _ox/_oy (centre by default).
                     cw = min(scaled.width(), sz.width())
                     ch = min(scaled.height(), sz.height())
-                    x = max(0, (scaled.width() - cw) // 2)
-                    y = max(0, (scaled.height() - ch) // 2)
+                    x = int(round((scaled.width() - cw) * self._ox))
+                    y = int(round((scaled.height() - ch) * self._oy))
                     scaled = scaled.copy(x, y, cw, ch)
                 self.setPixmap(scaled)
 
@@ -204,6 +221,10 @@ class _Slot(QWidget):
         self._drag_start = None
         self._fill = False           # False = fit (letterbox), True = cover-crop
         self._zoom = 1.0             # media coverage of the tile (±10% steps)
+        self._ox = 0.5               # pan offset (0..1) when media overflows
+        self._oy = 0.5
+        self._vid_ovx = False        # video overflows horizontally / vertically
+        self._vid_ovy = False
         # Off-thread still decoding (set by MultiView after construction).
         self._img_pool: "QThreadPool | None" = None
         self._img_gen = 0
@@ -366,6 +387,37 @@ class _Slot(QWidget):
         self._srclink.linkActivated.connect(self._open_source)
         self._srclink.hide()
 
+        # Pan sliders — shown (on hover) only when the media, scaled to Fill or
+        # zoomed past 100%, overflows the tile, so the user can choose which
+        # part of an over-scaled image OR video is visible.
+        _pan_css = (
+            "QSlider { background: transparent; }"
+            "QSlider::groove:horizontal { height: 4px;"
+            " background: rgba(0,0,0,120); border-radius: 2px; }"
+            f"QSlider::handle:horizontal {{ width: 14px; margin: -4px 0;"
+            f" background: {config.FG_BRIGHT}; border-radius: 3px; }}"
+            "QSlider::groove:vertical { width: 4px;"
+            " background: rgba(0,0,0,120); border-radius: 2px; }"
+            f"QSlider::handle:vertical {{ height: 14px; margin: 0 -4px;"
+            f" background: {config.FG_BRIGHT}; border-radius: 3px; }}")
+        self._hpan = QSlider(Qt.Orientation.Horizontal, self)
+        self._hpan.setRange(0, 100)
+        self._hpan.setValue(50)
+        self._hpan.setToolTip("Reposition horizontally")
+        self._hpan.setStyleSheet(_pan_css)
+        self._hpan.valueChanged.connect(lambda v: self._set_pan(v / 100.0, None))
+        self._hpan.hide()
+        self._vpan = QSlider(Qt.Orientation.Vertical, self)
+        self._vpan.setRange(0, 100)
+        self._vpan.setValue(50)
+        self._vpan.setToolTip("Reposition vertically")
+        self._vpan.setStyleSheet(_pan_css)
+        # A vertical QSlider's max is at the TOP, so handle-up (100) should show
+        # the top of the image → oy = 0.  Map value → 1 - v/100.
+        self._vpan.valueChanged.connect(
+            lambda v: self._set_pan(None, 1.0 - v / 100.0))
+        self._vpan.hide()
+
         # Seek bar (floating, video only)
         self._seekwrap = QWidget(self)
         self._seekwrap.setStyleSheet(
@@ -446,6 +498,7 @@ class _Slot(QWidget):
         self._bar_hide_timer.stop()
         self._btnbar.show()
         self._btnbar.raise_()
+        self._position_overlays()        # reveal pan sliders if media overflows
 
     def leaveEvent(self, e):
         super().leaveEvent(e)
@@ -460,6 +513,8 @@ class _Slot(QWidget):
             return
         if not self._is_pinned:
             self._btnbar.hide()
+            self._hpan.hide()            # pan sliders follow the button bar
+            self._vpan.hide()
 
     # -- video sizing ----------------------------------------------------------
     def _fit_video(self) -> None:
@@ -478,7 +533,13 @@ class _Slot(QWidget):
             scale *= self._zoom          # ±10% coverage steps
             disp_w, disp_h = ns.width() * scale, ns.height() * scale
         self._video_item.setSize(QSizeF(disp_w, disp_h))
-        self._video_item.setPos((vw - disp_w) / 2.0, (vh - disp_h) / 2.0)
+        # Offset by _ox/_oy on whichever axis overflows (centre = 0.5); a
+        # letterboxed axis stays centred.
+        self._vid_ovx = disp_w > vw + 0.5
+        self._vid_ovy = disp_h > vh + 0.5
+        px = (vw - disp_w) * self._ox if self._vid_ovx else (vw - disp_w) / 2.0
+        py = (vh - disp_h) * self._oy if self._vid_ovy else (vh - disp_h) / 2.0
+        self._video_item.setPos(px, py)
         self._scene.setSceneRect(0, 0, vw, vh)   # clips any cover overflow
         # Overlays sit inside the visible area — the whole tile when filling.
         self._disp = QSizeF(min(disp_w, float(vw)), min(disp_h, float(vh)))
@@ -537,6 +598,28 @@ class _Slot(QWidget):
         self._tagbar.raise_()
         if self._is_video:
             self._position_seek()
+        self._position_pan(x, y, dw, dh)
+
+    def _position_pan(self, x: int, y: int, dw: int, dh: int) -> None:
+        """Show pan sliders (on hover) for whichever axis the media overflows."""
+        ovx, ovy = self._media_overflow()
+        # Follow the button bar's hover state so they aren't permanent chrome; a
+        # pinned tile keeps them like it keeps the bar.  Use isHidden() (the
+        # bar's own state) not isVisible() (which also needs the tile shown).
+        active = not self._btnbar.isHidden()
+        show_h = ovx and active
+        if show_h:
+            self._hpan.setGeometry(max(0, x) + 6,
+                                   max(0, y + dh - 14),
+                                   max(20, dw - 12), 12)
+            self._hpan.raise_()
+        self._hpan.setVisible(show_h)
+        show_v = ovy and active
+        if show_v:
+            self._vpan.setGeometry(max(0, x + dw - 14),
+                                   max(0, y) + 6, 12, max(20, dh - 12))
+            self._vpan.raise_()
+        self._vpan.setVisible(show_v)
 
     def _position_seek(self) -> None:
         if not self._is_video:
@@ -588,6 +671,32 @@ class _Slot(QWidget):
             self._fit_video()
         self._position_overlays()
 
+    def _set_pan(self, ox: "float | None", oy: "float | None") -> None:
+        """Reposition over-scaled media; None leaves that axis unchanged."""
+        if ox is not None:
+            self._ox = min(1.0, max(0.0, ox))
+        if oy is not None:
+            self._oy = min(1.0, max(0.0, oy))
+        self._img.set_offset(self._ox, self._oy)
+        if self._is_video:
+            self._fit_video()          # re-lays overlays (and sliders) itself
+        else:
+            self._position_overlays()
+
+    def _reset_pan(self) -> None:
+        self._ox = self._oy = 0.5
+        for s in (self._hpan, self._vpan):
+            s.blockSignals(True)
+            s.setValue(50)
+            s.blockSignals(False)
+        self._img.set_offset(0.5, 0.5)
+
+    def _media_overflow(self) -> "tuple[bool, bool]":
+        """(horizontal, vertical) overflow of the current media past the tile."""
+        if self._is_video:
+            return self._vid_ovx, self._vid_ovy
+        return self._img.overflow()
+
     # -- content ---------------------------------------------------------------
     def release_media(self) -> None:
         """Stop playback AND release the file handle.
@@ -605,7 +714,10 @@ class _Slot(QWidget):
         self._img.clear_source()
         self._seekwrap.hide()
         self._vol_popup.hide()
+        self._hpan.hide()
+        self._vpan.hide()
         self._clear_loop()
+        self._reset_pan()
         self._is_video = False
         self._row  = -1
         self._path = ""
@@ -713,6 +825,7 @@ class _Slot(QWidget):
         self._rotation = 0
         self._dur_ms   = 0
         self._clear_loop()
+        self._reset_pan()               # each item starts centred
         self._reset_audio()
         self.refresh_fav()
         self._refresh_tag_styles()
@@ -1231,6 +1344,7 @@ class MultiView(QWidget):
             ("L", "Layout: Auto / 3×1 / 2×2"),
             ("F", "Fit (no crop) / Fill (cover)"),
             ("+  /  −  /  0", "Media coverage: bigger / smaller / reset"),
+            ("Edge sliders", "Reposition media that overflows its tile"),
             ("H", "Show / hide the bars"),
             ("Ctrl+M", "Unmute all visible videos"),
             ("Delete", "Trash the hovered tile (undoable)"),
