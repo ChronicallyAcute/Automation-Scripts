@@ -79,7 +79,7 @@ class _FolderPickDlg(QDialog):
 
         # Quick access: common media locations, one click to jump the tree,
         # plus the media-type filter for what the tree shows/imports.
-        quick, self._type_combo = quick_access_row(self._fs, self._goto)
+        quick, self._type_btn = quick_access_row(self._fs, self._goto)
 
         # Checked-paths list
         self._list = QListView()

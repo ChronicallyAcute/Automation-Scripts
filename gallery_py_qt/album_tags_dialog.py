@@ -21,10 +21,11 @@ from PySide6.QtGui import (QIcon, QPixmap, QStandardItem, QStandardItemModel,
 from PySide6.QtWidgets import (QDialog, QVBoxLayout, QHBoxLayout, QLabel,
                                QListView, QTreeView, QAbstractItemView,
                                QPushButton, QSplitter, QWidget, QFrame,
-                               QMessageBox, QMenu, QInputDialog)
+                               QMessageBox, QMenu, QInputDialog, QComboBox,
+                               QStyle)
 
 from . import config
-from .engine import cache, favorites, fileops, foldertags, scan, tags
+from .engine import cache, favorites, fileops, foldertags, media, scan, tags
 from .fs_picker import _CheckFSModel, HoverPreview, quick_access_row
 
 # Thumbnail edge for the contents pane.  Deliberately different from the hover
@@ -91,7 +92,7 @@ class AlbumTagsDialog(QDialog):
                   activated=self._paste_here)
 
         self._hover = HoverPreview(self, self._tree, self._fs, loader)
-        quick, self._type_combo = quick_access_row(self._fs, self._goto)
+        quick, self._type_btn = quick_access_row(self._fs, self._goto)
 
         left = QWidget()
         llay = QVBoxLayout(left)
@@ -104,6 +105,21 @@ class AlbumTagsDialog(QDialog):
         self._contents_hdr.setWordWrap(True)
         self._contents_hdr.setStyleSheet(
             f"color: {config.FG_MID}; padding: 2px 0;")
+
+        # Sort control for the contents pane (subfolders always come first).
+        sort_row = QHBoxLayout()
+        sort_row.setContentsMargins(0, 0, 0, 0)
+        sort_lbl = QLabel("Sort by:")
+        sort_lbl.setStyleSheet(f"color: {config.FG_MID};")
+        self._sort_combo = QComboBox()
+        for label, key in (("Type", "type"), ("Name", "name"),
+                           ("Size", "size"), ("Dimensions", "dimensions"),
+                           ("Tags", "tags")):
+            self._sort_combo.addItem(label, key)
+        self._sort_combo.currentIndexChanged.connect(self._on_sort_changed)
+        sort_row.addWidget(sort_lbl)
+        sort_row.addWidget(self._sort_combo)
+        sort_row.addStretch(1)
 
         self._contents = QListView()
         self._contents.setViewMode(QListView.ViewMode.IconMode)
@@ -119,6 +135,10 @@ class AlbumTagsDialog(QDialog):
             QAbstractItemView.EditTrigger.NoEditTriggers)
         self._contents_model = QStandardItemModel(self)
         self._contents.setModel(self._contents_model)
+        # Double-click a subfolder tile to browse into it.
+        self._contents.doubleClicked.connect(self._on_contents_activated)
+        self._folder_icon = self.style().standardIcon(
+            QStyle.StandardPixmap.SP_DirIcon)
 
         picked_lbl = QLabel("Ticked albums:")
         picked_lbl.setStyleSheet(f"color: {config.FG_MID}; padding-top: 6px;")
@@ -135,6 +155,7 @@ class AlbumTagsDialog(QDialog):
         rlay = QVBoxLayout(right)
         rlay.setContentsMargins(0, 0, 0, 0)
         rlay.addWidget(self._contents_hdr)
+        rlay.addLayout(sort_row)
         rlay.addWidget(self._contents, 1)
         rlay.addWidget(picked_lbl)
         rlay.addWidget(self._picked)
@@ -379,6 +400,55 @@ class AlbumTagsDialog(QDialog):
                 f"{len(errors)} item(s) could not be completed:\n{lines}")
 
     # -- contents thumbnails ---------------------------------------------------
+    def _on_sort_changed(self, *_) -> None:
+        if self._browsing:
+            browsed, self._browsing = self._browsing, ""
+            self._show_contents(browsed)
+
+    def _sort_key(self) -> str:
+        return self._sort_combo.currentData() or "type"
+
+    def _subfolders(self, folder: str) -> "list[str]":
+        try:
+            subs = [os.path.join(folder, n) for n in os.listdir(folder)]
+        except OSError:
+            return []
+        subs = [p for p in subs if os.path.isdir(p)
+                and os.path.basename(p) != "Favorites"]
+        return sorted(subs, key=lambda p: os.path.basename(p).lower())
+
+    def _sorted_files(self, paths: "list[str]") -> "list[str]":
+        key = self._sort_key()
+        if key == "name":
+            return sorted(paths, key=lambda p: os.path.basename(p).lower())
+        if key == "size":
+            return sorted(paths, key=self._safe_size, reverse=True)
+        if key == "dimensions":
+            return sorted(paths, key=self._safe_area, reverse=True)
+        if key == "tags":
+            # Tagged first (by tag string), untagged last.
+            return sorted(paths, key=lambda p: (not tags.tags_for(p),
+                                                ",".join(tags.tags_for(p)).lower(),
+                                                os.path.basename(p).lower()))
+        # "type": by extension, then name.
+        return sorted(paths, key=lambda p: (os.path.splitext(p)[1].lower(),
+                                            os.path.basename(p).lower()))
+
+    @staticmethod
+    def _safe_size(path: str) -> int:
+        try:
+            return os.path.getsize(path)
+        except OSError:
+            return 0
+
+    @staticmethod
+    def _safe_area(path: str) -> int:
+        try:
+            w, h = media.peek_size(path)
+            return int(w) * int(h)
+        except Exception:
+            return 0
+
     def _show_contents(self, folder: str) -> None:
         if not folder or folder == self._browsing:
             return
@@ -387,17 +457,29 @@ class AlbumTagsDialog(QDialog):
         self._tiles.clear()
         self._contents_model.clear()
 
+        subs = self._subfolders(folder)
         try:
-            paths = scan.scan_media(folder).paths
+            files = self._sorted_files(scan.scan_media(folder).paths)
         except Exception:
-            paths = []
-        shown = paths[:_MAX_TILES]
+            files = []
+        shown = files[:_MAX_TILES]
         cur = foldertags.tags_for(folder)
-        extra = f"  ·  more than {_MAX_TILES} shown" if len(paths) > len(shown) else ""
+        extra = (f"  ·  more than {_MAX_TILES} files shown"
+                 if len(files) > len(shown) else "")
         self._contents_hdr.setText(
             f"{os.path.basename(os.path.normpath(folder)) or folder}  ·  "
-            f"{len(paths)} media file(s){extra}"
+            f"{len(subs)} folder(s), {len(files)} media file(s){extra}"
             + (f"  ·  tags: {', '.join(cur)}" if cur else "  ·  untagged"))
+
+        # Subfolders first, so the folder structure is visible before the media.
+        for d in subs:
+            item = QStandardItem(self._folder_icon, os.path.basename(d) + "/")
+            item.setEditable(False)
+            item.setToolTip(d)
+            item.setData(d, Qt.ItemDataRole.UserRole)
+            item.setData(True, Qt.ItemDataRole.UserRole + 1)   # is-dir flag
+            item.setTextAlignment(Qt.AlignmentFlag.AlignHCenter)
+            self._contents_model.appendRow(item)
 
         for p in shown:
             item = QStandardItem(os.path.basename(p))
@@ -413,6 +495,13 @@ class AlbumTagsDialog(QDialog):
                 item.setIcon(QIcon(pm))
             elif self._loader is not None:
                 self._loader.request(p, _TILE_PX)
+
+    def _on_contents_activated(self, index) -> None:
+        """Double-clicking a subfolder tile browses into it."""
+        path = index.data(Qt.ItemDataRole.UserRole)
+        if path and os.path.isdir(path):
+            self._goto(path)
+            self._show_contents(path)
 
     @staticmethod
     def _cached_thumb(path: str) -> "QPixmap | None":

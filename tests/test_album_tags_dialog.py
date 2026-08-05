@@ -187,10 +187,10 @@ def test_ticked_panel_shows_tags(qapp, tmp_path, flush):
 def test_has_import_picker_controls(qapp, tmp_path):
     a = _album(tmp_path, "One")
     dlg = AlbumTagsDialog([a])
-    # Media-class filter, same as the import picker.
-    assert dlg._type_combo.currentData() == "all"
-    i = dlg._type_combo.findData("videos")
-    dlg._type_combo.setCurrentIndex(i)
+    # Multi-select media-class filter, same as the import picker.
+    acts = dlg._type_btn._class_actions
+    acts["images"].setChecked(False)
+    acts["gifs"].setChecked(False)               # videos only
     qapp.processEvents()
     nf = set(dlg._fs.nameFilters())
     assert "*.mp4" in nf and "*.jpg" not in nf
@@ -457,4 +457,109 @@ def test_move_errors_surface(qapp, tmp_path, monkeypatch):
     # Move a folder into its own subtree → refused, surfaced.
     dlg._do_move([a], os.path.join(a))
     assert warned and "could not be completed" in warned[0]
+    dlg.done(0)
+
+
+# -- contents pane: subfolders first + sort ------------------------------------
+def _album_with_subs(tmp_path):
+    root = tmp_path / "Root"
+    root.mkdir()
+    (root / "Zsub").mkdir()
+    (root / "Asub").mkdir()
+    (root / "Favorites").mkdir()               # excluded
+    from PIL import Image
+    Image.new("RGB", (40, 10)).save(root / "wide.jpg")     # area 400
+    Image.new("RGB", (10, 10)).save(root / "small.png")    # area 100
+    Image.new("RGB", (30, 30)).save(root / "big.gif")      # area 900
+    return str(root)
+
+
+def test_subfolders_listed_before_files(qapp, tmp_path):
+    root = _album_with_subs(tmp_path)
+    dlg = AlbumTagsDialog([])
+    dlg._show_contents(root)
+    m = dlg._contents_model
+    labels = [m.item(r).text() for r in range(m.rowCount())]
+    # Folders (with trailing /) come first, excluding "Favorites".
+    assert labels[0].endswith("/") and labels[1].endswith("/")
+    assert "Asub/" in labels[:2] and "Zsub/" in labels[:2]
+    assert "Favorites/" not in labels
+    # Then the media files.
+    assert all(not lbl.endswith("/") for lbl in labels[2:])
+    assert "0 folder" not in dlg._contents_hdr.text()
+    assert "2 folder(s), 3 media file(s)" in dlg._contents_hdr.text()
+    dlg.done(0)
+
+
+def test_sort_by_name(qapp, tmp_path):
+    root = _album_with_subs(tmp_path)
+    dlg = AlbumTagsDialog([])
+    dlg._sort_combo.setCurrentIndex(dlg._sort_combo.findData("name"))
+    dlg._show_contents(root)
+    files = [dlg._contents_model.item(r).text()
+             for r in range(dlg._contents_model.rowCount())
+             if not dlg._contents_model.item(r).text().endswith("/")]
+    assert files == ["big.gif", "small.png", "wide.jpg"]
+    dlg.done(0)
+
+
+def test_sort_by_size(qapp, tmp_path):
+    root = _album_with_subs(tmp_path)
+    dlg = AlbumTagsDialog([])
+    dlg._sort_combo.setCurrentIndex(dlg._sort_combo.findData("size"))
+    dlg._show_contents(root)
+    files = [dlg._contents_model.item(r).data(Qt.ItemDataRole.UserRole)
+             for r in range(dlg._contents_model.rowCount())
+             if not dlg._contents_model.item(r).text().endswith("/")]
+    sizes = [os.path.getsize(p) for p in files]
+    assert sizes == sorted(sizes, reverse=True)     # largest first
+    dlg.done(0)
+
+
+def test_sort_by_dimensions(qapp, tmp_path):
+    root = _album_with_subs(tmp_path)
+    dlg = AlbumTagsDialog([])
+    dlg._sort_combo.setCurrentIndex(dlg._sort_combo.findData("dimensions"))
+    dlg._show_contents(root)
+    files = [dlg._contents_model.item(r).text()
+             for r in range(dlg._contents_model.rowCount())
+             if not dlg._contents_model.item(r).text().endswith("/")]
+    assert files == ["big.gif", "wide.jpg", "small.png"]   # 900, 400, 100
+    dlg.done(0)
+
+
+def test_sort_by_tags(qapp, tmp_path):
+    root = _album_with_subs(tmp_path)
+    from gallery_py_qt.engine import tags as _tags
+    _tags.toggle_tag(os.path.join(root, "small.png"), "Az")
+    dlg = AlbumTagsDialog([])
+    dlg._sort_combo.setCurrentIndex(dlg._sort_combo.findData("tags"))
+    dlg._show_contents(root)
+    files = [dlg._contents_model.item(r).text()
+             for r in range(dlg._contents_model.rowCount())
+             if not dlg._contents_model.item(r).text().endswith("/")]
+    assert files[0] == "small.png"                 # tagged item first
+    dlg.done(0)
+
+
+def test_double_click_folder_navigates(qapp, tmp_path):
+    root = _album_with_subs(tmp_path)
+    from PIL import Image
+    Image.new("RGB", (8, 8)).save(os.path.join(root, "Asub", "inner.jpg"))
+    dlg = AlbumTagsDialog([])
+    dlg._show_contents(root)
+    # First row is a folder tile ("Asub/"); activate it.
+    idx = dlg._contents_model.index(0, 0)
+    dlg._on_contents_activated(idx)
+    assert dlg._browsing == os.path.join(root, "Asub")
+    dlg.done(0)
+
+
+def test_changing_sort_rerenders(qapp, tmp_path):
+    root = _album_with_subs(tmp_path)
+    dlg = AlbumTagsDialog([])
+    dlg._show_contents(root)
+    dlg._sort_combo.setCurrentIndex(dlg._sort_combo.findData("name"))
+    # _on_sort_changed re-rendered the same folder.
+    assert dlg._browsing == root
     dlg.done(0)

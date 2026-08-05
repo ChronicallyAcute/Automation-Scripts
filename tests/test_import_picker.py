@@ -29,16 +29,27 @@ def test_model_class_switches_name_filters(qapp):
     assert "*.jpg" in nf and "*.gif" in nf and "*.mp4" in nf
 
 
-def test_dialog_has_type_combo_wired(qapp):
+def test_model_multi_class_union(qapp):
+    fs = _CheckFSModel()
+    fs.set_media_classes({"gifs", "videos"})     # gifs AND videos
+    nf = _name_filters(fs)
+    assert "*.gif" in nf and "*.mp4" in nf and "*.jpg" not in nf
+    fs.set_media_classes(set())                  # empty → all
+    assert "*.jpg" in _name_filters(fs)
+
+
+def test_dialog_type_menu_multi_select(qapp):
     dlg = _FolderPickDlg(recents=[])
-    # Default shows all media.
-    assert dlg._type_combo.currentData() == "all"
-    # Selecting "Videos" pushes the class down to the model's name filters.
-    i = dlg._type_combo.findData("videos")
-    dlg._type_combo.setCurrentIndex(i)
+    acts = dlg._type_btn._class_actions
+    # Default: all classes checked → everything shows.
+    assert all(a.isChecked() for a in acts.values())
+    nf = set(dlg._fs.nameFilters())
+    assert "*.jpg" in nf and "*.gif" in nf and "*.mp4" in nf
+    # Uncheck Images → gifs AND videos together.
+    acts["images"].setChecked(False)
     qapp.processEvents()
     nf = set(dlg._fs.nameFilters())
-    assert "*.mp4" in nf and "*.jpg" not in nf
+    assert "*.gif" in nf and "*.mp4" in nf and "*.jpg" not in nf
     dlg.done(0)
 
 

@@ -14,7 +14,7 @@ import os
 from PySide6.QtCore import (Qt, QDir, QModelIndex, QObject, QEvent, QTimer)
 from PySide6.QtGui import QPixmap
 from PySide6.QtWidgets import (QFileSystemModel, QLabel, QHBoxLayout,
-                               QPushButton, QComboBox, QWidget)
+                               QPushButton, QToolButton, QMenu, QWidget)
 
 from . import config
 
@@ -42,16 +42,32 @@ class _CheckFSModel(QFileSystemModel):
         self.set_media_class("all")
         self.setRootPath("")
 
-    def set_media_class(self, cls: str) -> None:
-        """Restrict which media files are shown/importable (all/images/gifs/
-        videos).  Directories always remain visible so the tree stays browsable."""
-        by_class = {
-            "all":    config.SUPPORTED,
+    @staticmethod
+    def _class_exts(cls: str) -> "set[str]":
+        return {
+            "all":    set(config.SUPPORTED),
             "images": {e for e in config.IMAGE_EXT if e != ".gif"},
             "gifs":   {".gif"},
-            "videos": config.VIDEO_EXT,
-        }
-        exts = by_class.get(cls, config.SUPPORTED)
+            "videos": set(config.VIDEO_EXT),
+        }.get(cls, set(config.SUPPORTED))
+
+    def set_media_class(self, cls: str) -> None:
+        """Single-class convenience wrapper for set_media_classes()."""
+        self.set_media_classes({cls})
+
+    def set_media_classes(self, classes) -> None:
+        """Show media of ANY of the given classes (images / gifs / videos), so
+        several can be combined, e.g. gifs AND videos.  Empty, or containing
+        "all", shows everything.  Directories always remain visible."""
+        classes = set(classes)
+        if not classes or "all" in classes:
+            exts = set(config.SUPPORTED)
+        else:
+            exts = set()
+            for c in classes:
+                exts |= self._class_exts(c)
+            if not exts:
+                exts = set(config.SUPPORTED)
         self.setNameFilters([f"*{ext}" for ext in sorted(exts)])
 
     def flags(self, index: QModelIndex):
@@ -177,11 +193,42 @@ class HoverPreview(QObject):
         return super().eventFilter(obj, event)
 
 
-def quick_access_row(fs_model, goto_cb) -> "tuple[QHBoxLayout, QComboBox]":
+def _class_menu_button(fs_model) -> QToolButton:
+    """A "Show ▾" button whose checkable menu multi-selects media classes, so
+    e.g. GIFs AND videos can be shown together.  All checked = all media."""
+    btn = QToolButton()
+    btn.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
+    menu = QMenu(btn)
+    actions = {}
+    for label, val in (("Images", "images"), ("GIFs", "gifs"),
+                       ("Videos", "videos")):
+        act = menu.addAction(label)
+        act.setCheckable(True)
+        act.setChecked(True)
+        actions[val] = act
+
+    def _apply() -> None:
+        chosen = {v for v, a in actions.items() if a.isChecked()}
+        fs_model.set_media_classes(chosen)
+        if len(chosen) == 3 or not chosen:
+            btn.setText("Show: all ▾")
+        else:
+            btn.setText("Show: " + "+".join(
+                v for v in ("images", "gifs", "videos") if v in chosen) + " ▾")
+
+    for a in actions.values():
+        a.toggled.connect(lambda _=False: _apply())
+    btn.setMenu(menu)
+    btn._class_actions = actions      # exposed for callers / tests
+    _apply()
+    return btn
+
+
+def quick_access_row(fs_model, goto_cb) -> "tuple[QHBoxLayout, QToolButton]":
     """Build the "Go to: … / Show: …" strip that sits above a picker tree.
 
-    Returns (layout, media-class combo); the caller keeps the combo so it can
-    be addressed by name.  `goto_cb(path)` jumps the tree to a folder.
+    Returns (layout, media-class button); the button's checkable menu selects
+    one or more media classes.  `goto_cb(path)` jumps the tree to a folder.
     """
     quick = QHBoxLayout()
     quick.setSpacing(4)
@@ -198,12 +245,7 @@ def quick_access_row(fs_model, goto_cb) -> "tuple[QHBoxLayout, QComboBox]":
         b.clicked.connect(lambda _=False, pp=p: goto_cb(pp))
         quick.addWidget(b)
     quick.addStretch(1)
-    # Media-type filter for what the tree shows/imports.
-    quick.addWidget(QLabel("Show:"))
-    combo = QComboBox()
-    for label, val in MEDIA_CLASSES:
-        combo.addItem(label, val)
-    combo.currentIndexChanged.connect(
-        lambda _=0: fs_model.set_media_class(combo.currentData()))
-    quick.addWidget(combo)
-    return quick, combo
+    # Media-type filter (multi-select) for what the tree shows/imports.
+    btn = _class_menu_button(fs_model)
+    quick.addWidget(btn)
+    return quick, btn
