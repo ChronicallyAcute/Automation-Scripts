@@ -55,10 +55,10 @@ class AlbumTagsDialog(QDialog):
         root = QVBoxLayout(self)
 
         intro = QLabel(
-            "Tagging an album mirrors the whole folder into "
-            f"“{foldertags.FOLDER_TAGS_DIRNAME}/&lt;tag&gt;/” inside your "
-            "Gallery Favorites.  Tick folders to tag them; right-click (or use "
-            "F2 / Del / Ctrl+X / Ctrl+V) to rename, delete, cut and paste.")
+            "Tick folders to tag every media file inside them, or click-drag to "
+            "highlight specific files on the right and tag just those.  "
+            "Right-click (or F2 / Del / Ctrl+X / Ctrl+V) to rename, delete, "
+            "cut and paste.")
         intro.setWordWrap(True)
         intro.setStyleSheet(f"color: {config.FG_MID}; padding: 2px;")
         root.addWidget(intro)
@@ -67,6 +67,7 @@ class AlbumTagsDialog(QDialog):
         self._fs = _CheckFSModel(self)
         self._tree = QTreeView()
         self._tree.setModel(self._fs)
+        # ExtendedSelection already gives the tree click-drag range selection.
         self._tree.setSelectionMode(
             QAbstractItemView.SelectionMode.ExtendedSelection)
         self._tree.setAnimated(True)
@@ -129,12 +130,16 @@ class AlbumTagsDialog(QDialog):
         self._contents.setMovement(QListView.Movement.Static)
         self._contents.setUniformItemSizes(True)
         self._contents.setWordWrap(True)
+        # Click-drag rubber-band highlighting of files; highlighted files become
+        # the tag target (see _tag_targets).
         self._contents.setSelectionMode(
-            QAbstractItemView.SelectionMode.NoSelection)
+            QAbstractItemView.SelectionMode.ExtendedSelection)
+        self._contents.setSelectionRectVisible(True)
         self._contents.setEditTriggers(
             QAbstractItemView.EditTrigger.NoEditTriggers)
         self._contents_model = QStandardItemModel(self)
         self._contents.setModel(self._contents_model)
+        self._contents.selectionModel().selectionChanged.connect(self._refresh)
         # Double-click a subfolder tile to browse into it.
         self._contents.doubleClicked.connect(self._on_contents_activated)
         self._folder_icon = self.style().standardIcon(
@@ -192,10 +197,9 @@ class AlbumTagsDialog(QDialog):
         self._build_tag_buttons()
         root.addLayout(self._tag_row)
 
-        mode = {"copy": "copies", "hardlink": "hard-links",
-                "symlink": "sym-links"}.get(favorites.LINK_MODE, "copies")
-        self._mode_lbl = QLabel(f"Link mode: {favorites.LINK_MODE} "
-                                f"(each album {mode} into the tag folder).")
+        self._mode_lbl = QLabel(
+            "Tags are written to each media file (metadata + search), not to "
+            "the folder.")
         self._mode_lbl.setStyleSheet(f"color: {config.FG_DIM}; padding-top: 4px;")
         root.addWidget(self._mode_lbl)
 
@@ -463,13 +467,11 @@ class AlbumTagsDialog(QDialog):
         except Exception:
             files = []
         shown = files[:_MAX_TILES]
-        cur = foldertags.tags_for(folder)
         extra = (f"  ·  more than {_MAX_TILES} files shown"
                  if len(files) > len(shown) else "")
         self._contents_hdr.setText(
             f"{os.path.basename(os.path.normpath(folder)) or folder}  ·  "
-            f"{len(subs)} folder(s), {len(files)} media file(s){extra}"
-            + (f"  ·  tags: {', '.join(cur)}" if cur else "  ·  untagged"))
+            f"{len(subs)} folder(s), {len(files)} media file(s){extra}")
 
         # Subfolders first, so the folder structure is visible before the media.
         for d in subs:
@@ -556,24 +558,28 @@ class AlbumTagsDialog(QDialog):
                                   [Qt.ItemDataRole.CheckStateRole])
 
     def _refresh(self, *_) -> None:
-        """Redraw the ticked-album panel with each folder's current tags."""
+        """Redraw the ticked-album panel and update the tag prompt/targets."""
         self._picked_model.clear()
         folders = self._fs.checked_paths()
         for f in folders:
-            cur = foldertags.tags_for(f)
-            label = (f"{os.path.basename(os.path.normpath(f))}"
-                     f"{('  ·  ' + ', '.join(cur)) if cur else '  ·  (untagged)'}")
-            item = QStandardItem(label)
+            item = QStandardItem(os.path.basename(os.path.normpath(f)))
             item.setEditable(False)
             item.setToolTip(f)
             self._picked_model.appendRow(item)
-        n = len(folders)
-        self._tag_lbl.setText(
-            "Tick one or more folders to tag them" if n == 0
-            else ("Apply tag to 1 ticked album:" if n == 1
-                  else f"Apply tag to {n} ticked albums:"))
+        sel = self._selected_content_files()
+        if sel:
+            self._tag_lbl.setText(
+                f"Apply tag to {len(sel)} highlighted file(s):")
+        elif folders:
+            self._tag_lbl.setText(
+                f"Apply tag to every media file in {len(folders)} "
+                f"ticked folder(s):")
+        else:
+            self._tag_lbl.setText(
+                "Tick folders (or highlight files) to tag their media")
+        can = bool(sel) or bool(folders)
         for b in self._tag_btns:
-            b.setEnabled(n > 0)
+            b.setEnabled(can)
 
     # -- tagging ---------------------------------------------------------------
     def _build_tag_buttons(self) -> None:
@@ -582,50 +588,70 @@ class AlbumTagsDialog(QDialog):
         self._tag_btns.clear()
         for t in tags.TAGS:
             btn = QPushButton(t)
-            btn.setToolTip(f"Toggle “{t}” on the ticked album(s)")
+            btn.setToolTip(f"Toggle “{t}” on every media file being targeted")
             btn.clicked.connect(lambda _=False, tag=t: self._toggle_tag(tag))
             self._tag_row.addWidget(btn)
             self._tag_btns.append(btn)
         self._tag_row.addStretch(1)
 
-    @staticmethod
-    def _is_mirror_folder(folder: str) -> bool:
-        # Only the folder-tags mirror tree itself is off-limits (re-mirroring a
-        # mirror nests copies).  Ordinary folders — even ones that happen to
-        # live under the Gallery Favorites directory — tag fine.
-        return foldertags.is_mirror_path(folder)
+    def _media_in(self, folder: str) -> "list[str]":
+        """Every supported media file inside `folder`, recursively.  Skips the
+        per-folder "Favorites" mirrors so their copies aren't double-counted."""
+        out: "list[str]" = []
+        try:
+            for root_dir, dirs, names in os.walk(folder):
+                dirs[:] = [d for d in dirs if d != "Favorites"]
+                for n in names:
+                    if os.path.splitext(n)[1].lower() in config.SUPPORTED:
+                        out.append(os.path.join(root_dir, n))
+        except OSError:
+            pass
+        return out
+
+    def _selected_content_files(self) -> "list[str]":
+        """Files highlighted (click-drag) in the contents pane."""
+        sm = self._contents.selectionModel()
+        if sm is None:
+            return []
+        out: "list[str]" = []
+        for idx in sm.selectedIndexes():
+            p = idx.data(Qt.ItemDataRole.UserRole)
+            if p and os.path.isfile(p) and p not in out:
+                out.append(p)
+        return out
+
+    def _tag_targets(self) -> "list[str]":
+        """What a tag click acts on: the highlighted files if any, else every
+        media file inside the ticked folders."""
+        sel = self._selected_content_files()
+        if sel:
+            return sel
+        files: "list[str]" = []
+        seen: "set[str]" = set()
+        for folder in self._checked_albums():
+            for m in self._media_in(folder):
+                if m not in seen:
+                    seen.add(m)
+                    files.append(m)
+        return files
 
     def _toggle_tag(self, tag: str) -> None:
-        albums = self._checked_albums()
-        if not albums:
+        targets = self._tag_targets()
+        if not targets:
             return
-        # The only folders that can't be tagged are the folder-tags mirror
-        # copies themselves; skip those and tell the user, but tag the rest.
-        skipped = [a for a in albums if self._is_mirror_folder(a)]
-        albums = [a for a in albums if a not in skipped]
-        if skipped:
-            QMessageBox.information(
-                self, "Tag albums",
-                f"{len(skipped)} folder(s) are inside the “folder tags” mirror "
-                "and can't be tagged again — they were skipped.")
-            if not albums:
-                return
-        if len(albums) > _CONFIRM_ABOVE and QMessageBox.question(
-                self, "Tag albums",
-                f"Apply “{tag}” to {len(albums)} albums? Each one is mirrored "
-                f"into the folder-tags subfolder ({favorites.LINK_MODE}).",
+        if len(targets) > _CONFIRM_ABOVE and QMessageBox.question(
+                self, "Tag media",
+                f"Apply “{tag}” to {len(targets)} media file(s)?",
                 QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
                 ) != QMessageBox.StandardButton.Yes:
             return
-        # Add to all if any album lacks the tag; otherwise remove from all.
-        add = any(tag not in foldertags.tags_for(a) for a in albums)
-        for a in albums:
-            if (tag in foldertags.tags_for(a)) != add:
-                foldertags.toggle_folder_tag(a, tag)
+        # Add to all if any target lacks the tag; otherwise remove from all.
+        add = any(tag not in tags.tags_for(f) for f in targets)
+        tags.apply_tag_to_paths(targets, tag, add)
         self._refresh()
         if self._browsing:
             browsed, self._browsing = self._browsing, ""
-            self._show_contents(browsed)      # header tag summary may change
+            self._show_contents(browsed)      # per-file tag summaries may change
 
     def done(self, result: int) -> None:
         # QDialog.exec() leaves the dialog owned by its parent window, so a

@@ -318,6 +318,37 @@ def apply_recent(path: str) -> int:
     return added
 
 
+def apply_tag_to_paths(paths: "list[str]", tag: str, add: bool = True
+                       ) -> "list[str]":
+    """Add (or remove) `tag` across many files in ONE store write.
+
+    Used to tag every media file inside a folder without a save-per-file storm.
+    Returns the paths actually changed; embeds are dispatched off-thread and
+    the recent-tags memory updates when adding.
+    """
+    global _recent
+    store = _load()
+    changed: "list[str]" = []
+    for p in paths:
+        cur = store.setdefault(p, [])
+        has = tag in cur
+        if add and not has:
+            cur.append(tag)
+            changed.append(p)
+        elif (not add) and has:
+            cur.remove(tag)
+            changed.append(p)
+        if not cur:
+            store.pop(p, None)
+    if changed:
+        _save()
+        if add:
+            _recent = [tag]
+        for p in changed:
+            _MIRROR_POOL.submit(_embed_tags, p, tags_for(p))
+    return changed
+
+
 def toggle_tag(path: str, tag: str) -> bool:
     """Add/remove `tag` on `path`; returns True if the tag is now present."""
     global _recent

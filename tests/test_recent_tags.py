@@ -71,3 +71,24 @@ def test_slot_repeat_button_disabled_when_already_tagged(qapp, tmp_path):
     s = _Slot(0, Favorites())
     s.show_item(0, a)                              # a already has the recent tag
     assert not s._repeat_btn.isEnabled()
+
+
+# -- batch apply_tag_to_paths --------------------------------------------------
+def test_apply_tag_to_paths_adds_and_removes(make_image):
+    a = make_image("a.jpg")
+    b = make_image("b.jpg")
+    changed = tags.apply_tag_to_paths([a, b], "Az", add=True)
+    assert set(changed) == {a, b}
+    assert tags.tags_for(a) == ["Az"] and tags.tags_for(b) == ["Az"]
+    # Re-adding is a no-op (already present).
+    assert tags.apply_tag_to_paths([a, b], "Az", add=True) == []
+    # Remove.
+    changed = tags.apply_tag_to_paths([a, b], "Az", add=False)
+    assert set(changed) == {a, b}
+    assert tags.tags_for(a) == [] and tags.tags_for(b) == []
+
+
+def test_apply_tag_to_paths_updates_recent(make_image):
+    a = make_image("a.jpg")
+    tags.apply_tag_to_paths([a], "Bp", add=True)
+    assert tags.recent_tags() == ["Bp"]

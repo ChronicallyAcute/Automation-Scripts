@@ -62,6 +62,7 @@ class _FolderPickDlg(QDialog):
         # Tree view
         self._tree = QTreeView()
         self._tree.setModel(self._fs)
+        # ExtendedSelection already gives the tree click-drag range selection.
         self._tree.setSelectionMode(
             QAbstractItemView.SelectionMode.ExtendedSelection)
         self._tree.setAnimated(True)

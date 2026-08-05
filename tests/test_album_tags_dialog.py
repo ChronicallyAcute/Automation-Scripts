@@ -108,78 +108,95 @@ def test_tile_ready_ignores_other_sizes(qapp, tmp_path):
     dlg.done(0)
 
 
-# -- tagging -------------------------------------------------------------------
-def test_toggle_tag_applies_to_ticked_only(qapp, tmp_path, flush):
-    favorites.set_link_mode("copy")
-    a = _album(tmp_path, "One")
-    b = _album(tmp_path, "Two")
-    dlg = AlbumTagsDialog([a])                   # only 'a' is ticked
+# -- tagging: per-file across the folder's media -------------------------------
+from gallery_py_qt.engine import tags as _tags
+
+
+def _files_in(folder):
+    return [os.path.join(folder, n) for n in sorted(os.listdir(folder))
+            if n.endswith(".jpg")]
+
+
+def test_tags_every_media_file_in_ticked_folder(qapp, tmp_path):
+    a = _album(tmp_path, "One", n=3)
+    dlg = AlbumTagsDialog([a])                   # 'a' ticked
     dlg._toggle_tag("Az")
-    flush()
-    assert foldertags.tags_for(a) == ["Az"]
-    assert foldertags.tags_for(b) == []
-    assert os.path.isdir(
-        os.path.join(foldertags.folder_tags_root(), "Az", "One"))
+    for f in _files_in(a):
+        assert _tags.tags_for(f) == ["Az"]       # every file tagged
     dlg.done(0)
 
 
-def test_toggle_tag_batch_removes_when_all_have_it(qapp, tmp_path, flush):
-    favorites.set_link_mode("copy")
+def test_tags_recurse_into_subfolders(qapp, tmp_path):
+    a = _album(tmp_path, "One", n=1)
+    sub = os.path.join(a, "sub")
+    os.mkdir(sub)
+    Image.new("RGB", (8, 8)).save(os.path.join(sub, "deep.jpg"))
+    dlg = AlbumTagsDialog([a])
+    dlg._toggle_tag("Bp")
+    assert _tags.tags_for(os.path.join(sub, "deep.jpg")) == ["Bp"]
+    dlg.done(0)
+
+
+def test_tags_only_ticked_folders(qapp, tmp_path):
+    a = _album(tmp_path, "One")
+    b = _album(tmp_path, "Two")
+    dlg = AlbumTagsDialog([a])                   # only 'a' ticked
+    dlg._toggle_tag("Az")
+    assert all(_tags.tags_for(f) == ["Az"] for f in _files_in(a))
+    assert all(_tags.tags_for(f) == [] for f in _files_in(b))
+    dlg.done(0)
+
+
+def test_batch_toggle_removes_when_all_tagged(qapp, tmp_path):
     a = _album(tmp_path, "One")
     b = _album(tmp_path, "Two")
     dlg = AlbumTagsDialog([a, b])
-    dlg._toggle_tag("Bp")                        # neither has it → add to both
-    flush()
-    assert foldertags.tags_for(a) == ["Bp"] and foldertags.tags_for(b) == ["Bp"]
-    dlg._toggle_tag("Bp")                        # all have it → remove from all
-    flush()
-    assert foldertags.tags_for(a) == [] and foldertags.tags_for(b) == []
+    dlg._toggle_tag("Bp")                        # add to every file
+    assert all(_tags.tags_for(f) == ["Bp"]
+               for f in _files_in(a) + _files_in(b))
+    dlg._toggle_tag("Bp")                        # all have it → remove
+    assert all(_tags.tags_for(f) == []
+               for f in _files_in(a) + _files_in(b))
     dlg.done(0)
 
 
-def test_no_ticked_albums_is_noop(qapp, tmp_path, flush):
+def test_highlighted_files_are_the_target(qapp, tmp_path):
+    from PySide6.QtCore import QItemSelectionModel
+    a = _album(tmp_path, "One", n=3)
+    dlg = AlbumTagsDialog([a])
+    dlg._show_contents(a)
+    m = dlg._contents_model
+    # Highlight just the first file tile.
+    row = next(r for r in range(m.rowCount())
+               if not m.item(r).text().endswith("/"))
+    target = m.item(row).data(Qt.ItemDataRole.UserRole)
+    dlg._contents.selectionModel().select(
+        m.index(row, 0), QItemSelectionModel.SelectionFlag.Select)
+    assert dlg._selected_content_files() == [target]
+    dlg._toggle_tag("Az")
+    assert _tags.tags_for(target) == ["Az"]
+    # The other files were NOT tagged (only the highlighted one).
+    others = [f for f in _files_in(a) if f != target]
+    assert all(_tags.tags_for(f) == [] for f in others)
+    dlg.done(0)
+
+
+def test_no_target_is_noop(qapp, tmp_path):
     a = _album(tmp_path, "One")
     dlg = AlbumTagsDialog([a])
     dlg._untick_all()
     dlg._toggle_tag("Az")
-    flush()
-    assert foldertags.tags_for(a) == []
+    assert all(_tags.tags_for(f) == [] for f in _files_in(a))
     dlg.done(0)
 
 
-def test_merely_selecting_a_folder_does_not_tag_it(qapp, tmp_path, flush):
-    """Browsing highlights folders; only a tick may apply a tag."""
-    a = _album(tmp_path, "One")
-    b = _album(tmp_path, "Two")
-    dlg = AlbumTagsDialog([a])
-    dlg._untick_all()
-    _settle(qapp, dlg._fs, str(tmp_path))
-    dlg._tree.setCurrentIndex(dlg._fs.index(b))   # selected, not ticked
-    assert dlg._checked_albums() == []
-    dlg._toggle_tag("Az")
-    flush()
-    assert foldertags.tags_for(b) == []
-    dlg.done(0)
-
-
-def test_tag_buttons_disabled_without_ticks(qapp, tmp_path):
+def test_tag_buttons_disabled_without_target(qapp, tmp_path):
     a = _album(tmp_path, "One")
     dlg = AlbumTagsDialog([a])
-    assert all(b.isEnabled() for b in dlg._tag_btns)
+    assert all(b.isEnabled() for b in dlg._tag_btns)     # 'a' ticked
     dlg._untick_all()
     assert not any(b.isEnabled() for b in dlg._tag_btns)
-    assert "Tick one or more folders" in dlg._tag_lbl.text()
-    dlg.done(0)
-
-
-def test_ticked_panel_shows_tags(qapp, tmp_path, flush):
-    favorites.set_link_mode("copy")
-    a = _album(tmp_path, "One")
-    dlg = AlbumTagsDialog([a])
-    assert "(untagged)" in dlg._picked_model.item(0).text()
-    dlg._toggle_tag("Az")
-    flush()
-    assert "Az" in dlg._picked_model.item(0).text()
+    assert "Tick folders" in dlg._tag_lbl.text()
     dlg.done(0)
 
 
@@ -209,69 +226,6 @@ def test_main_window_passes_loader(qapp, tmp_path):
 
 
 # -- regressions caught in review ---------------------------------------------
-def test_mirror_folders_are_reported_not_silently_skipped(
-        qapp, tmp_path, flush, monkeypatch):
-    """foldertags refuses to re-mirror a folder that is itself a mirror copy;
-    the tree makes those easy to tick, so the dialog must say so."""
-    from gallery_py_qt import config
-    inside = os.path.join(config.FAVORITES_DIR, "folder tags", "Az", "Nested")
-    os.makedirs(inside)
-    Image.new("RGB", (8, 8)).save(os.path.join(inside, "n.jpg"))
-    dlg = AlbumTagsDialog([inside])
-    assert dlg._checked_albums() == [inside]
-    shown = []
-    monkeypatch.setattr(
-        "gallery_py_qt.album_tags_dialog.QMessageBox.information",
-        lambda *a, **k: shown.append(a[2]))
-    dlg._toggle_tag("Bp")
-    flush()
-    assert shown, "expected the user to be told the folder was skipped"
-    assert "skipped" in shown[0]
-    dlg.done(0)
-
-
-def test_mixed_batch_tags_the_valid_folders(qapp, tmp_path, flush, monkeypatch):
-    from gallery_py_qt import config
-    favorites.set_link_mode("copy")
-    # A genuine mirror-tree folder (under "folder tags") is the only thing skipped.
-    mirror = os.path.join(config.FAVORITES_DIR, "folder tags", "Az", "Nested")
-    os.makedirs(mirror)
-    good = _album(tmp_path, "Good")
-    dlg = AlbumTagsDialog([mirror, good])
-    monkeypatch.setattr(
-        "gallery_py_qt.album_tags_dialog.QMessageBox.information",
-        lambda *a, **k: None)
-    dlg._toggle_tag("Az")
-    flush()
-    assert foldertags.tags_for(good) == ["Az"]     # the valid one still tagged
-    assert foldertags.tags_for(mirror) == []       # the mirror copy is skipped
-    dlg.done(0)
-
-
-def test_folder_under_favorites_is_taggable(qapp, tmp_path, flush, monkeypatch):
-    """Regression: a library folder that merely lives under the Gallery
-    Favorites directory (but outside the 'folder tags' mirror) must tag
-    normally — it previously tripped a bogus 'skipped' message every time."""
-    from gallery_py_qt import config
-    favorites.set_link_mode("copy")
-    album = os.path.join(config.FAVORITES_DIR, "My Library", "Trip")
-    os.makedirs(album)
-    Image.new("RGB", (8, 8)).save(os.path.join(album, "p.jpg"))
-    dlg = AlbumTagsDialog([album])
-    assert not dlg._is_mirror_folder(album)
-    warned = []
-    monkeypatch.setattr(
-        "gallery_py_qt.album_tags_dialog.QMessageBox.information",
-        lambda *a, **k: warned.append(a))
-    dlg._toggle_tag("Az")
-    flush()
-    assert warned == []                            # no bogus skip dialog
-    assert foldertags.tags_for(album) == ["Az"]
-    assert os.path.isdir(
-        os.path.join(foldertags.folder_tags_root(), "Az", "Trip"))
-    dlg.done(0)
-
-
 def test_goto_retries_once_the_directory_loads(qapp, tmp_path):
     a = _album(tmp_path, "One")
     dlg = AlbumTagsDialog([])
@@ -300,28 +254,6 @@ def test_close_releases_loader_and_tiles(qapp, tmp_path):
     dlg.done(0)
     assert dlg._loader is None and dlg._hover._loader is None
     assert dlg._tiles == {} and dlg._contents_model.rowCount() == 0
-
-
-def test_sibling_of_favorites_is_not_skipped(qapp, tmp_path, flush, monkeypatch):
-    """A folder that only shares the Favorites leaf-name prefix (a sibling, not
-    a child) must still be taggable — not misreported as 'inside Favorites'."""
-    from gallery_py_qt import config
-    favorites.set_link_mode("copy")
-    # Sibling whose path starts with the Favorites path string but isn't under it.
-    sibling = config.FAVORITES_DIR + "_backup"
-    os.makedirs(sibling)
-    Image.new("RGB", (8, 8)).save(os.path.join(sibling, "p.jpg"))
-    dlg = AlbumTagsDialog([sibling])
-    assert not dlg._is_mirror_folder(sibling)
-    warned = []
-    monkeypatch.setattr(
-        "gallery_py_qt.album_tags_dialog.QMessageBox.information",
-        lambda *a, **k: warned.append(a))
-    dlg._toggle_tag("Az")
-    flush()
-    assert warned == []                          # no bogus "skipped" dialog
-    assert foldertags.tags_for(sibling) == ["Az"]
-    dlg.done(0)
 
 
 # -- file management (rename / delete / cut-paste / new folder) ----------------
