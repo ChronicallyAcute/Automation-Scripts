@@ -88,7 +88,6 @@ def test_reset_pan_recentres(slot):
     slot._set_pan(0.1, 0.9)
     slot._reset_pan()
     assert slot._ox == 0.5 and slot._oy == 0.5
-    assert slot._hpan.value() == 50 and slot._vpan.value() == 50
 
 
 def test_show_item_recentres_pan(slot, tmp_path):
@@ -115,31 +114,40 @@ def test_slot_video_pan_moves_item(slot):
     assert left_x != right_x                 # the video frame was repositioned
 
 
-# -- slider wiring -------------------------------------------------------------
-def test_horizontal_slider_drives_offset(slot):
-    slot._hpan.setValue(0)
-    assert slot._ox == pytest.approx(0.0)
-    slot._hpan.setValue(100)
+# -- arrow-button wiring -------------------------------------------------------
+def test_arrows_nudge_offset(slot):
+    slot._reset_pan()
+    slot._pan_right.click()
+    assert slot._ox == pytest.approx(0.5 + slot._PAN_STEP)
+    slot._pan_left.click()
+    slot._pan_left.click()
+    assert slot._ox == pytest.approx(0.5 - slot._PAN_STEP)
+    slot._pan_up.click()
+    assert slot._oy == pytest.approx(0.5 - slot._PAN_STEP)
+    slot._pan_down.click()
+    slot._pan_down.click()
+    assert slot._oy == pytest.approx(0.5 + slot._PAN_STEP)
+
+
+def test_arrows_clamp_at_edges(slot):
+    slot._reset_pan()
+    for _ in range(20):
+        slot._pan_right.click()
     assert slot._ox == pytest.approx(1.0)
+    for _ in range(20):
+        slot._pan_up.click()
+    assert slot._oy == pytest.approx(0.0)
 
 
-def test_vertical_slider_top_shows_top(slot):
-    # A vertical slider's max is at the top; handle-up should show the image top.
-    slot._vpan.setValue(100)                 # handle at top
-    assert slot._oy == pytest.approx(0.0)    # → top of image
-    slot._vpan.setValue(0)                   # handle at bottom
-    assert slot._oy == pytest.approx(1.0)    # → bottom of image
-
-
-def test_pan_sliders_shown_only_on_overflow_and_hover(slot):
+def test_pan_arrows_shown_only_on_overflow_and_hover(slot):
     slot._is_video = False
     slot._img.resize(100, 100)
     slot._img.set_fill(True)
-    slot._img.set_source(_gradient(200, 100))   # overflows horizontally
+    slot._img.set_source(_gradient(200, 100))   # overflows horizontally only
     slot._btnbar.show()                          # simulate hover
     slot._position_overlays()
-    assert not slot._hpan.isHidden()             # H shown (overflows)
-    assert slot._vpan.isHidden()                 # V hidden (no V overflow)
+    assert not slot._pan_left.isHidden() and not slot._pan_right.isHidden()
+    assert slot._pan_up.isHidden() and slot._pan_down.isHidden()
     slot._btnbar.hide()
     slot._position_overlays()
-    assert slot._hpan.isHidden()                 # hidden when bar hidden
+    assert all(b.isHidden() for b in slot._pan_btns)

@@ -60,7 +60,7 @@ SECTIONS: "list[tuple[str, list[tuple[str, str]]]]" = [
         (f"{config.ICON_GRID}  Multi-view",
          "A 3×1 / 2×2 grid grouped by orientation. Zoom every tile ±10%, "
          "rotate in place, and run a paged or smooth side-scrolling slideshow. "
-         "When media overflows a tile, edge sliders reposition it (video too)."),
+         "When media overflows a tile, edge arrows reposition it (video too)."),
         ("Hover-scrub",
          "Hover a video in the grid and drag across it to scrub its timeline "
          "without opening it."),

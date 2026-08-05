@@ -114,19 +114,31 @@ def test_forced_layout_resets_on_reopen(qapp, tmp_path):
     assert mv._forced_layout is None and mv._layout_slots == 3
 
 
-def test_justified_tiles_hug_media_aspect(qapp, tmp_path):
+def test_tiles_are_uniform_fixed_windows(qapp, tmp_path):
+    """The 3×1 / 2×2 windows are equal cells regardless of media aspect, so the
+    layout stays put while the media within scales (see zoom behaviour)."""
     m = GalleryModel(Favorites(), ThumbnailLoader())
     specs = {"v0.jpg": (600, 1000), "v1.jpg": (620, 1000), "v2.jpg": (560, 1000)}
     _populate(m, tmp_path, specs)
     mv, _st = _open_mv(qapp, m)
     mv._img_pool.waitForDone(4000)
     qapp.processEvents()
-    for s in mv._active_slots():
-        if not s._path:
-            continue
-        w, h = m.dim_at(s._path)
-        g = s.geometry()
-        assert abs(g.width() / g.height() - w / h) < 0.02
+    active = [s for s in mv._active_slots() if s._path]
+    sizes = {(s.geometry().width(), s.geometry().height()) for s in active}
+    assert len(sizes) == 1                       # every window is the same size
+
+
+def test_zoom_does_not_move_the_windows(qapp, tmp_path):
+    m = GalleryModel(Favorites(), ThumbnailLoader())
+    specs = {"v0.jpg": (600, 1000), "v1.jpg": (620, 1000), "v2.jpg": (560, 1000)}
+    _populate(m, tmp_path, specs)
+    mv, _st = _open_mv(qapp, m)
+    qapp.processEvents()
+    before = [s.geometry() for s in mv._active_slots()]
+    mv.zoom_in()
+    mv.zoom_in()
+    after = [s.geometry() for s in mv._active_slots()]
+    assert before == after                       # windows fixed; only media scales
 
 
 def test_tag_buttons_present_on_tiles(qapp, tmp_path):

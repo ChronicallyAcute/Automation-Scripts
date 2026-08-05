@@ -387,36 +387,16 @@ class _Slot(QWidget):
         self._srclink.linkActivated.connect(self._open_source)
         self._srclink.hide()
 
-        # Pan sliders — shown (on hover) only when the media, scaled to Fill or
-        # zoomed past 100%, overflows the tile, so the user can choose which
-        # part of an over-scaled image OR video is visible.
-        _pan_css = (
-            "QSlider { background: transparent; }"
-            "QSlider::groove:horizontal { height: 4px;"
-            " background: rgba(0,0,0,120); border-radius: 2px; }"
-            f"QSlider::handle:horizontal {{ width: 14px; margin: -4px 0;"
-            f" background: {config.FG_BRIGHT}; border-radius: 3px; }}"
-            "QSlider::groove:vertical { width: 4px;"
-            " background: rgba(0,0,0,120); border-radius: 2px; }"
-            f"QSlider::handle:vertical {{ height: 14px; margin: 0 -4px;"
-            f" background: {config.FG_BRIGHT}; border-radius: 3px; }}")
-        self._hpan = QSlider(Qt.Orientation.Horizontal, self)
-        self._hpan.setRange(0, 100)
-        self._hpan.setValue(50)
-        self._hpan.setToolTip("Reposition horizontally")
-        self._hpan.setStyleSheet(_pan_css)
-        self._hpan.valueChanged.connect(lambda v: self._set_pan(v / 100.0, None))
-        self._hpan.hide()
-        self._vpan = QSlider(Qt.Orientation.Vertical, self)
-        self._vpan.setRange(0, 100)
-        self._vpan.setValue(50)
-        self._vpan.setToolTip("Reposition vertically")
-        self._vpan.setStyleSheet(_pan_css)
-        # A vertical QSlider's max is at the TOP, so handle-up (100) should show
-        # the top of the image → oy = 0.  Map value → 1 - v/100.
-        self._vpan.valueChanged.connect(
-            lambda v: self._set_pan(None, 1.0 - v / 100.0))
-        self._vpan.hide()
+        # Pan arrow buttons — shown (on hover) only when the media, scaled to
+        # Fill or zoomed past 100%, overflows the tile, so the user can choose
+        # which part of an over-scaled image OR video is visible.  Arrows (a
+        # fixed nudge per click) are used instead of a slider so the crop is
+        # re-rendered a handful of times, not continuously as a slider is dragged.
+        self._pan_btns: "list[QToolButton]" = []
+        self._pan_left  = self._mk_pan("◀", -self._PAN_STEP, 0.0)
+        self._pan_right = self._mk_pan("▶",  self._PAN_STEP, 0.0)
+        self._pan_up    = self._mk_pan("▲", 0.0, -self._PAN_STEP)
+        self._pan_down  = self._mk_pan("▼", 0.0,  self._PAN_STEP)
 
         # Seek bar (floating, video only)
         self._seekwrap = QWidget(self)
@@ -513,8 +493,8 @@ class _Slot(QWidget):
             return
         if not self._is_pinned:
             self._btnbar.hide()
-            self._hpan.hide()            # pan sliders follow the button bar
-            self._vpan.hide()
+            for b in self._pan_btns:     # pan arrows follow the button bar
+                b.hide()
 
     # -- video sizing ----------------------------------------------------------
     def _fit_video(self) -> None:
@@ -600,26 +580,34 @@ class _Slot(QWidget):
             self._position_seek()
         self._position_pan(x, y, dw, dh)
 
+    _PAN_BTN = 20                       # arrow button size (px)
+
     def _position_pan(self, x: int, y: int, dw: int, dh: int) -> None:
-        """Show pan sliders (on hover) for whichever axis the media overflows."""
+        """Show pan arrows (on hover) for whichever axis the media overflows."""
         ovx, ovy = self._media_overflow()
         # Follow the button bar's hover state so they aren't permanent chrome; a
         # pinned tile keeps them like it keeps the bar.  Use isHidden() (the
         # bar's own state) not isVisible() (which also needs the tile shown).
         active = not self._btnbar.isHidden()
+        s = self._PAN_BTN
+        cx = max(0, x) + (dw - s) // 2
+        cy = max(0, y) + (dh - s) // 2
+        # Horizontal arrows hug the left/right edges, centred vertically.
         show_h = ovx and active
         if show_h:
-            self._hpan.setGeometry(max(0, x) + 6,
-                                   max(0, y + dh - 14),
-                                   max(20, dw - 12), 12)
-            self._hpan.raise_()
-        self._hpan.setVisible(show_h)
+            self._pan_left.setGeometry(max(0, x) + 2, cy, s, s)
+            self._pan_right.setGeometry(max(0, x) + dw - s - 2, cy, s, s)
+            self._pan_left.raise_(); self._pan_right.raise_()
+        self._pan_left.setVisible(show_h)
+        self._pan_right.setVisible(show_h)
+        # Vertical arrows hug the top/bottom edges, centred horizontally.
         show_v = ovy and active
         if show_v:
-            self._vpan.setGeometry(max(0, x + dw - 14),
-                                   max(0, y) + 6, 12, max(20, dh - 12))
-            self._vpan.raise_()
-        self._vpan.setVisible(show_v)
+            self._pan_up.setGeometry(cx, max(0, y) + 2, s, s)
+            self._pan_down.setGeometry(cx, max(0, y) + dh - s - 2, s, s)
+            self._pan_up.raise_(); self._pan_down.raise_()
+        self._pan_up.setVisible(show_v)
+        self._pan_down.setVisible(show_v)
 
     def _position_seek(self) -> None:
         if not self._is_video:
@@ -671,6 +659,29 @@ class _Slot(QWidget):
             self._fit_video()
         self._position_overlays()
 
+    _PAN_STEP = 0.12                    # fraction of the overflow nudged per click
+
+    def _mk_pan(self, glyph: str, dox: float, doy: float) -> "QToolButton":
+        b = QToolButton(self)
+        b.setText(glyph)
+        b.setCursor(Qt.CursorShape.PointingHandCursor)
+        b.setToolTip("Reposition media")
+        b.setAutoRepeat(True)          # press-and-hold nudges at a steady rate
+        b.setAutoRepeatDelay(300)
+        b.setAutoRepeatInterval(120)
+        b.setStyleSheet(
+            f"QToolButton {{ color: {config.OVERLAY_FG};"
+            " background: rgba(0,0,0,120); border: none; border-radius: 3px;"
+            " font-size: 11px; padding: 0; }"
+            " QToolButton:hover { background: rgba(0,0,0,180); }")
+        b.clicked.connect(lambda _=False: self._nudge_pan(dox, doy))
+        b.hide()
+        self._pan_btns.append(b)
+        return b
+
+    def _nudge_pan(self, dox: float, doy: float) -> None:
+        self._set_pan(self._ox + dox, self._oy + doy)
+
     def _set_pan(self, ox: "float | None", oy: "float | None") -> None:
         """Reposition over-scaled media; None leaves that axis unchanged."""
         if ox is not None:
@@ -679,16 +690,12 @@ class _Slot(QWidget):
             self._oy = min(1.0, max(0.0, oy))
         self._img.set_offset(self._ox, self._oy)
         if self._is_video:
-            self._fit_video()          # re-lays overlays (and sliders) itself
+            self._fit_video()          # re-lays overlays (and arrows) itself
         else:
             self._position_overlays()
 
     def _reset_pan(self) -> None:
         self._ox = self._oy = 0.5
-        for s in (self._hpan, self._vpan):
-            s.blockSignals(True)
-            s.setValue(50)
-            s.blockSignals(False)
         self._img.set_offset(0.5, 0.5)
 
     def _media_overflow(self) -> "tuple[bool, bool]":
@@ -714,8 +721,8 @@ class _Slot(QWidget):
         self._img.clear_source()
         self._seekwrap.hide()
         self._vol_popup.hide()
-        self._hpan.hide()
-        self._vpan.hide()
+        for b in self._pan_btns:
+            b.hide()
         self._clear_loop()
         self._reset_pan()
         self._is_video = False
@@ -750,6 +757,13 @@ class _Slot(QWidget):
             if w is not None:
                 w.deleteLater()
         self._tag_btns = {}
+        # Ditto button: stamp the most-recently-applied tag set onto this file.
+        self._repeat_btn = QToolButton()
+        self._repeat_btn.setText("〃")
+        self._repeat_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._repeat_btn.setToolTip("Apply the most recently used tags")
+        self._repeat_btn.clicked.connect(self._apply_recent_tags)
+        self._taglay.addWidget(self._repeat_btn)
         for t in tags.get_tags():
             b = QToolButton()
             b.setText(t)
@@ -760,6 +774,13 @@ class _Slot(QWidget):
             self._tag_btns[t] = b
         self._taglay.addStretch(1)
         self._refresh_tag_styles()
+
+    def _apply_recent_tags(self) -> None:
+        if not self._path:
+            return
+        if tags.apply_recent(self._path):
+            tags.sync_tag_folders(self._path, self._favs.is_fav(self._path))
+            self._refresh_tag_styles()
 
     # -- source link -----------------------------------------------------------
     _SRC_MAX_CHARS = 44
@@ -802,6 +823,17 @@ class _Slot(QWidget):
             b.setStyleSheet(
                 (self._TAG_CSS_ON % (config.ACCENT, config.ACCENT)) if t in cur
                 else (self._TAG_CSS_OFF % config.OVERLAY_FG))
+        # The ditto button lights up only when there are remembered tags to add.
+        recent = tags.recent_tags()
+        pending = bool(self._path) and any(
+            t not in cur for t in recent if t in tags.TAGS)
+        self._repeat_btn.setEnabled(pending)
+        self._repeat_btn.setStyleSheet(
+            (self._TAG_CSS_ON % (config.ACCENT, config.ACCENT)) if pending
+            else (self._TAG_CSS_OFF % config.FG_DIM))
+        if recent:
+            self._repeat_btn.setToolTip(
+                "Apply the most recently used tags: " + ", ".join(recent))
 
     def refresh_fav(self) -> None:
         """Sync the heart button with the item's current favourite state.
@@ -1344,7 +1376,7 @@ class MultiView(QWidget):
             ("L", "Layout: Auto / 3×1 / 2×2"),
             ("F", "Fit (no crop) / Fill (cover)"),
             ("+  /  −  /  0", "Media coverage: bigger / smaller / reset"),
-            ("Edge sliders", "Reposition media that overflows its tile"),
+            ("Edge arrows", "Reposition media that overflows its tile"),
             ("H", "Show / hide the bars"),
             ("Ctrl+M", "Unmute all visible videos"),
             ("Delete", "Trash the hovered tile (undoable)"),
@@ -1579,14 +1611,13 @@ class MultiView(QWidget):
         return 0.6 if (self._current_paths is self._portrait_paths) else 16 / 9
 
     def _layout_tiles(self) -> None:
-        """Position the visible slots to maximise media coverage.
+        """Position the visible slots as a UNIFORM grid.
 
-        Fit mode uses justified rows: every tile gets exactly its media's
-        aspect box (row height = row width / Σaspects), so there is no
-        letterboxing inside any tile — leftover space collapses into one
-        centred outer margin instead of black bars around each item.
-        Fill mode uses a uniform grid and lets the tiles cover-crop, so
-        media covers every pixel of the panel.
+        The 3×1 / 2×2 viewing windows are fixed, equal cells that never change
+        with the media on show or the zoom level — only the media *within* each
+        window scales (Fit contains it, Fill covers it, and ± zoom grows or
+        shrinks it inside the fixed cell).  This keeps the layout steady while
+        zooming instead of re-justifying tiles to each item's aspect ratio.
         """
         if self._ss_slot_order:            # side-scroll owns tile geometry
             return
@@ -1598,37 +1629,16 @@ class MultiView(QWidget):
         rows = ([self._slots[:3]] if self._layout_slots == 3
                 else [self._slots[:2], self._slots[2:4]])
         rows = [r for r in rows if r]
-
-        if self._fill_mode:
-            nrows = len(rows)
-            rh = (H - gap * (nrows - 1)) / nrows
-            for r, row in enumerate(rows):
-                cw = (W - gap * (len(row) - 1)) / len(row)
-                y = round(r * (rh + gap))
-                y2 = round((r + 1) * rh + r * gap)
-                for c, slot in enumerate(row):
-                    x = round(c * (cw + gap))
-                    x2 = round((c + 1) * cw + c * gap)
-                    slot.setGeometry(x, y, max(1, x2 - x), max(1, y2 - y))
-            return
-
-        # Justified rows (fit mode)
-        aspects = [[self._slot_aspect(s) for s in row] for row in rows]
-        row_w = [W - gap * (len(row) - 1) for row in rows]
-        ideal = [rw / max(sum(a), 0.05) for rw, a in zip(row_w, aspects)]
-        avail_h = H - gap * (len(rows) - 1)
-        total = sum(ideal)
-        heights = ([h * (avail_h / total) for h in ideal] if total > avail_h
-                   else ideal)
-        y = (H - (sum(heights) + gap * (len(rows) - 1))) / 2.0
-        for row, a_row, h in zip(rows, aspects, heights):
-            widths = [h * a for a in a_row]
-            x = (W - (sum(widths) + gap * (len(row) - 1))) / 2.0
-            for slot, wdt in zip(row, widths):
-                slot.setGeometry(round(x), round(y),
-                                 max(1, round(wdt)), max(1, round(h)))
-                x += wdt + gap
-            y += h + gap
+        nrows = len(rows)
+        rh = (H - gap * (nrows - 1)) / nrows
+        for r, row in enumerate(rows):
+            cw = (W - gap * (len(row) - 1)) / len(row)
+            y = round(r * (rh + gap))
+            y2 = round((r + 1) * rh + r * gap)
+            for c, slot in enumerate(row):
+                x = round(c * (cw + gap))
+                x2 = round((c + 1) * cw + c * gap)
+                slot.setGeometry(x, y, max(1, x2 - x), max(1, y2 - y))
 
     def _switch_layout(self, n: int) -> None:
         """Activate n slots; pinned media survives in place (persistent slots

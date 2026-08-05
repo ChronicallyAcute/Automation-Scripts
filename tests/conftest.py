@@ -44,6 +44,7 @@ def isolated(tmp_path, monkeypatch):
     monkeypatch.setattr(tags, "_TAGSET_FILE", str(tmp_path / "tagset.json"))
     monkeypatch.setattr(tags, "_store", None)
     monkeypatch.setattr(tags, "TAGS", tags.DEFAULT_TAGS)
+    monkeypatch.setattr(tags, "_recent", [])
     monkeypatch.setattr(ratings, "_RATINGS_FILE", str(tmp_path / "ratings.json"))
     monkeypatch.setattr(ratings, "_store", None)
     monkeypatch.setattr(foldertags, "_FOLDERTAGS_FILE",

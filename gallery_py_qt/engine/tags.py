@@ -299,8 +299,28 @@ def _sync_tag_folders_now(path: str, favored: bool, tag_list: list[str]) -> None
         _save_tagdb(db)
 
 
+# The tag set most recently applied to a file, so a "repeat" button can stamp
+# the same descriptors onto the next item.  In-memory only (per session).
+_recent: "list[str]" = []
+
+
+def recent_tags() -> "list[str]":
+    return list(_recent)
+
+
+def apply_recent(path: str) -> int:
+    """Add every recently-applied tag the file lacks.  Returns how many added."""
+    added = 0
+    for t in list(_recent):
+        if t in TAGS and t not in tags_for(path):
+            toggle_tag(path, t)
+            added += 1
+    return added
+
+
 def toggle_tag(path: str, tag: str) -> bool:
     """Add/remove `tag` on `path`; returns True if the tag is now present."""
+    global _recent
     store = _load()
     cur = store.setdefault(path, [])
     if tag in cur:
@@ -311,6 +331,9 @@ def toggle_tag(path: str, tag: str) -> bool:
         present = True
     if not cur:
         store.pop(path, None)
+    else:
+        # Remember the file's tag set as the "most recently applied" one.
+        _recent = list(cur)
     _save()
     # Best-effort embedded write, off the GUI thread.
     _MIRROR_POOL.submit(_embed_tags, path, list(cur))
