@@ -53,6 +53,46 @@ def test_dialog_type_menu_multi_select(qapp):
     dlg.done(0)
 
 
+def test_quick_locations_resolve_real_paths(qapp, monkeypatch, tmp_path):
+    """Downloads resolves via QStandardPaths so a redirected folder is reachable."""
+    from PySide6.QtCore import QStandardPaths
+    from gallery_py_qt import fs_picker
+
+    real_dl = tmp_path / "OneDrive" / "Downloads"
+    real_dl.mkdir(parents=True)
+
+    orig = QStandardPaths.writableLocation
+
+    def fake(loc):
+        if loc == QStandardPaths.StandardLocation.DownloadLocation:
+            return str(real_dl)
+        return orig(loc)
+
+    monkeypatch.setattr(QStandardPaths, "writableLocation", staticmethod(fake))
+    locs = dict(fs_picker._quick_locations())
+    import os
+    assert os.path.normpath(locs["Downloads"]) == os.path.normpath(str(real_dl))
+
+
+def test_goto_navigates_cold_path(qapp, tmp_path):
+    """_goto reaches a folder never expanded in the tree (waits for the model)."""
+    import os
+    deep = tmp_path / "a" / "b" / "target"
+    deep.mkdir(parents=True)
+    dlg = _FolderPickDlg(recents=[])
+    dlg._goto(str(deep))
+    for _ in range(400):
+        qapp.processEvents()
+        time.sleep(0.005)
+        idx = dlg._tree.currentIndex()
+        if idx.isValid() and os.path.normpath(dlg._fs.filePath(idx)) == \
+                os.path.normpath(str(deep)):
+            break
+    idx = dlg._tree.currentIndex()
+    assert os.path.normpath(dlg._fs.filePath(idx)) == os.path.normpath(str(deep))
+    dlg.done(0)
+
+
 def test_video_only_hides_images_in_tree(qapp, tmp_path):
     from PIL import Image
     Image.new("RGB", (16, 16)).save(str(tmp_path / "a.jpg"))

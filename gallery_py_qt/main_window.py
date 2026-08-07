@@ -58,6 +58,10 @@ class _FolderPickDlg(QDialog):
 
         # File-system model with checkboxes (folders AND media files)
         self._fs = _CheckFSModel(self)
+        # QFileSystemModel populates on a gatherer thread, so a jump to a folder
+        # that hasn't been visited yet has to wait for it to load.
+        self._pending_goto = ""
+        self._fs.directoryLoaded.connect(self._on_dir_loaded)
 
         # Tree view
         self._tree = QTreeView()
@@ -148,11 +152,27 @@ class _FolderPickDlg(QDialog):
 
     # -- internal helpers -----------------------------------------------------
     def _goto(self, path: str) -> None:
+        """Jump the tree to `path`, waiting for the model if it isn't loaded yet.
+
+        QFileSystemModel populates on a gatherer thread, so index() is invalid
+        until the parent directory has been visited — jumping on a cold path
+        (e.g. a Downloads folder never expanded in the tree) would otherwise
+        silently do nothing.
+        """
         idx = self._fs.index(path)
         if idx.isValid():
             self._tree.expand(idx)
             self._tree.scrollTo(idx, self._tree.ScrollHint.PositionAtTop)
             self._tree.setCurrentIndex(idx)
+            return
+        self._pending_goto = path
+        self._fs.setRootPath(os.path.dirname(path) or path)
+
+    def _on_dir_loaded(self, _loaded: str) -> None:
+        want = getattr(self, "_pending_goto", "")
+        if want and self._fs.index(want).isValid():
+            self._pending_goto = ""
+            self._goto(want)
 
     def _on_dbl(self, index: QModelIndex) -> None:
         path = self._fs.filePath(index)

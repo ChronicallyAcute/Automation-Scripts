@@ -11,7 +11,8 @@ drag the whole main window (and multiview, lightbox, QtMultimedia …) in with i
 from __future__ import annotations
 import os
 
-from PySide6.QtCore import (Qt, QDir, QModelIndex, QObject, QEvent, QTimer)
+from PySide6.QtCore import (Qt, QDir, QModelIndex, QObject, QEvent, QTimer,
+                            QStandardPaths)
 from PySide6.QtGui import QPixmap
 from PySide6.QtWidgets import (QFileSystemModel, QLabel, QHBoxLayout,
                                QPushButton, QToolButton, QMenu, QWidget)
@@ -224,6 +225,38 @@ def _class_menu_button(fs_model) -> QToolButton:
     return btn
 
 
+def _quick_locations() -> "list[tuple[str, str]]":
+    """Resolve the (label, path) pairs for the quick-access strip.
+
+    ``QStandardPaths`` follows OS redirection — a Downloads folder relocated by
+    OneDrive, or an XDG user-dirs override, resolves to its real location rather
+    than a naive ``~/Downloads`` that may not exist.  We fall back to the naive
+    ``home/<name>`` join when the platform returns nothing, and de-duplicate so
+    a bare home path that coincides with a standard location isn't listed twice.
+    """
+    SL = QStandardPaths.StandardLocation
+    home = QDir.homePath()
+    wanted = (
+        ("Downloads", SL.DownloadLocation, "Downloads"),
+        ("Pictures", SL.PicturesLocation, "Pictures"),
+        ("Videos", SL.MoviesLocation, "Videos"),
+        ("Desktop", SL.DesktopLocation, "Desktop"),
+        ("Home", SL.HomeLocation, ""),
+    )
+    out: list[tuple[str, str]] = []
+    seen: set[str] = set()
+    for label, loc, sub in wanted:
+        p = QStandardPaths.writableLocation(loc)
+        if not p or not os.path.isdir(p):
+            p = home if not sub else os.path.join(home, sub)
+        p = os.path.normpath(p)
+        if not os.path.isdir(p) or p in seen:
+            continue
+        seen.add(p)
+        out.append((label, p))
+    return out
+
+
 def quick_access_row(fs_model, goto_cb) -> "tuple[QHBoxLayout, QToolButton]":
     """Build the "Go to: … / Show: …" strip that sits above a picker tree.
 
@@ -235,11 +268,7 @@ def quick_access_row(fs_model, goto_cb) -> "tuple[QHBoxLayout, QToolButton]":
     ql = QLabel("Go to:")
     ql.setStyleSheet(f"color: {config.FG_MID};")
     quick.addWidget(ql)
-    home_dir = QDir.homePath()
-    for name in ("Downloads", "Pictures", "Videos", "Desktop", "Home"):
-        p = home_dir if name == "Home" else os.path.join(home_dir, name)
-        if not os.path.isdir(p):
-            continue
+    for name, p in _quick_locations():
         b = QPushButton(name)
         b.setToolTip(p)
         b.clicked.connect(lambda _=False, pp=p: goto_cb(pp))
