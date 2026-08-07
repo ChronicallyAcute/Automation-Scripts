@@ -12,10 +12,11 @@ from __future__ import annotations
 import os
 
 from PySide6.QtCore import (Qt, QDir, QModelIndex, QObject, QEvent, QTimer,
-                            QStandardPaths)
+                            QStandardPaths, QUrl)
 from PySide6.QtGui import QPixmap
 from PySide6.QtWidgets import (QFileSystemModel, QLabel, QHBoxLayout,
-                               QPushButton, QToolButton, QMenu, QWidget)
+                               QVBoxLayout, QPushButton, QToolButton, QMenu,
+                               QWidget, QLineEdit)
 
 from . import config
 
@@ -257,12 +258,53 @@ def _quick_locations() -> "list[tuple[str, str]]":
     return out
 
 
-def quick_access_row(fs_model, goto_cb) -> "tuple[QHBoxLayout, QToolButton]":
+def normalize_pasted_path(text: str) -> str:
+    """Turn user-pasted directory text into a filesystem path, or "".
+
+    Copes with the shapes people actually paste from a file explorer:
+      * ``file:///C:/Users/Dan/Downloads`` or ``file://host/share`` URLs,
+      * surrounding single/double quotes (Windows "Copy as path" wraps in "),
+      * a leading/trailing whitespace and a trailing separator,
+      * ``~``/``~user`` home shortcuts,
+      * Windows backslashes on any OS.
+
+    Returns the normalised path when it points at an existing directory, else
+    "" so the caller can ignore junk without navigating anywhere.
+    """
+    s = (text or "").strip()
+    if not s:
+        return ""
+    # Strip a single layer of matching surrounding quotes.
+    if len(s) >= 2 and s[0] == s[-1] and s[0] in ("'", '"'):
+        s = s[1:-1].strip()
+    if s[:5].lower() == "file:":
+        local = QUrl(s).toLocalFile()
+        if local:
+            s = local
+    s = os.path.expanduser(s)
+    # Accept a pasted file too: navigate to its containing folder.
+    if os.path.isfile(s):
+        s = os.path.dirname(s)
+    if not s:
+        return ""
+    s = os.path.normpath(s)
+    return s if os.path.isdir(s) else ""
+
+
+def quick_access_row(fs_model, goto_cb):
     """Build the "Go to: … / Show: …" strip that sits above a picker tree.
 
     Returns (layout, media-class button); the button's checkable menu selects
     one or more media classes.  `goto_cb(path)` jumps the tree to a folder.
+
+    The strip carries two rows: one-click shortcuts to the common media
+    folders, and a free-text path box so any directory can be reached by
+    pasting its path (e.g. ``C:\\Users\\me\\Downloads``) when auto-detection
+    misses it — the box also accepts ``file://`` URLs and quoted paths.
     """
+    outer = QVBoxLayout()
+    outer.setSpacing(4)
+
     quick = QHBoxLayout()
     quick.setSpacing(4)
     ql = QLabel("Go to:")
@@ -277,4 +319,33 @@ def quick_access_row(fs_model, goto_cb) -> "tuple[QHBoxLayout, QToolButton]":
     # Media-type filter (multi-select) for what the tree shows/imports.
     btn = _class_menu_button(fs_model)
     quick.addWidget(btn)
-    return quick, btn
+    outer.addLayout(quick)
+
+    # Free-text path box: paste/type any folder and jump straight to it.
+    path_row = QHBoxLayout()
+    path_row.setSpacing(4)
+    pl = QLabel("Path:")
+    pl.setStyleSheet(f"color: {config.FG_MID};")
+    path_row.addWidget(pl)
+    edit = QLineEdit()
+    edit.setClearButtonEnabled(True)
+    edit.setPlaceholderText(
+        r"Paste a folder path (e.g. C:\Users\You\Downloads) and press Enter")
+    go = QPushButton("Go")
+
+    def _jump() -> None:
+        resolved = normalize_pasted_path(edit.text())
+        if resolved:
+            edit.setStyleSheet("")
+            goto_cb(resolved)
+        else:
+            # Flag the entry as unusable without stealing focus/alerting.
+            edit.setStyleSheet("QLineEdit { border: 1px solid #c0392b; }")
+
+    edit.returnPressed.connect(_jump)
+    go.clicked.connect(_jump)
+    path_row.addWidget(edit, 1)
+    path_row.addWidget(go)
+    outer.addLayout(path_row)
+    outer._path_edit = edit          # exposed for callers / tests
+    return outer, btn

@@ -93,6 +93,48 @@ def test_goto_navigates_cold_path(qapp, tmp_path):
     dlg.done(0)
 
 
+def test_normalize_pasted_path_variants(qapp, tmp_path):
+    import os
+    from PySide6.QtCore import QUrl
+    from gallery_py_qt.fs_picker import normalize_pasted_path
+
+    d = tmp_path / "Downloads"
+    d.mkdir()
+    target = os.path.normpath(str(d))
+    # Plain, quoted, trailing separator, and file:// URL all resolve.
+    assert normalize_pasted_path(str(d)) == target
+    assert normalize_pasted_path(f'"{d}"') == target
+    assert normalize_pasted_path(str(d) + os.sep) == target
+    assert normalize_pasted_path(QUrl.fromLocalFile(str(d)).toString()) == target
+    # A pasted *file* resolves to its containing folder.
+    f = d / "pic.jpg"
+    f.write_bytes(b"\x00")
+    assert normalize_pasted_path(str(f)) == target
+    # Junk / nonexistent → "".
+    assert normalize_pasted_path("") == ""
+    assert normalize_pasted_path(str(tmp_path / "nope")) == ""
+
+
+def test_dialog_path_box_navigates(qapp, tmp_path):
+    import os
+    deep = tmp_path / "x" / "y" / "Downloads"
+    deep.mkdir(parents=True)
+    dlg = _FolderPickDlg(recents=[])
+    edit = dlg._path_row._path_edit
+    edit.setText(str(deep))
+    edit.returnPressed.emit()
+    for _ in range(400):
+        qapp.processEvents()
+        time.sleep(0.005)
+        idx = dlg._tree.currentIndex()
+        if idx.isValid() and os.path.normpath(dlg._fs.filePath(idx)) == \
+                os.path.normpath(str(deep)):
+            break
+    idx = dlg._tree.currentIndex()
+    assert os.path.normpath(dlg._fs.filePath(idx)) == os.path.normpath(str(deep))
+    dlg.done(0)
+
+
 def test_video_only_hides_images_in_tree(qapp, tmp_path):
     from PIL import Image
     Image.new("RGB", (16, 16)).save(str(tmp_path / "a.jpg"))
