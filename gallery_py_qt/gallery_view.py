@@ -55,6 +55,8 @@ class _VideoPreviewPool(QWidget):
             # No audio output: previews only pull video frames through the sink,
             # skipping audio-stream decoding and avoiding open audio handles.
             p.setLoops(QMediaPlayer.Loops.Infinite)
+            p.errorOccurred.connect(
+                lambda err, msg="", pl=p: self._on_error(pl, err))
             s = QVideoSink(self)
             p.setVideoSink(s)
             self._created += 1
@@ -65,6 +67,9 @@ class _VideoPreviewPool(QWidget):
 
     def play(self, path: str) -> None:
         if path in self._used:
+            return
+        from .engine import media
+        if media.is_bad_video(path):        # known-unplayable — don't churn
             return
         player, sink = self._acquire()
         sink.videoFrameChanged.connect(
@@ -88,6 +93,18 @@ class _VideoPreviewPool(QWidget):
     def stop_all(self) -> None:
         for path in list(self._used):
             self.stop(path)
+
+    def _on_error(self, player, error) -> None:
+        """A hovered video that won't decode ('moov atom not found', bad codec)
+        is remembered and released so it isn't retried on the next hover."""
+        if error == QMediaPlayer.Error.NoError:
+            return
+        from .engine import media
+        for path, (pl, _sink) in list(self._used.items()):
+            if pl is player:
+                media._mark_bad_video(path)
+                self.stop(path)
+                break
 
     def scrub(self, path: str, frac: float) -> bool:
         """Seek the preview for `path` to frac (0..1) of its duration and pause

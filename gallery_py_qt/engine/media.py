@@ -49,6 +49,40 @@ except ImportError:
 # PIL modes that carry an alpha channel.
 _ALPHA_MODES = {"RGBA", "LA", "PA"}
 
+# Videos that failed to open (truncated / "moov atom not found" / unsupported
+# codec) are remembered so we don't re-open them with cv2 on every hover,
+# thumbnail request or dimension sort — each failed open costs the FFmpeg
+# backend hundreds of ms to seconds and floods stderr.  Keyed by the file's
+# mtime so a file that is later replaced (e.g. a download that finishes) is
+# re-probed rather than staying blacklisted forever.
+_BAD_VIDEOS: dict[str, float] = {}
+_BAD_LOCK = threading.Lock()
+
+
+def _file_mtime(path: str) -> float:
+    try:
+        return os.path.getmtime(path)
+    except OSError:
+        return 0.0
+
+
+def is_bad_video(path: str) -> bool:
+    """True if `path` previously failed to open and hasn't changed since."""
+    with _BAD_LOCK:
+        stamp = _BAD_VIDEOS.get(path)
+    return stamp is not None and stamp == _file_mtime(path)
+
+
+def _mark_bad_video(path: str) -> None:
+    with _BAD_LOCK:
+        _BAD_VIDEOS[path] = _file_mtime(path)
+
+
+def forget_bad_video(path: str) -> None:
+    """Drop `path` from the unreadable-video cache so it is probed afresh."""
+    with _BAD_LOCK:
+        _BAD_VIDEOS.pop(path, None)
+
 
 def is_video(path: str) -> bool:
     return os.path.splitext(path.lower())[1] in config.VIDEO_EXT
@@ -189,16 +223,21 @@ def rotate_image_file(path: str, degrees: int) -> bool:
 
 def peek_size(path: str) -> tuple[int, int]:
     if is_video(path):
-        if not HAS_CV2:
+        if not HAS_CV2 or is_bad_video(path):
             return (0, 0)
         try:
             with _CV2_LOCK:
                 cap = cv2.VideoCapture(path)
+                opened = cap.isOpened()
                 w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
                 h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
                 cap.release()
+            if not opened or (w <= 0 and h <= 0):
+                _mark_bad_video(path)
+                return (0, 0)
             return (w, h)
         except Exception:
+            _mark_bad_video(path)
             return (0, 0)
     try:
         with Image.open(path) as im:
@@ -208,28 +247,36 @@ def peek_size(path: str) -> tuple[int, int]:
 
 
 def peek_duration(path: str) -> float:
-    if not (is_video(path) and HAS_CV2):
+    if not (is_video(path) and HAS_CV2) or is_bad_video(path):
         return 0.0
     try:
         with _CV2_LOCK:
             cap = cv2.VideoCapture(path)
+            opened = cap.isOpened()
             frames = cap.get(cv2.CAP_PROP_FRAME_COUNT)
             fps = cap.get(cv2.CAP_PROP_FPS)
             cap.release()
+        if not opened:
+            _mark_bad_video(path)
+            return 0.0
         return frames / fps if fps > 0 else 0.0
     except Exception:
+        _mark_bad_video(path)
         return 0.0
 
 
 # -- Video keyframe extraction -------------------------------------------------
 
 def _video_frame(path: str, frac: float = 0.1) -> QImage | None:
-    if not HAS_CV2:
+    if not HAS_CV2 or is_bad_video(path):
         return None
     # Serialise cv2 access across loader threads (VideoCapture isn't thread-safe).
     with _CV2_LOCK:
         cap = cv2.VideoCapture(path)
         try:
+            if not cap.isOpened():
+                _mark_bad_video(path)
+                return None
             fps = cap.get(cv2.CAP_PROP_FPS)
             total = max(1, int(cap.get(cv2.CAP_PROP_FRAME_COUNT)))
             if fps and fps > 0:
@@ -242,12 +289,14 @@ def _video_frame(path: str, frac: float = 0.1) -> QImage | None:
                 cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
                 ok, frame = cap.read()
             if not ok:
+                _mark_bad_video(path)
                 return None
             rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
             h, w, _ = rgb.shape
             qim = QImage(rgb.data, w, h, 3 * w, QImage.Format.Format_RGB888)
             return qim.copy()
         except Exception:
+            _mark_bad_video(path)
             return None
         finally:
             cap.release()

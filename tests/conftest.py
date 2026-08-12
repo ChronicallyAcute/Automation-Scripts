@@ -29,7 +29,7 @@ def qapp():
 def isolated(tmp_path, monkeypatch):
     """Redirect every on-disk location + reset in-memory caches per test."""
     from gallery_py_qt import config
-    from gallery_py_qt.engine import favorites, tags, ratings, foldertags
+    from gallery_py_qt.engine import favorites, tags, ratings, foldertags, media
 
     monkeypatch.setattr(config, "FAVORITES_DIR", str(tmp_path / "GalleryFavorites"))
     monkeypatch.setattr(config, "FAVS_FILE", str(tmp_path / "favs.json"))
@@ -54,6 +54,7 @@ def isolated(tmp_path, monkeypatch):
     monkeypatch.setattr(foldertags, "_store", None)
     tags._PENDING.clear()
     tags._retries.clear()
+    media._BAD_VIDEOS.clear()
     yield
     # Drain the shared single-worker mirror pool so background copies/embeds
     # submitted by this test can't bleed into (and slow down) the next one.

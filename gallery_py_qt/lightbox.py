@@ -289,6 +289,7 @@ class Lightbox(QDialog):
         self._player.setVideoOutput(self._video)
         self._player.setLoops(QMediaPlayer.Loops.Infinite)
         self._player.mediaStatusChanged.connect(self._on_media_status)
+        self._player.errorOccurred.connect(self._on_media_error)
         self._player.positionChanged.connect(self._on_pos)
         self._player.durationChanged.connect(self._on_dur)
         self._set_volume_pct(self._vol_slider.value())
@@ -692,6 +693,30 @@ class Lightbox(QDialog):
         if status == QMediaPlayer.MediaStatus.EndOfMedia:
             self._player.setPosition(0)
             self._player.play()
+        elif status == QMediaPlayer.MediaStatus.InvalidMedia:
+            self._fail_video()
+
+    def _on_media_error(self, error, msg: str = "") -> None:
+        """Corrupt / unsupported video ('moov atom not found', bad codec):
+        release the handle so the backend stops retrying, and show a note."""
+        if error == QMediaPlayer.Error.NoError:
+            return
+        self._fail_video()
+
+    def _fail_video(self) -> None:
+        if self._player is None or self._stack.currentIndex() != 1:
+            return
+        path = self._path()
+        if path:
+            media._mark_bad_video(path)
+        self._player.stop()
+        self._player.setSource(QUrl())
+        self._transport.setVisible(False)
+        self._loading_timer.stop()
+        self._loading_lbl.setText(
+            "⚠  This video can't be played\n(file may be truncated or use an "
+            "unsupported codec)")
+        self._loading_lbl.show()
 
     def _seek_relative(self, delta_ms: int) -> None:
         if self._player is None:
