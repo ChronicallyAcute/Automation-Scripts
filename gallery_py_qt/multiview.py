@@ -204,6 +204,7 @@ class _Slot(QWidget):
     pinned     = Signal(int)        # slot index
     reordered  = Signal(str, str)   # (dragged path, drop-target path)
     rotated    = Signal(str, int)   # (path, degrees clockwise) — permanent
+    tagSetChanged = Signal()        # a new tag was coined inline
 
     _SPEEDS = (0.25, 0.5, 1.0, 1.25, 1.5, 1.75, 2.0)
 
@@ -799,6 +800,14 @@ class _Slot(QWidget):
         self._repeat_btn.setToolTip("Apply the most recently used tags")
         self._repeat_btn.clicked.connect(self._apply_recent_tags)
         self._taglay.addWidget(self._repeat_btn)
+        # Inline tag creation: coin a new tag and apply it without a dialog trip.
+        self._new_tag_btn = QToolButton()
+        self._new_tag_btn.setText("＋#")
+        self._new_tag_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._new_tag_btn.setToolTip("Create a new tag and apply it to this file")
+        self._new_tag_btn.setStyleSheet(self._TAG_CSS_OFF % config.OVERLAY_FG)
+        self._new_tag_btn.clicked.connect(self._create_tag_inline)
+        self._taglay.addWidget(self._new_tag_btn)
         for t in tags.get_tags():
             b = QToolButton()
             b.setText(t)
@@ -839,6 +848,25 @@ class _Slot(QWidget):
             return
         if tags.apply_recent(self._path):
             tags.sync_tag_folders(self._path, self._favs.is_fav(self._path))
+            self._refresh_tag_styles()
+
+    def _create_tag_inline(self) -> None:
+        """Prompt for a new tag, add it to the set, and apply it to this file."""
+        from PySide6.QtWidgets import QInputDialog
+        name, ok = QInputDialog.getText(self, "New tag", "Tag name:")
+        if not ok:
+            return
+        name = name.strip()
+        if not name:
+            return
+        created = tags.add_tag(name)          # False if it already existed
+        if self._path and name not in tags.tags_for(self._path):
+            tags.toggle_tag(self._path, name)
+            tags.sync_tag_folders(self._path, self._favs.is_fav(self._path))
+        if created:
+            # New descriptor: rebuild every tile's buttons + the filter menu.
+            self.tagSetChanged.emit()
+        else:
             self._refresh_tag_styles()
 
     # -- source link -----------------------------------------------------------
@@ -1216,6 +1244,7 @@ class MultiView(QWidget):
     openLightbox   = Signal(int)   # row
     closeRequested = Signal()      # user wants to go back to gallery
     barsVisibleChanged = Signal(bool)   # chrome bars shown/hidden (auto-hide)
+    tagSetChanged  = Signal()      # a tile coined a new tag inline
 
     def __init__(self, model, favorites, parent=None):
         super().__init__(parent)
@@ -1621,6 +1650,7 @@ class MultiView(QWidget):
         slot.trashed.connect(self._on_slot_trash)
         slot.reordered.connect(self._on_reorder)
         slot.rotated.connect(self._on_slot_rotate)
+        slot.tagSetChanged.connect(self.tagSetChanged)
         slot.pinned.connect(lambda *_: None)
         slot.set_fill(self._fill_mode)
         slot.set_zoom(self._zoom)

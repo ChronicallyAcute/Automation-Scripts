@@ -192,6 +192,10 @@ class Lightbox(QDialog):
                          lambda _=False, d=deg: self.rotateRequested.emit(d),
                          bar)
             b.setToolTip(f"Rotate {deg}° clockwise (permanent)")
+        self._slide_btn = self._tb("▶", self._toggle_slideshow, bar,
+                                   checkable=True)
+        self._slide_btn.setToolTip(
+            "Slideshow — auto-advance (videos play through first)")
         self._tb(config.ICON_INFO, lambda: self.requestInfo.emit(self._path()), bar)
         self._tb(config.ICON_GRID, lambda: self.openMulti.emit(self._row), bar)
         self._tb("?", self._toggle_help, bar).setToolTip("Keyboard shortcuts (?)")
@@ -274,6 +278,14 @@ class Lightbox(QDialog):
         self._loading_timer.setSingleShot(True)
         self._loading_timer.setInterval(150)
         self._loading_timer.timeout.connect(self._show_loading)
+
+        # Slideshow: auto-advance images/GIFs on a timer; a video is allowed to
+        # play through once and then advances on EndOfMedia.
+        self._slideshow_on = False
+        self._SLIDE_MS = 4000
+        self._slide_timer = QTimer(self)
+        self._slide_timer.setSingleShot(True)
+        self._slide_timer.timeout.connect(self._slide_advance)
 
         self._install_shortcuts()
 
@@ -493,6 +505,7 @@ class Lightbox(QDialog):
                                   self._img_sig,
                                   gen_now=lambda: self._img_gen))
         self._position_overlays()
+        self._slide_kick()
 
     def _on_gif_frame(self, pm: QPixmap, first: bool) -> None:
         # Fit-to-view on the first frame; later frames just swap the pixmap so
@@ -567,6 +580,33 @@ class Lightbox(QDialog):
             return
         if self._model.rowCount():
             self.show_row((self._row + 1) % self._model.rowCount())
+
+    # -- slideshow -------------------------------------------------------------
+    def _toggle_slideshow(self) -> None:
+        self._slideshow_on = self._slide_btn.isChecked()
+        if self._slideshow_on:
+            self._slide_kick()
+        else:
+            self._slide_timer.stop()
+            if self._player is not None:      # restore normal video looping
+                self._player.setLoops(QMediaPlayer.Loops.Infinite)
+
+    def _slide_kick(self) -> None:
+        """Arm the next auto-advance for the item now on screen."""
+        self._slide_timer.stop()
+        if not self._slideshow_on:
+            return
+        path = self._path()
+        if path and media.is_video(path):
+            # Play the video through once, then _on_media_status advances.
+            if self._player is not None:
+                self._player.setLoops(1)
+        else:
+            self._slide_timer.start(self._SLIDE_MS)
+
+    def _slide_advance(self) -> None:
+        if self._slideshow_on and not self._hold.isChecked():
+            self.next()
 
     def _toggle_hold(self) -> None:
         pass
@@ -691,8 +731,11 @@ class Lightbox(QDialog):
 
     def _on_media_status(self, status) -> None:
         if status == QMediaPlayer.MediaStatus.EndOfMedia:
-            self._player.setPosition(0)
-            self._player.play()
+            if self._slideshow_on:
+                self._slide_advance()      # video finished → next item
+            else:
+                self._player.setPosition(0)
+                self._player.play()
         elif status == QMediaPlayer.MediaStatus.InvalidMedia:
             self._fail_video()
 
@@ -717,6 +760,8 @@ class Lightbox(QDialog):
             "⚠  This video can't be played\n(file may be truncated or use an "
             "unsupported codec)")
         self._loading_lbl.show()
+        if self._slideshow_on:              # don't stall the show on a bad file
+            self._slide_timer.start(self._SLIDE_MS)
 
     def _seek_relative(self, delta_ms: int) -> None:
         if self._player is None:
@@ -733,6 +778,7 @@ class Lightbox(QDialog):
         # emits into freed memory.
         self._img_gen += 1
         self._loading_timer.stop()
+        self._slide_timer.stop()
         self._img_pool.clear()
         self._img_pool.waitForDone(3000)
         # Release the heavy resources explicitly.

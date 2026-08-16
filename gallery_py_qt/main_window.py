@@ -1105,6 +1105,14 @@ class MainWindow(QMainWindow):
             note += f"\n{missing} manifest entr(y/ies) had no matching file here."
         QMessageBox.information(self, "Metadata imported", note)
 
+    def _on_tag_set_changed(self) -> None:
+        """A tag coined inline in multi-view: mirror the tag-manager refresh."""
+        self._rebuild_tag_filter_menu()
+        self._tag_menu_btn.setText("Tags ▾")
+        if self._mv is not None:
+            self._mv.rebuild_tag_buttons()
+        self._apply_filter()
+
     def _selected_filter_tags(self) -> set:
         return {t for t, a in self._tag_filter_actions.items() if a.isChecked()}
 
@@ -1618,6 +1626,7 @@ class MainWindow(QMainWindow):
                 lambda r: self._open_lightbox(r, from_mv=True))
             self._mv.closeRequested.connect(self._close_multiview)
             self._mv.barsVisibleChanged.connect(self._on_mv_bars_visible)
+            self._mv.tagSetChanged.connect(self._on_tag_set_changed)
             self._content_stack.addWidget(self._mv)
         # Kick off dims computation so orientation lists are accurate.
         self._ensure_dims()
