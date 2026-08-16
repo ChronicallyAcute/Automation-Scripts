@@ -449,13 +449,20 @@ def test_sort_by_size(qapp, tmp_path):
 
 
 def test_sort_by_dimensions(qapp, tmp_path):
+    import time
     root = _album_with_subs(tmp_path)
     dlg = AlbumTagsDialog([])
     dlg._sort_combo.setCurrentIndex(dlg._sort_combo.findData("dimensions"))
     dlg._show_contents(root)
-    files = [dlg._contents_model.item(r).text()
-             for r in range(dlg._contents_model.rowCount())
-             if not dlg._contents_model.item(r).text().endswith("/")]
+    # Dimensions are computed off-thread, then the pane re-renders — wait for it.
+    for _ in range(200):
+        qapp.processEvents()
+        time.sleep(0.005)
+        files = [dlg._contents_model.item(r).text()
+                 for r in range(dlg._contents_model.rowCount())
+                 if not dlg._contents_model.item(r).text().endswith("/")]
+        if files == ["big.gif", "wide.jpg", "small.png"]:
+            break
     assert files == ["big.gif", "wide.jpg", "small.png"]   # 900, 400, 100
     dlg.done(0)
 

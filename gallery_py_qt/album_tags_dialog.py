@@ -15,7 +15,8 @@ lacks the tag, otherwise remove from all).  Each tagged album is mirrored into
 from __future__ import annotations
 import os
 
-from PySide6.QtCore import Qt, QModelIndex, QSize
+from PySide6.QtCore import (Qt, QModelIndex, QSize, QObject, QRunnable,
+                            QThreadPool, Signal)
 from PySide6.QtGui import (QIcon, QPixmap, QStandardItem, QStandardItemModel,
                            QKeySequence, QShortcut)
 from PySide6.QtWidgets import (QDialog, QVBoxLayout, QHBoxLayout, QLabel,
@@ -38,6 +39,36 @@ _MAX_TILES = 300
 _CONFIRM_ABOVE = 10
 
 
+class _DimsSignals(QObject):
+    done = Signal(int, str, dict)      # generation, folder, {path: (w, h)}
+
+
+class _DimsJob(QRunnable):
+    """Compute (w, h) for every file off the GUI thread.
+
+    Sorting the contents pane by dimensions needs the size of every media file,
+    and probing a video costs an OpenCV open — doing that synchronously froze
+    the dialog on video-heavy folders.  Results are stamped with a generation
+    and folder so a stale batch from a folder the user already left is dropped.
+    """
+    def __init__(self, gen: int, folder: str, paths: "list[str]",
+                 signals: "_DimsSignals"):
+        super().__init__()
+        self._gen = gen
+        self._folder = folder
+        self._paths = list(paths)
+        self._signals = signals
+
+    def run(self) -> None:
+        out: "dict[str, tuple[int, int]]" = {}
+        for p in self._paths:
+            try:
+                out[p] = media.peek_size(p)
+            except Exception:
+                out[p] = (0, 0)
+        self._signals.done.emit(self._gen, self._folder, out)
+
+
 class AlbumTagsDialog(QDialog):
     def __init__(self, folders: "list[str]", parent=None, loader=None):
         super().__init__(parent)
@@ -51,6 +82,14 @@ class AlbumTagsDialog(QDialog):
         self._pending_goto = ""
         self._tiles: "dict[str, QStandardItem]" = {}
         self._cut_paths: "list[str]" = []      # Cut clipboard (move on Paste)
+        # Dimension-sort support: cache (w, h) per file and compute misses off
+        # the GUI thread so a video-heavy folder doesn't freeze the dialog.
+        self._dims_cache: "dict[str, tuple[int, int]]" = {}
+        self._dims_gen = 0
+        self._dims_pool = QThreadPool(self)
+        self._dims_pool.setMaxThreadCount(1)
+        self._dims_sig = _DimsSignals(self)
+        self._dims_sig.done.connect(self._on_dims_ready)
 
         root = QVBoxLayout(self)
 
@@ -445,13 +484,12 @@ class AlbumTagsDialog(QDialog):
         except OSError:
             return 0
 
-    @staticmethod
-    def _safe_area(path: str) -> int:
-        try:
-            w, h = media.peek_size(path)
-            return int(w) * int(h)
-        except Exception:
+    def _safe_area(self, path: str) -> int:
+        """Pixel area from the dimension cache (0 until the worker fills it in)."""
+        wh = self._dims_cache.get(path)
+        if not wh:
             return 0
+        return int(wh[0]) * int(wh[1])
 
     def _show_contents(self, folder: str) -> None:
         if not folder or folder == self._browsing:
@@ -463,9 +501,17 @@ class AlbumTagsDialog(QDialog):
 
         subs = self._subfolders(folder)
         try:
-            files = self._sorted_files(scan.scan_media(folder).paths)
+            all_files = scan.scan_media(folder).paths
         except Exception:
-            files = []
+            all_files = []
+        # Dimension sort needs every file's size; if any are still unknown,
+        # show a name-sorted view now and re-sort when the worker reports back.
+        if (self._sort_key() == "dimensions"
+                and any(p not in self._dims_cache for p in all_files)):
+            files = sorted(all_files, key=lambda p: os.path.basename(p).lower())
+            self._kick_dims(folder, all_files)
+        else:
+            files = self._sorted_files(all_files)
         shown = files[:_MAX_TILES]
         extra = (f"  ·  more than {_MAX_TILES} files shown"
                  if len(files) > len(shown) else "")
@@ -497,6 +543,26 @@ class AlbumTagsDialog(QDialog):
                 item.setIcon(QIcon(pm))
             elif self._loader is not None:
                 self._loader.request(p, _TILE_PX)
+
+    def _kick_dims(self, folder: str, paths: "list[str]") -> None:
+        """Compute the still-unknown dimensions for `folder` off the GUI thread."""
+        todo = [p for p in paths if p not in self._dims_cache]
+        if not todo:
+            return
+        self._dims_gen += 1
+        self._dims_pool.start(
+            _DimsJob(self._dims_gen, folder, todo, self._dims_sig))
+
+    def _on_dims_ready(self, gen: int, folder: str, dims: dict) -> None:
+        # Ignore a batch the user has already navigated away from.
+        if gen != self._dims_gen or folder != self._browsing:
+            self._dims_cache.update(dims)      # still worth caching for later
+            return
+        self._dims_cache.update(dims)
+        if self._sort_key() == "dimensions":
+            # Force a re-render past _show_contents' same-folder guard.
+            self._browsing = ""
+            self._show_contents(folder)
 
     def _on_contents_activated(self, index) -> None:
         """Double-clicking a subfolder tile browses into it."""
@@ -660,6 +726,10 @@ class AlbumTagsDialog(QDialog):
         # dialog ever opened, and each holds a model of up to _MAX_TILES icons.
         self._hover.hide()
         self._release_loader()
+        # Drain in-flight dimension probes so no worker emits into a dead dialog.
+        self._dims_gen += 1
+        self._dims_pool.clear()
+        self._dims_pool.waitForDone(3000)
         self._tiles.clear()
         self._contents_model.clear()
         super().done(result)

@@ -470,6 +470,12 @@ class _Slot(QWidget):
         vl.addWidget(self._vol_label)
         self._vol_popup.setFixedSize(32, 96)
         self._vol_popup.hide()
+        # Auto-dismiss the volume slider a moment after the last adjustment, so
+        # it doesn't linger over the media once the level has been set.
+        self._vol_hide_timer = QTimer(self)
+        self._vol_hide_timer.setSingleShot(True)
+        self._vol_hide_timer.setInterval(1400)
+        self._vol_hide_timer.timeout.connect(self._vol_popup.hide)
 
     # -- event handling --------------------------------------------------------
     def resizeEvent(self, e):
@@ -664,6 +670,29 @@ class _Slot(QWidget):
         if self._is_video:
             self._fit_video()
         self._position_overlays()
+        self._sync_tile_zoom_btns()
+
+    # -- per-tile zoom (independent of the multi-view-wide ±) -------------------
+    _TILE_ZOOM_STEP = 0.10
+    _TILE_ZOOM_MIN  = 0.50
+    _TILE_ZOOM_MAX  = 2.00
+
+    def _tile_zoom(self, delta: float) -> None:
+        """Resize just THIS tile's media in 10% steps.
+
+        Independent of MultiView's global ±; note that using the global control
+        afterwards re-applies its value to every tile, overriding this.
+        """
+        z = round(self._zoom + delta, 2)
+        z = round(max(self._TILE_ZOOM_MIN, min(self._TILE_ZOOM_MAX, z)), 2)
+        self.set_zoom(z)
+
+    def _sync_tile_zoom_btns(self) -> None:
+        out = getattr(self, "_tile_zoom_out_btn", None)
+        if out is None:
+            return
+        out.setEnabled(self._zoom > self._TILE_ZOOM_MIN + 1e-9)
+        self._tile_zoom_in_btn.setEnabled(self._zoom < self._TILE_ZOOM_MAX - 1e-9)
 
     _PAN_STEP = 0.12                    # fraction of the overflow nudged per click
 
@@ -779,7 +808,31 @@ class _Slot(QWidget):
             self._taglay.addWidget(b)
             self._tag_btns[t] = b
         self._taglay.addStretch(1)
+        # Far-right: per-tile resize (±10%), sized like the tag chips.
+        self._tile_zoom_out_btn = self._mk_tile_zoom("−", -self._TILE_ZOOM_STEP,
+                                                     "Shrink this media 10%")
+        self._tile_zoom_in_btn = self._mk_tile_zoom("+", self._TILE_ZOOM_STEP,
+                                                    "Grow this media 10%")
+        self._taglay.addWidget(self._tile_zoom_out_btn)
+        self._taglay.addWidget(self._tile_zoom_in_btn)
         self._refresh_tag_styles()
+        self._sync_tile_zoom_btns()
+
+    _TILE_ZOOM_CSS = (
+        "QToolButton { color: %s; background: transparent;"
+        " border: 1px solid transparent; border-radius: 2px;"
+        " font-size: 11px; font-weight: bold; padding: 0 4px; }"
+        " QToolButton:hover { background: rgba(0,0,0,90); }"
+        " QToolButton:disabled { color: %s; }")
+
+    def _mk_tile_zoom(self, glyph: str, delta: float, tip: str) -> QToolButton:
+        b = QToolButton()
+        b.setText(glyph)
+        b.setCursor(Qt.CursorShape.PointingHandCursor)
+        b.setToolTip(tip)
+        b.setStyleSheet(self._TILE_ZOOM_CSS % (config.OVERLAY_FG, config.FG_DIM))
+        b.clicked.connect(lambda _=False, d=delta: self._tile_zoom(d))
+        return b
 
     def _apply_recent_tags(self) -> None:
         if not self._path:
@@ -1076,6 +1129,10 @@ class _Slot(QWidget):
             val / 100.0,
             QtAudio.VolumeScale.LogarithmicVolumeScale,
             QtAudio.VolumeScale.LinearVolumeScale))
+        # Each adjustment (re)arms the auto-hide; dragging keeps it open, and it
+        # slides away shortly after the user stops changing the level.
+        if not self._muted:
+            self._vol_hide_timer.start()
 
     def _show_vol_popup(self) -> None:
         btn_pos = self._mute_btn.mapTo(self, self._mute_btn.rect().topLeft())

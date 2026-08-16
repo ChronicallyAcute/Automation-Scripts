@@ -349,6 +349,24 @@ def apply_tag_to_paths(paths: "list[str]", tag: str, add: bool = True
     return changed
 
 
+def set_tags_for(path: str, taglist: "list[str]") -> "list[str]":
+    """Replace `path`'s entire tag list (deduped, order-preserving).
+
+    Used by metadata import to restore a saved tag set wholesale.  Saves the
+    store and dispatches a best-effort embed off the GUI thread.  Returns the
+    stored list (empty removes the entry).
+    """
+    clean = list(dict.fromkeys(t for t in taglist if t and t.strip()))
+    store = _load()
+    if clean:
+        store[path] = list(clean)
+    else:
+        store.pop(path, None)
+    _save()
+    _MIRROR_POOL.submit(_embed_tags, path, list(clean))
+    return clean
+
+
 def toggle_tag(path: str, tag: str) -> bool:
     """Add/remove `tag` on `path`; returns True if the tag is now present."""
     global _recent

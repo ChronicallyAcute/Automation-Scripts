@@ -992,6 +992,10 @@ class MainWindow(QMainWindow):
         self._tag_menu.addSeparator()
         self._tag_menu.addAction("Manage tags…").triggered.connect(
             self._open_tag_manager)
+        self._tag_menu.addAction("Export tags & ratings…").triggered.connect(
+            self._export_metadata)
+        self._tag_menu.addAction("Import tags & ratings…").triggered.connect(
+            self._import_metadata)
 
     def _open_settings(self) -> None:
         from .settings_dialog import SettingsDialog
@@ -1043,6 +1047,63 @@ class MainWindow(QMainWindow):
             if self._mv is not None:
                 self._mv.rebuild_tag_buttons()
             self._apply_filter()
+
+    def _export_metadata(self) -> None:
+        """Write tags + ratings for a chosen library root to a portable JSON."""
+        from PySide6.QtWidgets import QFileDialog, QMessageBox
+        from .engine import sidecar
+        start = self._current_folder or QDir.homePath()
+        root = QFileDialog.getExistingDirectory(
+            self, "Choose the library folder to export metadata for", start)
+        if not root:
+            return
+        default = os.path.join(
+            root, f"{os.path.basename(os.path.normpath(root)) or 'gallery'}"
+                  "-metadata.json")
+        dest, _ = QFileDialog.getSaveFileName(
+            self, "Save metadata sidecar", default, "JSON (*.json)")
+        if not dest:
+            return
+        try:
+            n = sidecar.export_metadata(root, dest)
+        except OSError as exc:
+            QMessageBox.warning(self, "Export failed", str(exc))
+            return
+        QMessageBox.information(
+            self, "Metadata exported",
+            f"Wrote tags & ratings for {n} file(s) to:\n{dest}")
+
+    def _import_metadata(self) -> None:
+        """Re-attach a saved sidecar's tags + ratings to files under a root."""
+        from PySide6.QtWidgets import QFileDialog, QMessageBox
+        from .engine import sidecar
+        src, _ = QFileDialog.getOpenFileName(
+            self, "Choose a metadata sidecar to import",
+            self._current_folder or QDir.homePath(), "JSON (*.json)")
+        if not src:
+            return
+        start = self._current_folder or os.path.dirname(src)
+        root = QFileDialog.getExistingDirectory(
+            self, "Choose the library folder these files now live in", start)
+        if not root:
+            return
+        # Merge is the safe default: overwrite only when the user opts in.
+        overwrite = QMessageBox.question(
+            self, "Overwrite existing?",
+            "Replace tags/ratings already on matching files?\n\n"
+            "Yes = overwrite,  No = merge (keep what's there and add).",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No) == QMessageBox.StandardButton.Yes
+        try:
+            updated, missing = sidecar.import_metadata(root, src, overwrite)
+        except (OSError, ValueError) as exc:
+            QMessageBox.warning(self, "Import failed", str(exc))
+            return
+        self._apply_filter()          # reflect restored tags/ratings in the grid
+        note = f"Updated {updated} file(s)."
+        if missing:
+            note += f"\n{missing} manifest entr(y/ies) had no matching file here."
+        QMessageBox.information(self, "Metadata imported", note)
 
     def _selected_filter_tags(self) -> set:
         return {t for t, a in self._tag_filter_actions.items() if a.isChecked()}
