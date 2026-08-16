@@ -699,6 +699,10 @@ class MainWindow(QMainWindow):
 
         QShortcut(QKeySequence(Qt.Key.Key_F11), self, activated=self._toggle_fs)
         QShortcut(QKeySequence("Ctrl+O"), self, activated=self._pick_folders)
+        # Undo the last delete — the toast auto-hides after a few seconds, but
+        # the stack keeps every batch, so Ctrl+Z still walks back through them.
+        QShortcut(QKeySequence.StandardKey.Undo, self,
+                  activated=self._undo_trash)
         QShortcut(QKeySequence(Qt.Key.Key_Space), self,
                   activated=self._toggle_autoscroll)
         QShortcut(QKeySequence(Qt.Key.Key_H), self, activated=self._toggle_bar)
@@ -1520,6 +1524,7 @@ class MainWindow(QMainWindow):
     def _undo_trash(self) -> None:
         self._undo_bar.hide()
         if not self._trash_stack:
+            self._status.setText("Nothing left to undo")
             return
         batch = self._trash_stack.pop()
         restored = 0
@@ -1531,6 +1536,8 @@ class MainWindow(QMainWindow):
             self._status.setText(f"Restored {os.path.basename(batch[0][0])}")
         elif restored:
             self._status.setText(f"Restored {restored} items")
+        else:
+            self._status.setText("Couldn't restore — files are no longer in the trash")
 
     # -- trash management ------------------------------------------------------
     def _open_trash(self) -> None:

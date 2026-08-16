@@ -82,6 +82,8 @@ class AlbumTagsDialog(QDialog):
         self._pending_goto = ""
         self._tiles: "dict[str, QStandardItem]" = {}
         self._cut_paths: "list[str]" = []      # Cut clipboard (move on Paste)
+        # Undo history for this dialog's file operations: [(kind, [(src, new)])]
+        self._undo_stack: "list[tuple[str, list[tuple[str, str]]]]" = []
         # Dimension-sort support: cache (w, h) per file and compute misses off
         # the GUI thread so a video-heavy folder doesn't freeze the dialog.
         self._dims_cache: "dict[str, tuple[int, int]]" = {}
@@ -130,6 +132,9 @@ class AlbumTagsDialog(QDialog):
                   activated=self._cut_selected)
         QShortcut(QKeySequence("Ctrl+V"), self._tree, context=_ctx,
                   activated=self._paste_here)
+        # Undo applies to the whole dialog, not just the tree.
+        QShortcut(QKeySequence.StandardKey.Undo, self,
+                  activated=self._undo_last)
 
         self._hover = HoverPreview(self, self._tree, self._fs, loader)
         quick, self._type_btn = quick_access_row(self._fs, self._goto)
@@ -339,6 +344,9 @@ class AlbumTagsDialog(QDialog):
         if sel:
             menu.addSeparator()
             menu.addAction(f"Delete  ({len(sel)})", self._delete_prompt)
+        menu.addSeparator()
+        undo = menu.addAction("Undo last change\tCtrl+Z", self._undo_last)
+        undo.setEnabled(bool(self._undo_stack))
         menu.exec(self._tree.viewport().mapToGlobal(pos))
 
     # -- prompts (menu / shortcut entry points) --------------------------------
@@ -390,6 +398,8 @@ class AlbumTagsDialog(QDialog):
         foldertags.relocate_folder(path, new)     # no-op if untagged
         if self._browsing == path:
             self._browsing = new
+        # A rename is a move within one folder, so it reverses the same way.
+        self._undo_stack.append(("rename", [(path, new)]))
         self._after_fs_change([])
         return True
 
@@ -399,6 +409,8 @@ class AlbumTagsDialog(QDialog):
         deleted, errors = fileops.delete_paths(paths)
         for src, _trash in deleted:
             self._fs.discard(src)
+        if deleted:
+            self._undo_stack.append(("delete", list(deleted)))
         self._after_fs_change(errors)
 
     def _do_move(self, paths: "list[str]", dest_dir: str) -> None:
@@ -406,7 +418,33 @@ class AlbumTagsDialog(QDialog):
         for src, new in moved:
             self._rekey_checked(src, new)
             foldertags.relocate_folder(src, new)  # no-op if untagged
+        if moved:
+            self._undo_stack.append(("move", list(moved)))
         self._after_fs_change(errors)
+
+    # -- undo (file operations in this dialog) ---------------------------------
+    def _undo_last(self) -> None:
+        """Reverse the most recent move / delete / rename made here (Ctrl+Z)."""
+        if not self._undo_stack:
+            QMessageBox.information(self, "Undo", "Nothing left to undo.")
+            return
+        kind, pairs = self._undo_stack.pop()
+        if kind == "delete":
+            restored, errors = fileops.undo_delete(pairs)
+        else:                                     # "move" and "rename" alike
+            restored, errors = fileops.undo_move(pairs)
+        # Re-key ticks back to the original paths.
+        for src, new in pairs:
+            self._rekey_checked(new, src)
+            foldertags.relocate_folder(new, src)  # no-op if untagged
+            if self._browsing == new:
+                self._browsing = src
+        if errors:
+            QMessageBox.warning(
+                self, "Undo",
+                f"Restored {restored} item(s); {len(errors)} could not be undone:\n"
+                + "\n".join(f"• {os.path.basename(p)}: {m}" for p, m in errors[:6]))
+        self._after_fs_change([])
 
     def _do_new_folder(self, parent: str, name: str) -> "str | None":
         new, err = fileops.make_folder(parent, name)

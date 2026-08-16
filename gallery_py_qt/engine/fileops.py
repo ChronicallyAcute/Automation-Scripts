@@ -105,6 +105,42 @@ def delete_paths(paths: "list[str]"
     return deleted, errors
 
 
+def undo_move(pairs: "list[tuple[str, str]]") -> "tuple[int, list[tuple[str, str]]]":
+    """Reverse a move batch: send each (src, new) back from `new` to `src`.
+
+    Only moves an item whose original location is still free, so an undo can
+    never clobber a file created there since.  Returns (restored, errors).
+    """
+    restored = 0
+    errors: "list[tuple[str, str]]" = []
+    for src, new in pairs:
+        try:
+            if not os.path.exists(new):
+                errors.append((new, "no longer exists"))
+                continue
+            if os.path.exists(src):
+                errors.append((src, "something is already back at the original name"))
+                continue
+            os.makedirs(os.path.dirname(src), exist_ok=True)
+            shutil.move(new, src)
+            restored += 1
+        except OSError as exc:
+            errors.append((new, str(exc)))
+    return restored, errors
+
+
+def undo_delete(pairs: "list[tuple[str, str]]") -> "tuple[int, list[tuple[str, str]]]":
+    """Restore a delete batch of (src, trash_path) from the trash."""
+    restored = 0
+    errors: "list[tuple[str, str]]" = []
+    for src, trash in pairs:
+        if favorites.restore_file(src, trash):
+            restored += 1
+        else:
+            errors.append((src, "couldn't restore from trash"))
+    return restored, errors
+
+
 def make_folder(parent: str, name: str) -> "tuple[str | None, str | None]":
     """Create a new subfolder. Returns (path, None) or (None, message)."""
     name = (name or "").strip()

@@ -13,12 +13,13 @@ from __future__ import annotations
 import os
 
 from PySide6.QtCore import (Qt, QUrl, Signal, QTimer, QObject, QRunnable,
-                            QThreadPool, QEvent)
-from PySide6.QtGui import QPixmap, QImage, QKeySequence, QShortcut
+                            QThreadPool, QEvent, QSize)
+from PySide6.QtGui import (QPixmap, QImage, QKeySequence, QShortcut,
+                           QStandardItem, QStandardItemModel)
 from PySide6.QtWidgets import (QDialog, QGraphicsView, QGraphicsScene,
                                QGraphicsPixmapItem, QVBoxLayout, QHBoxLayout,
                                QToolButton, QLabel, QStackedWidget, QWidget,
-                               QSlider)
+                               QSlider, QListView, QAbstractItemView)
 from PySide6.QtMultimedia import QMediaPlayer, QAudioOutput, QtAudio
 from PySide6.QtMultimediaWidgets import QVideoWidget
 
@@ -63,6 +64,28 @@ class _FullImageJob(QRunnable):
             qim = None
         self._signals.ready.emit(self._gen, self._path,
                                  qim if qim is not None else QImage())
+
+
+class _StripSignals(QObject):
+    ready = Signal(str, QImage)        # (path, thumbnail)
+
+
+class _StripThumbJob(QRunnable):
+    """Decode one filmstrip thumbnail off the GUI thread (disk-cache backed)."""
+    def __init__(self, path: str, px: int, signals: "_StripSignals"):
+        super().__init__()
+        self._path = path
+        self._px = px
+        self._signals = signals
+
+    def run(self) -> None:
+        from .engine import cache
+        try:
+            qim = cache.get_thumbnail(self._path, self._px)
+        except Exception:
+            qim = None
+        if qim is not None and not qim.isNull():
+            self._signals.ready.emit(self._path, qim)
 
 
 class _ImageView(QGraphicsView):
@@ -150,6 +173,43 @@ class Lightbox(QDialog):
         self._stack.addWidget(self._video_panel)
         root.addWidget(self._stack, 1)
 
+        # Filmstrip: a horizontal thumbnail rail docked under the media, so the
+        # set can be scanned and jumped through without leaving the viewer.
+        # Hidden by default (it costs vertical room); toggled from the top bar.
+        self._STRIP_PX = 76
+        self._strip_model = QStandardItemModel(self)
+        self._strip = QListView()
+        self._strip.setModel(self._strip_model)
+        self._strip.setViewMode(QListView.ViewMode.IconMode)
+        self._strip.setFlow(QListView.Flow.LeftToRight)
+        self._strip.setWrapping(False)
+        self._strip.setMovement(QListView.Movement.Static)
+        self._strip.setResizeMode(QListView.ResizeMode.Adjust)
+        self._strip.setIconSize(QSize(self._STRIP_PX, self._STRIP_PX))
+        self._strip.setFixedHeight(self._STRIP_PX + 26)
+        self._strip.setUniformItemSizes(True)
+        self._strip.setHorizontalScrollMode(
+            QAbstractItemView.ScrollMode.ScrollPerPixel)
+        self._strip.setVerticalScrollBarPolicy(
+            Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self._strip.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        self._strip.setSelectionMode(
+            QAbstractItemView.SelectionMode.SingleSelection)
+        self._strip.setStyleSheet(
+            "QListView { background: #0a0a0a; border: none; color: %s; }"
+            "QListView::item:selected { background: rgba(255,255,255,40);"
+            " border: 1px solid %s; }" % (config.FG_MID, config.ACCENT))
+        self._strip.clicked.connect(self._on_strip_clicked)
+        self._strip.hide()
+        root.addWidget(self._strip)
+
+        self._strip_items: "dict[str, QStandardItem]" = {}
+        self._strip_built_for = -1          # model row-count the strip was built for
+        self._strip_pool = QThreadPool(self)
+        self._strip_pool.setMaxThreadCount(2)
+        self._strip_sig = _StripSignals(self)
+        self._strip_sig.ready.connect(self._on_strip_thumb)
+
         # Floating action bar — overlays the top edge of the media.
         self._bar_widget = QWidget(self)
         self._bar_widget.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
@@ -195,7 +255,14 @@ class Lightbox(QDialog):
         self._slide_btn = self._tb("▶", self._toggle_slideshow, bar,
                                    checkable=True)
         self._slide_btn.setToolTip(
-            "Slideshow — auto-advance (videos play through first)")
+            "Slideshow — auto-advance (videos play through first)\n"
+            "Right-click to set the interval")
+        self._slide_btn.setContextMenuPolicy(
+            Qt.ContextMenuPolicy.CustomContextMenu)
+        self._slide_btn.customContextMenuRequested.connect(
+            self._slide_interval_menu)
+        self._strip_btn = self._tb("▤", self._toggle_strip, bar, checkable=True)
+        self._strip_btn.setToolTip("Filmstrip — thumbnails of the whole set (T)")
         self._tb(config.ICON_INFO, lambda: self.requestInfo.emit(self._path()), bar)
         self._tb(config.ICON_GRID, lambda: self.openMulti.emit(self._row), bar)
         self._tb("?", self._toggle_help, bar).setToolTip("Keyboard shortcuts (?)")
@@ -280,9 +347,10 @@ class Lightbox(QDialog):
         self._loading_timer.timeout.connect(self._show_loading)
 
         # Slideshow: auto-advance images/GIFs on a timer; a video is allowed to
-        # play through once and then advances on EndOfMedia.
+        # play through once and then advances on EndOfMedia.  The per-image
+        # interval is user-configurable (right-click the ▶ button) and persisted.
         self._slideshow_on = False
-        self._SLIDE_MS = 4000
+        self._slide_ms = self._load_slide_ms()
         self._slide_timer = QTimer(self)
         self._slide_timer.setSingleShot(True)
         self._slide_timer.timeout.connect(self._slide_advance)
@@ -419,6 +487,7 @@ class Lightbox(QDialog):
             (QKeySequence(Qt.Key.Key_F1),     self._toggle_help),
             (QKeySequence(Qt.Key.Key_Left),   self.prev),
             (QKeySequence(Qt.Key.Key_Right),  self.next),
+            (QKeySequence(Qt.Key.Key_T),      self._kb_toggle_strip),
             (QKeySequence(Qt.Key.Key_Plus),   lambda: self._img.zoom_by(1.25)),
             (QKeySequence(Qt.Key.Key_Equal),  lambda: self._img.zoom_by(1.25)),
             (QKeySequence(Qt.Key.Key_Minus),  lambda: self._img.zoom_by(0.8)),
@@ -506,6 +575,7 @@ class Lightbox(QDialog):
                                   gen_now=lambda: self._img_gen))
         self._position_overlays()
         self._slide_kick()
+        self._sync_strip()
 
     def _on_gif_frame(self, pm: QPixmap, first: bool) -> None:
         # Fit-to-view on the first frame; later frames just swap the pixmap so
@@ -581,6 +651,71 @@ class Lightbox(QDialog):
         if self._model.rowCount():
             self.show_row((self._row + 1) % self._model.rowCount())
 
+    # -- filmstrip -------------------------------------------------------------
+    def _kb_toggle_strip(self) -> None:
+        """Keyboard path: setChecked doesn't emit clicked, so drive it by hand."""
+        self._strip_btn.setChecked(not self._strip_btn.isChecked())
+        self._toggle_strip()
+
+    def _toggle_strip(self) -> None:
+        on = self._strip_btn.isChecked()
+        self._strip.setVisible(on)
+        if on:
+            self._build_strip()
+            self._sync_strip()
+        self._position_overlays()
+
+    def _build_strip(self) -> None:
+        """(Re)populate the rail — cheap placeholders now, thumbs off-thread."""
+        total = self._model.rowCount()
+        if self._strip_built_for == total and self._strip_model.rowCount():
+            return
+        self._strip_built_for = total
+        self._strip_model.clear()
+        self._strip_items.clear()
+        for row in range(total):
+            path = self._model.path_at(row)
+            if not path:
+                continue
+            item = QStandardItem(os.path.basename(path)[:14])
+            item.setEditable(False)
+            item.setToolTip(path)
+            item.setData(row, Qt.ItemDataRole.UserRole)
+            item.setTextAlignment(Qt.AlignmentFlag.AlignHCenter)
+            self._strip_model.appendRow(item)
+            self._strip_items[path] = item
+
+    def _sync_strip(self) -> None:
+        """Highlight + scroll to the current item and fetch nearby thumbnails."""
+        if self._strip.isHidden() or not self._strip_model.rowCount():
+            return
+        idx = self._strip_model.index(self._row, 0)
+        if idx.isValid():
+            self._strip.setCurrentIndex(idx)
+            self._strip.scrollTo(
+                idx, QAbstractItemView.ScrollHint.PositionAtCenter)
+        # Only decode a window around the current item: a 50k-item set must not
+        # queue 50k decodes just because the rail became visible.
+        lo = max(0, self._row - 12)
+        hi = min(self._model.rowCount(), self._row + 13)
+        for row in range(lo, hi):
+            path = self._model.path_at(row)
+            item = self._strip_items.get(path or "")
+            if item is None or not item.icon().isNull():
+                continue
+            self._strip_pool.start(
+                _StripThumbJob(path, self._STRIP_PX, self._strip_sig))
+
+    def _on_strip_thumb(self, path: str, qim: QImage) -> None:
+        item = self._strip_items.get(path)
+        if item is not None and not qim.isNull():
+            item.setIcon(QPixmap.fromImage(qim))
+
+    def _on_strip_clicked(self, index) -> None:
+        row = index.data(Qt.ItemDataRole.UserRole)
+        if isinstance(row, int) and row != self._row:
+            self.show_row(row)
+
     # -- slideshow -------------------------------------------------------------
     def _toggle_slideshow(self) -> None:
         self._slideshow_on = self._slide_btn.isChecked()
@@ -602,11 +737,49 @@ class Lightbox(QDialog):
             if self._player is not None:
                 self._player.setLoops(1)
         else:
-            self._slide_timer.start(self._SLIDE_MS)
+            self._slide_timer.start(self._slide_ms)
 
     def _slide_advance(self) -> None:
         if self._slideshow_on and not self._hold.isChecked():
             self.next()
+
+    # Presets offered on right-click, in seconds.
+    _SLIDE_PRESETS = (2, 3, 4, 5, 8, 10, 15, 30, 60)
+    _SLIDE_MIN_MS = 1000
+    _SLIDE_MAX_MS = 600_000
+
+    @staticmethod
+    def _load_slide_ms() -> int:
+        from .engine import prefs
+        try:
+            ms = int(prefs.load_prefs().get("slideshow_ms", 4000))
+        except (TypeError, ValueError):
+            ms = 4000
+        return max(Lightbox._SLIDE_MIN_MS, min(Lightbox._SLIDE_MAX_MS, ms))
+
+    def _set_slide_ms(self, ms: int) -> None:
+        self._slide_ms = max(self._SLIDE_MIN_MS, min(self._SLIDE_MAX_MS, int(ms)))
+        from .engine import prefs
+        p = prefs.load_prefs()
+        p["slideshow_ms"] = self._slide_ms
+        prefs.save_prefs(p)
+        # If a show is running on an image, re-arm at the new cadence.
+        if self._slideshow_on:
+            path = self._path()
+            if not (path and media.is_video(path)):
+                self._slide_timer.start(self._slide_ms)
+
+    def _slide_interval_menu(self, pos) -> None:
+        from PySide6.QtWidgets import QMenu
+        menu = QMenu(self)
+        cur = self._slide_ms
+        for secs in self._SLIDE_PRESETS:
+            act = menu.addAction(f"{secs} seconds")
+            act.setCheckable(True)
+            act.setChecked(abs(secs * 1000 - cur) < 1)
+            act.triggered.connect(
+                lambda _=False, s=secs: self._set_slide_ms(s * 1000))
+        menu.exec(self._slide_btn.mapToGlobal(pos))
 
     def _toggle_hold(self) -> None:
         pass
@@ -761,7 +934,7 @@ class Lightbox(QDialog):
             "unsupported codec)")
         self._loading_lbl.show()
         if self._slideshow_on:              # don't stall the show on a bad file
-            self._slide_timer.start(self._SLIDE_MS)
+            self._slide_timer.start(self._slide_ms)
 
     def _seek_relative(self, delta_ms: int) -> None:
         if self._player is None:
@@ -781,6 +954,8 @@ class Lightbox(QDialog):
         self._slide_timer.stop()
         self._img_pool.clear()
         self._img_pool.waitForDone(3000)
+        self._strip_pool.clear()
+        self._strip_pool.waitForDone(3000)
         # Release the heavy resources explicitly.
         self._gif.stop()
         if self._player is not None:
