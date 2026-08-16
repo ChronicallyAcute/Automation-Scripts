@@ -633,6 +633,17 @@ class MainWindow(QMainWindow):
         self._search.textChanged.connect(lambda _: self._search_timer.start(200))
         h.addWidget(self._search)
 
+        # Saved searches: capture the whole filter bar under a name and recall
+        # it in one click.  Rebuilt on open so it tracks saves/deletes.
+        self._smart_btn = self._btn("Saved ▾", None)
+        self._smart_btn.setToolTip(
+            "Saved searches — store the current filters under a name")
+        self._smart_menu = QMenu(self._smart_btn)
+        self._smart_menu.aboutToShow.connect(self._build_smart_menu)
+        self._smart_btn.setMenu(self._smart_menu)
+        self._smart_btn.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
+        h.addWidget(self._smart_btn)
+
         h.addWidget(self._sep())
         h.addWidget(self._btn(f"{config.ICON_GRID} Multi-view",
                               lambda: self._open_multiview(0)))
@@ -1108,6 +1119,82 @@ class MainWindow(QMainWindow):
         if missing:
             note += f"\n{missing} manifest entr(y/ies) had no matching file here."
         QMessageBox.information(self, "Metadata imported", note)
+
+    # -- saved searches (smart collections) ------------------------------------
+    def _current_filter_state(self) -> dict:
+        """Snapshot every control the filter bar contributes."""
+        return {
+            "images": self._img_btn.isChecked(),
+            "gifs": self._gif_btn.isChecked(),
+            "videos": self._vid_btn.isChecked(),
+            "favs_only": self._favs_btn.isChecked(),
+            "query": self._search.text(),
+            "tags": sorted(self._selected_filter_tags()),
+            "match_all": (self._tag_matchall_act.isChecked()
+                          if self._tag_matchall_act is not None else False),
+        }
+
+    def _apply_filter_state(self, state: dict) -> None:
+        """Restore a saved snapshot, then re-run the filter once."""
+        from .engine import smartsets
+        st = smartsets.normalise(state)
+        for btn, key in ((self._img_btn, "images"), (self._gif_btn, "gifs"),
+                         (self._vid_btn, "videos"),
+                         (self._favs_btn, "favs_only")):
+            btn.setChecked(st[key])
+        want = set(st["tags"])
+        for tag, act in self._tag_filter_actions.items():
+            act.setChecked(tag in want)
+        if self._tag_matchall_act is not None:
+            self._tag_matchall_act.setChecked(st["match_all"])
+        # Setting the text queues the debounce timer; stop it and filter now so
+        # recalling a set is a single pass rather than two.
+        self._search.setText(st["query"])
+        self._search_timer.stop()
+        self._apply_filter()
+
+    def _build_smart_menu(self) -> None:
+        from .engine import smartsets
+        self._smart_menu.clear()
+        saved = smartsets.all_sets()
+        for s in saved:
+            self._smart_menu.addAction(
+                s["name"],
+                lambda _=False, st=dict(s): self._apply_filter_state(st))
+        if saved:
+            self._smart_menu.addSeparator()
+        self._smart_menu.addAction("Save current filters…",
+                                   self._save_smart_set)
+        act = self._smart_menu.addAction("Delete a saved search…",
+                                         self._delete_smart_set)
+        act.setEnabled(bool(saved))
+
+    def _save_smart_set(self) -> None:
+        from PySide6.QtWidgets import QInputDialog, QMessageBox
+        from .engine import smartsets
+        name, ok = QInputDialog.getText(self, "Save search", "Name:")
+        if not ok or not name.strip():
+            return
+        name = name.strip()
+        if smartsets.get(name) is not None:
+            if QMessageBox.question(
+                    self, "Save search",
+                    f"“{name}” already exists — replace it?"
+                    ) != QMessageBox.StandardButton.Yes:
+                return
+        smartsets.save(name, self._current_filter_state())
+        self._status.setText(f"Saved search “{name}”")
+
+    def _delete_smart_set(self) -> None:
+        from PySide6.QtWidgets import QInputDialog
+        from .engine import smartsets
+        names = smartsets.names()
+        if not names:
+            return
+        name, ok = QInputDialog.getItem(self, "Delete saved search",
+                                        "Search:", names, 0, False)
+        if ok and name and smartsets.delete(name):
+            self._status.setText(f"Deleted saved search “{name}”")
 
     def _on_tag_set_changed(self) -> None:
         """A tag coined inline in multi-view: mirror the tag-manager refresh."""

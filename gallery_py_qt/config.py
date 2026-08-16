@@ -127,6 +127,7 @@ ICON_FOLDER      = "\U0001f4c1\ufe0e"
 ICON_MUTE        = "\U0001f507\ufe0e"   # \ud83d\udd07 text variant
 ICON_UNMUTE      = "\U0001f50a\ufe0e"   # \ud83d\udd0a text variant
 ICON_BACK        = "\u2190"              # \u2190
+ICON_CAMERA      = "\U0001f4f7\ufe0e"   # \ud83d\udcf7 text variant \u2014 save a video frame
 
 # Platform-aware UI font.  "Segoe UI" only exists on Windows; on Linux/macOS
 # Qt silently fell back to an ugly default.  Pick a native family per platform,

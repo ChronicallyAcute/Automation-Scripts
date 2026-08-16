@@ -304,6 +304,49 @@ def _video_frame(path: str, frac: float = 0.1) -> QImage | None:
 
 # -- Thumbnail + full-image loading -------------------------------------------
 
+def frame_at_ms(path: str, position_ms: float) -> QImage | None:
+    """Decode the video frame nearest `position_ms` at full resolution.
+
+    Used by "save this frame": the on-screen video is scaled to the widget, so
+    grabbing pixels from the view would save a downscaled, letterboxed image —
+    seeking the source gives the true frame.
+    """
+    if not (is_video(path) and HAS_CV2) or is_bad_video(path):
+        return None
+    with _CV2_LOCK:
+        cap = cv2.VideoCapture(path)
+        try:
+            if not cap.isOpened():
+                _mark_bad_video(path)
+                return None
+            cap.set(cv2.CAP_PROP_POS_MSEC, max(0.0, float(position_ms)))
+            ok, frame = cap.read()
+            if not ok:                     # past the end / undecodable — retry at 0
+                cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
+                ok, frame = cap.read()
+            if not ok:
+                return None
+            rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+            h, w, _ = rgb.shape
+            return QImage(rgb.data, w, h, 3 * w,
+                          QImage.Format.Format_RGB888).copy()
+        except Exception:
+            return None
+        finally:
+            cap.release()
+
+
+def save_frame(path: str, position_ms: float, dest: str) -> bool:
+    """Write the frame nearest `position_ms` to `dest` (format from extension)."""
+    qim = frame_at_ms(path, position_ms)
+    if qim is None or qim.isNull():
+        return False
+    try:
+        return bool(qim.save(dest))
+    except Exception:
+        return False
+
+
 def load_thumbnail(path: str, max_px: int) -> QImage | None:
     """Load `path` scaled to <= max_px on its longest side. Returns QImage."""
     if is_video(path):

@@ -7,9 +7,10 @@ caller can rebuild the tag UI.
 from __future__ import annotations
 
 from PySide6.QtCore import Qt
+from PySide6.QtGui import QColor
 from PySide6.QtWidgets import (QDialog, QVBoxLayout, QHBoxLayout, QListWidget,
                                QListWidgetItem, QLineEdit, QPushButton, QLabel,
-                               QInputDialog, QMessageBox)
+                               QInputDialog, QMessageBox, QColorDialog)
 
 from . import config
 from .engine import tags
@@ -43,11 +44,18 @@ class TagManagerDialog(QDialog):
         btns = QHBoxLayout()
         rename_btn = QPushButton("Rename…")
         rename_btn.clicked.connect(self._rename)
+        color_btn = QPushButton("Colour…")
+        color_btn.clicked.connect(self._set_color)
+        color_btn.setToolTip("Assign a colour used by the tag chips everywhere")
+        reset_btn = QPushButton("Reset colour")
+        reset_btn.clicked.connect(self._clear_color)
         remove_btn = QPushButton("Remove")
         remove_btn.clicked.connect(self._remove)
         close_btn = QPushButton("Close")
         close_btn.clicked.connect(self.accept)
         btns.addWidget(rename_btn)
+        btns.addWidget(color_btn)
+        btns.addWidget(reset_btn)
         btns.addWidget(remove_btn)
         btns.addStretch(1)
         btns.addWidget(close_btn)
@@ -56,7 +64,30 @@ class TagManagerDialog(QDialog):
     def _reload(self) -> None:
         self._list.clear()
         for t in tags.get_tags():
-            self._list.addItem(QListWidgetItem(t))
+            item = QListWidgetItem(t)
+            hue = tags.color_of(t)
+            if hue:
+                # Show each tag in its own colour so the list doubles as the
+                # colour legend used by the chip rows elsewhere.
+                item.setForeground(QColor(hue))
+            self._list.addItem(item)
+
+    def _set_color(self) -> None:
+        name = self._selected()
+        if not name:
+            return
+        cur = tags.color_of(name) or config.ACCENT
+        chosen = QColorDialog.getColor(QColor(cur), self,
+                                       f"Colour for “{name}”")
+        if chosen.isValid() and tags.set_color(name, chosen.name()):
+            self.changed = True
+            self._reload()
+
+    def _clear_color(self) -> None:
+        name = self._selected()
+        if name and tags.set_color(name, None):
+            self.changed = True
+            self._reload()
 
     def _selected(self) -> str | None:
         it = self._list.currentItem()

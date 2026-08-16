@@ -907,8 +907,11 @@ class _Slot(QWidget):
     def _refresh_tag_styles(self) -> None:
         cur = set(tags.tags_for(self._path)) if self._path else set()
         for t, b in self._tag_btns.items():
+            # A set tag wears its own colour (falling back to the accent), so a
+            # dense chip row is scannable without reading every label.
+            hue = tags.color_of(t) or config.ACCENT
             b.setStyleSheet(
-                (self._TAG_CSS_ON % (config.ACCENT, config.ACCENT)) if t in cur
+                (self._TAG_CSS_ON % (hue, hue)) if t in cur
                 else (self._TAG_CSS_OFF % config.OVERLAY_FG))
         # The ditto button lights up only when there are remembered tags to add.
         recent = tags.recent_tags()
@@ -1446,6 +1449,24 @@ class MultiView(QWidget):
         asl.addWidget(self._zoom_lbl)
         asl.addWidget(self._zoom_in_btn)
         asl.addWidget(self._orient_btn)
+        # Tag every tile on this page in one go — the natural companion to the
+        # per-tile chips when a whole screenful shares a descriptor.
+        self._tagall_btn = QToolButton()
+        self._tagall_btn.setText("Tag page ▾")
+        self._tagall_btn.setToolTip(
+            "Apply (or remove) a tag across every item shown on this page")
+        self._tagall_btn.setPopupMode(
+            QToolButton.ToolButtonPopupMode.InstantPopup)
+        self._tagall_btn.setStyleSheet(
+            f"QToolButton {{ color: {config.OVERLAY_FG}; font-size: 18px;"
+            " background: rgba(0,0,0,90); border: none;"
+            " border-radius: 4px; padding: 2px 10px; }"
+            " QToolButton:hover { color: #ffffff;"
+            " background: rgba(0,0,0,160); border-radius: 4px; }")
+        self._tagall_menu = QMenu(self._tagall_btn)
+        self._tagall_btn.setMenu(self._tagall_menu)
+        self._tagall_menu.aboutToShow.connect(self._build_tagall_menu)
+        asl.addWidget(self._tagall_btn)
         self._root.addWidget(self._autoscroll_widget)
 
         # Keyboard shortcuts
@@ -2253,6 +2274,48 @@ class MultiView(QWidget):
         for slot in self._all_slots():
             slot.rebuild_tag_buttons()
             slot._position_overlays()
+
+    # -- tag the whole page ----------------------------------------------------
+    def page_paths(self) -> "list[str]":
+        """Distinct paths currently shown in the visible tiles."""
+        seen: "list[str]" = []
+        for slot in self._slots:
+            p = getattr(slot, "_path", "")
+            if p and p not in seen:
+                seen.append(p)
+        return seen
+
+    def _build_tagall_menu(self) -> None:
+        """Rebuilt on each open so it tracks the tag set and the current page."""
+        self._tagall_menu.clear()
+        paths = self.page_paths()
+        if not paths:
+            self._tagall_menu.addAction("(nothing on this page)").setEnabled(False)
+            return
+        for t in tags.get_tags():
+            have = sum(1 for p in paths if t in tags.tags_for(p))
+            if have == len(paths):
+                label = f"Remove “{t}” from all {len(paths)}"
+                add = False
+            else:
+                label = f"Apply “{t}” to {len(paths)}"
+                if have:
+                    label += f"  ({have} already tagged)"
+                add = True
+            self._tagall_menu.addAction(
+                label,
+                lambda _=False, tg=t, a=add: self._tag_page(tg, a))
+
+    def _tag_page(self, tag: str, add: bool) -> None:
+        """Add or remove `tag` across every item on this page in one store write."""
+        paths = self.page_paths()
+        if not paths:
+            return
+        changed = tags.apply_tag_to_paths(paths, tag, add)
+        for p in changed:
+            tags.sync_tag_folders(p, self._favs.is_fav(p))
+        for slot in self._all_slots():
+            slot._refresh_tag_styles()
 
     def _on_slot_rotate(self, path: str, degrees: int = 90) -> None:
         if path:

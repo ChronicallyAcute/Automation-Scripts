@@ -13,7 +13,7 @@ import os
 
 from PySide6.QtCore import (Qt, QDir, QModelIndex, QObject, QEvent, QTimer,
                             QStandardPaths, QUrl)
-from PySide6.QtGui import QPixmap
+from PySide6.QtGui import QPixmap, QIcon
 from PySide6.QtWidgets import (QFileSystemModel, QLabel, QHBoxLayout,
                                QVBoxLayout, QPushButton, QToolButton, QMenu,
                                QWidget, QLineEdit)
@@ -37,12 +37,45 @@ class _CheckFSModel(QFileSystemModel):
     def __init__(self, parent=None):
         super().__init__(parent)
         self._checked: set[str] = set()
+        # Tag filter: when non-empty, files must carry ANY (or ALL) of these
+        # tags to be listed.  Folders always stay visible so the tree can still
+        # be navigated down to the matches.
+        self._tag_filter: "set[str]" = set()
+        self._tag_match_all = False
         self.setFilter(QDir.Filter.AllDirs | QDir.Filter.Files
                        | QDir.Filter.NoDotAndDotDot)
         # Only media files are relevant; hide everything else entirely.
         self.setNameFilterDisables(False)
         self.set_media_class("all")
         self.setRootPath("")
+
+    # -- tag filtering ---------------------------------------------------------
+    # QFileSystemModel has no filterAcceptsRow hook, so tag filtering is applied
+    # through the same name-filter mechanism as the media-class filter: we
+    # resolve which tagged files match and list their names explicitly.  Files
+    # are matched by BASENAME, so an untagged file that happens to share a name
+    # with a tagged one in another folder can slip through — acceptable for a
+    # browse-and-pick aid, and it never hides a genuine match.
+    def set_tag_filter(self, tags_wanted, match_all: bool = False) -> None:
+        """Show only files carrying these tags (empty = no tag filtering)."""
+        self._tag_filter = {str(t) for t in (tags_wanted or ())}
+        self._tag_match_all = bool(match_all)
+        self._apply_name_filters()
+
+    def tag_filter(self) -> "tuple[set[str], bool]":
+        return set(self._tag_filter), self._tag_match_all
+
+    def _tagged_basenames(self) -> "set[str]":
+        """Basenames of the files satisfying the current tag filter."""
+        from .engine import tags as _tags
+        out: "set[str]" = set()
+        for path, have in _tags._load().items():
+            hs = set(have)
+            ok = (self._tag_filter <= hs if self._tag_match_all
+                  else bool(self._tag_filter & hs))
+            if ok:
+                out.add(os.path.basename(path))
+        return out
 
     @staticmethod
     def _class_exts(cls: str) -> "set[str]":
@@ -70,7 +103,38 @@ class _CheckFSModel(QFileSystemModel):
                 exts |= self._class_exts(c)
             if not exts:
                 exts = set(config.SUPPORTED)
-        self.setNameFilters([f"*{ext}" for ext in sorted(exts)])
+        self._exts = exts
+        self._apply_name_filters()
+
+    def _apply_name_filters(self) -> None:
+        """Combine the media-class and tag filters into Qt's name filters.
+
+        Without a tag filter this is just the extension globs.  With one, the
+        patterns become the matching files' own names, intersected with the
+        allowed extensions so both filters still apply together.
+        """
+        exts = getattr(self, "_exts", set(config.SUPPORTED))
+        if not self._tag_filter:
+            self.setNameFilters([f"*{e}" for e in sorted(exts)])
+            return
+        names = {self._as_pattern(n) for n in self._tagged_basenames()
+                 if os.path.splitext(n.lower())[1] in exts}
+        # Qt treats an EMPTY name-filter list as "no filtering", which would
+        # show everything — exactly backwards.  Use a pattern that matches
+        # nothing so "no tagged files here" reads as an empty result.
+        self.setNameFilters(sorted(names) if names else ["__no_match__"])
+
+    @staticmethod
+    def _as_pattern(name: str) -> str:
+        """A name-filter glob that reliably matches the literal filename.
+
+        Name filters are globs with no escape syntax, so a name containing
+        *, ? or [ ] would be read as a pattern and fail to match itself
+        (e.g. "clip [1080p].mp4").  Replacing each metacharacter with "?"
+        (any single character) keeps the file visible; it can also admit a
+        near-identical sibling name, which is harmless here.
+        """
+        return "".join("?" if c in "*?[]" else c for c in name)
 
     def flags(self, index: QModelIndex):
         base = super().flags(index)
@@ -226,6 +290,62 @@ def _class_menu_button(fs_model) -> QToolButton:
     return btn
 
 
+def _tag_menu_button(fs_model) -> QToolButton:
+    """A "Tags ▾" button whose checkable menu filters the tree by tag.
+
+    Nothing checked = no tag filtering (the default).  "Match all" switches
+    from ANY-of to ALL-of, mirroring the gallery's own tag filter.
+    """
+    btn = QToolButton()
+    btn.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
+    btn.setToolTip("Show only files carrying the checked tags")
+    menu = QMenu(btn)
+    actions: "dict[str, object]" = {}
+
+    def _apply() -> None:
+        chosen = {t for t, a in actions.items() if a.isChecked()}
+        fs_model.set_tag_filter(chosen, match_all_act.isChecked())
+        if not chosen:
+            btn.setText("Tags: all ▾")
+        else:
+            joiner = " & " if match_all_act.isChecked() else "/"
+            shown = joiner.join(sorted(chosen)[:3])
+            if len(chosen) > 3:
+                shown += f" +{len(chosen) - 3}"
+            btn.setText(f"Tags: {shown} ▾")
+
+    from .engine import tags as _tags
+    for t in _tags.get_tags():
+        act = menu.addAction(t)
+        act.setCheckable(True)
+        hue = _tags.color_of(t)
+        if hue:
+            from PySide6.QtGui import QColor
+            pm = QPixmap(10, 10)
+            pm.fill(QColor(hue))
+            act.setIcon(QIcon(pm))       # colour swatch, matching the chips
+        act.toggled.connect(lambda _=False: _apply())
+        actions[t] = act
+    menu.addSeparator()
+    match_all_act = menu.addAction("Match all (AND)")
+    match_all_act.setCheckable(True)
+    match_all_act.toggled.connect(lambda _=False: _apply())
+    clear = menu.addAction("Clear tag filter")
+
+    def _clear() -> None:
+        for a in actions.values():
+            a.setChecked(False)
+        match_all_act.setChecked(False)
+        _apply()
+    clear.triggered.connect(_clear)
+
+    btn.setMenu(menu)
+    btn._tag_actions = actions           # exposed for callers / tests
+    btn._match_all_action = match_all_act
+    _apply()
+    return btn
+
+
 def _quick_locations() -> "list[tuple[str, str]]":
     """Resolve the (label, path) pairs for the quick-access strip.
 
@@ -319,6 +439,9 @@ def quick_access_row(fs_model, goto_cb):
     # Media-type filter (multi-select) for what the tree shows/imports.
     btn = _class_menu_button(fs_model)
     quick.addWidget(btn)
+    tag_btn = _tag_menu_button(fs_model)
+    quick.addWidget(tag_btn)
+    outer._tag_btn = tag_btn             # exposed for callers / tests
     outer.addLayout(quick)
 
     # Free-text path box: paste/type any folder and jump straight to it.

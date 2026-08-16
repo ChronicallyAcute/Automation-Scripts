@@ -292,6 +292,12 @@ class Lightbox(QDialog):
         self._speed_btn.setFixedWidth(46)
         tlay.addWidget(self._speed_btn)
 
+        # Save the frame on screen as a still (decoded from the source, so it
+        # is full resolution rather than the scaled-to-widget view).
+        self._frame_btn = self._tb(config.ICON_CAMERA, self._save_frame)
+        self._frame_btn.setToolTip("Save this frame as an image")
+        tlay.addWidget(self._frame_btn)
+
         # Volume control
         vol_icon = QLabel("\U0001f50a︎")
         vol_icon.setStyleSheet(f"color: {config.FG_MID}; font-size: 13px;")
@@ -650,6 +656,44 @@ class Lightbox(QDialog):
             return
         if self._model.rowCount():
             self.show_row((self._row + 1) % self._model.rowCount())
+
+    # -- save a video frame ----------------------------------------------------
+    def _save_frame(self) -> None:
+        """Write the frame currently on screen to a PNG/JPEG the user picks."""
+        from PySide6.QtWidgets import QFileDialog, QMessageBox
+        path = self._path()
+        if not path or not media.is_video(path) or self._player is None:
+            return
+        pos = self._player.position()
+        stem = os.path.splitext(os.path.basename(path))[0]
+        default = os.path.join(
+            os.path.dirname(path), f"{stem}_{int(pos)}ms.png")
+        dest, _ = QFileDialog.getSaveFileName(
+            self, "Save frame as image", default,
+            "PNG (*.png);;JPEG (*.jpg *.jpeg)")
+        if not dest:
+            return
+        was_playing = (self._player.playbackState()
+                       == QMediaPlayer.PlaybackState.PlayingState)
+        if was_playing:
+            self._player.pause()          # hold the picture the user chose
+        ok = media.save_frame(path, pos, dest)
+        if was_playing:
+            self._player.play()
+        if ok:
+            self._status_note(f"Saved frame to {os.path.basename(dest)}")
+        else:
+            QMessageBox.warning(self, "Save frame",
+                                "Couldn't decode that frame.")
+
+    def _status_note(self, text: str) -> None:
+        """Brief on-media confirmation, reusing the loading label's styling."""
+        self._loading_timer.stop()
+        self._loading_lbl.setText(text)
+        self._loading_lbl.adjustSize()
+        self._position_loading()
+        self._loading_lbl.show()
+        QTimer.singleShot(1800, self._loading_lbl.hide)
 
     # -- filmstrip -------------------------------------------------------------
     def _kb_toggle_strip(self) -> None:

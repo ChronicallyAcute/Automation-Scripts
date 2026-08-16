@@ -68,7 +68,10 @@ def test_set_tag_still_distinguishable(slot, tmp_path):
     on = slot._tag_btns["Az"].styleSheet()
     off = slot._tag_btns["Bp"].styleSheet()
     assert on != off
-    assert config.ACCENT in on and "bold" in on   # colour+weight carry state
+    # A set tag carries state by colour + weight; the colour is the tag's own
+    # (palette default or user-assigned), falling back to the accent.
+    hue = tags.color_of("Az") or config.ACCENT
+    assert hue in on and "bold" in on
 
 
 # -- 3. orientation counts are displayed --------------------------------------

@@ -29,7 +29,8 @@ def qapp():
 def isolated(tmp_path, monkeypatch):
     """Redirect every on-disk location + reset in-memory caches per test."""
     from gallery_py_qt import config
-    from gallery_py_qt.engine import favorites, tags, ratings, foldertags, media
+    from gallery_py_qt.engine import (favorites, tags, ratings, foldertags,
+                                      media, smartsets)
 
     monkeypatch.setattr(config, "FAVORITES_DIR", str(tmp_path / "GalleryFavorites"))
     monkeypatch.setattr(config, "FAVS_FILE", str(tmp_path / "favs.json"))
@@ -45,6 +46,8 @@ def isolated(tmp_path, monkeypatch):
     monkeypatch.setattr(tags, "_store", None)
     monkeypatch.setattr(tags, "TAGS", tags.DEFAULT_TAGS)
     monkeypatch.setattr(tags, "_recent", [])
+    monkeypatch.setattr(tags, "_TAGCOLORS_FILE", str(tmp_path / "tagcolors.json"))
+    monkeypatch.setattr(tags, "_colors", None)
     monkeypatch.setattr(ratings, "_RATINGS_FILE", str(tmp_path / "ratings.json"))
     monkeypatch.setattr(ratings, "_store", None)
     monkeypatch.setattr(foldertags, "_FOLDERTAGS_FILE",
@@ -52,6 +55,8 @@ def isolated(tmp_path, monkeypatch):
     monkeypatch.setattr(foldertags, "_FOLDERTAGDB_FILE",
                         str(tmp_path / "foldertagdb.json"))
     monkeypatch.setattr(foldertags, "_store", None)
+    monkeypatch.setattr(smartsets, "_SETS_FILE", str(tmp_path / "smartsets.json"))
+    monkeypatch.setattr(smartsets, "_store", None)
     tags._PENDING.clear()
     tags._retries.clear()
     media._BAD_VIDEOS.clear()

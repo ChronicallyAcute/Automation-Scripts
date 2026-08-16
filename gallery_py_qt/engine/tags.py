@@ -84,6 +84,8 @@ def remove_tag(name: str) -> None:
     if name not in TAGS:
         return
     set_tags([t for t in TAGS if t != name])
+    if _load_colors().pop(name, None) is not None:
+        _save_colors()
     store = _load()
     for p, lst in list(store.items()):
         if name in lst:
@@ -96,6 +98,82 @@ def remove_tag(name: str) -> None:
     foldertags.remove_folder_tag(name)
 
 
+# -- Tag colours ---------------------------------------------------------------
+# A colour per tag makes a dense chip row scannable at a glance.  Stored beside
+# the tag set as {tag: "#rrggbb"}; tags without an entry fall back to the
+# theme accent at the call site.  Kept in its own file so the tag-set format
+# stays a plain list.
+_TAGCOLORS_FILE = os.path.join(config.HOME, ".gallery_py_qt_tagcolors.json")
+_colors: "dict[str, str] | None" = None
+
+# Distinct, reasonably colour-blind-friendly defaults handed out in order to
+# tags that have never been assigned one.
+_PALETTE = ("#e6194b", "#3cb44b", "#4363d8", "#f58231", "#911eb4",
+            "#42d4f4", "#f032e6", "#bfef45", "#fabed4", "#469990")
+
+
+def _load_colors() -> "dict[str, str]":
+    global _colors
+    if _colors is None:
+        try:
+            with open(_TAGCOLORS_FILE, encoding="utf-8") as f:
+                d = json.load(f)
+            _colors = ({str(k): str(v) for k, v in d.items()}
+                       if isinstance(d, dict) else {})
+        except Exception:
+            _colors = {}
+    return _colors
+
+
+def _save_colors() -> None:
+    try:
+        tmp = _TAGCOLORS_FILE + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(_load_colors(), f, indent=1)
+        os.replace(tmp, _TAGCOLORS_FILE)
+    except OSError as exc:
+        print(f"[tagcolors] {exc}", file=sys.stderr)
+
+
+def _valid_hex(value: str) -> bool:
+    v = (value or "").strip()
+    return (len(v) == 7 and v[0] == "#"
+            and all(c in "0123456789abcdefABCDEF" for c in v[1:]))
+
+
+def color_of(tag: str) -> "str | None":
+    """The tag's assigned colour, or a stable palette default, or None.
+
+    Unknown tags return None so callers can fall back to the theme accent.
+    """
+    store = _load_colors()
+    if tag in store:
+        return store[tag]
+    if tag in TAGS:
+        return _PALETTE[TAGS.index(tag) % len(_PALETTE)]
+    return None
+
+
+def set_color(tag: str, color: "str | None") -> bool:
+    """Assign (or clear, with None) a tag's #rrggbb colour."""
+    store = _load_colors()
+    if color is None:
+        if store.pop(tag, None) is None:
+            return False
+        _save_colors()
+        return True
+    if not _valid_hex(color):
+        return False
+    store[tag] = color.strip().lower()
+    _save_colors()
+    return True
+
+
+def all_colors() -> "dict[str, str]":
+    """Effective colour for every tag in the set (assigned or palette default)."""
+    return {t: color_of(t) for t in TAGS if color_of(t)}
+
+
 def rename_tag(old: str, new: str) -> bool:
     """Rename a tag, migrating the JSON store and the Favorites subfolder +
     manifest.  Embedded metadata (GIF/JPEG) refreshes on the file's next tag
@@ -104,6 +182,10 @@ def rename_tag(old: str, new: str) -> bool:
     if old not in TAGS or not new or (new in TAGS and new != old) or old == new:
         return False
     set_tags([new if t == old else t for t in TAGS])
+    colors = _load_colors()
+    if old in colors:                       # carry the colour across the rename
+        colors[new] = colors.pop(old)
+        _save_colors()
     store = _load()
     for p, lst in list(store.items()):
         if old in lst:
