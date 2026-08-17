@@ -110,3 +110,62 @@ def find_duplicates(
     # Biggest files first (each group's members share a size).
     groups.sort(key=lambda g: sizes.get(g[0], 0), reverse=True)
     return groups
+
+
+# -- Group inspection: where copies live, and how their tags differ ------------
+# A duplicate group is byte-identical media, but the COPIES are not
+# interchangeable to the user: they sit in different folders and may carry
+# different tag sets.  Deleting the wrong one silently discards tagging work,
+# so the UI needs to show both, and the survivor should inherit the richest
+# tag set rather than whatever its own happened to be.
+
+def locations(paths: "list[str]") -> "list[str]":
+    """Distinct parent folders of `paths`, in sorted order."""
+    return sorted({os.path.dirname(os.path.abspath(p)) for p in paths})
+
+
+def tag_sets(paths: "list[str]") -> "dict[str, set]":
+    """{path: set(tags)} for each path."""
+    from . import tags as _tags
+    return {p: set(_tags.tags_for(p)) for p in paths}
+
+
+def tags_differ(paths: "list[str]") -> bool:
+    """True when the copies do NOT all carry the same tags."""
+    sets = list(tag_sets(paths).values())
+    return any(s != sets[0] for s in sets[1:]) if sets else False
+
+
+def richest_tags(paths: "list[str]") -> "list[str]":
+    """The largest tag set among `paths`.
+
+    "Largest" is by count, as requested; ties are broken by the
+    lexicographically smallest set so the result is deterministic rather than
+    dependent on dict ordering.  Returns a sorted list (possibly empty).
+    """
+    sets = tag_sets(paths)
+    if not sets:
+        return []
+    best = max(sets.values(), key=lambda s: (len(s), sorted(s, reverse=True)))
+    return sorted(best)
+
+
+def stamp_richest_tags(group: "list[str]", survivors: "list[str]") -> "list[str]":
+    """Give each survivor the richest tag set found anywhere in its group.
+
+    Called before the redundant copies are trashed, so tagging applied to a
+    copy that is about to disappear is preserved on the one that is kept.
+    Returns the survivors whose tags actually changed.
+    """
+    from . import tags as _tags
+    want = richest_tags(group)
+    if not want:
+        return []
+    changed = []
+    for p in survivors:
+        cur = set(_tags.tags_for(p))
+        merged = sorted(cur | set(want))
+        if merged != sorted(cur):
+            _tags.set_tags_for(p, merged)
+            changed.append(p)
+    return changed

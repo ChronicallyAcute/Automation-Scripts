@@ -17,10 +17,11 @@ from PySide6.QtCore import Qt, QObject, QRunnable, QThreadPool, Signal
 from PySide6.QtGui import QPixmap
 from PySide6.QtWidgets import (QDialog, QVBoxLayout, QHBoxLayout, QLabel,
                                QScrollArea, QWidget, QFrame, QCheckBox,
-                               QPushButton, QProgressBar, QMessageBox)
+                               QPushButton, QProgressBar, QMessageBox,
+                               QRadioButton, QButtonGroup)
 
 from . import config
-from .engine import cache, dupes
+from .engine import cache, dupes, tags
 
 _THUMB_PX = 72
 
@@ -145,6 +146,7 @@ class DuplicatesDialog(QDialog):
     # -- results UI ------------------------------------------------------------
     def _populate(self, groups: "list[list[str]]") -> None:
         self._checks.clear()
+        self._keep_groups = []
         # Clear any prior body content (populate may run again after trashing).
         while self._body_lay.count():
             item = self._body_lay.takeAt(0)
@@ -178,12 +180,37 @@ class DuplicatesDialog(QDialog):
                        f"{_fmt_size(self._size_of(group[0]))} each")
         title.setStyleSheet(f"color: {config.FG_MID}; font-weight: bold;")
         lay.addWidget(title)
+
+        # Where the copies live — the practical question when choosing which to
+        # keep — plus a warning when they don't share the same tags.
+        folders = dupes.locations(group)
+        loc = QLabel("Found in:  " + "     ".join(folders))
+        loc.setStyleSheet(f"color: {config.FG_DIM}; font-size: 11px;")
+        loc.setWordWrap(True)
+        loc.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        lay.addWidget(loc)
+        if dupes.tags_differ(group):
+            warn = QLabel(
+                "⚠  These copies carry different tags — the copy you keep will "
+                f"inherit the fullest set: {', '.join(dupes.richest_tags(group)) or '(none)'}")
+            warn.setStyleSheet(f"color: {config.ACCENT}; font-size: 11px;")
+            warn.setWordWrap(True)
+            lay.addWidget(warn)
+
+        # One "keep" radio per group: choosing a keeper ticks every other copy
+        # for deletion, which is how people actually think about duplicates.
+        keep_group = QButtonGroup(box)
+        keep_group.setExclusive(True)
+        self._keep_groups.append((keep_group, list(group)))
+
         newest = self._newest_in(group)
         for path in group:
-            lay.addWidget(self._file_row(path, is_newest=(path == newest)))
+            lay.addWidget(self._file_row(path, is_newest=(path == newest),
+                                         keep_group=keep_group, group=group))
         return box
 
-    def _file_row(self, path: str, is_newest: bool) -> QWidget:
+    def _file_row(self, path: str, is_newest: bool,
+                  keep_group=None, group=None) -> QWidget:
         row = QWidget()
         h = QHBoxLayout(row)
         h.setContentsMargins(4, 2, 4, 2)
@@ -192,6 +219,15 @@ class DuplicatesDialog(QDialog):
         cb.setProperty("path", path)
         self._checks.append(cb)
         h.addWidget(cb)
+
+        if keep_group is not None:
+            keep = QRadioButton("Keep")
+            keep.setToolTip("Keep this copy and tick the rest for deletion")
+            keep.setProperty("path", path)
+            keep_group.addButton(keep)
+            keep.clicked.connect(
+                lambda _=False, p=path, g=list(group): self._choose_keeper(p, g))
+            h.addWidget(keep)
 
         thumb = QLabel()
         thumb.setFixedSize(_THUMB_PX, _THUMB_PX)
@@ -210,8 +246,10 @@ class DuplicatesDialog(QDialog):
         except OSError:
             pass
         tag = "   (newest)" if is_newest else ""
+        own = tags.tags_for(path)
+        tagline = f"  ·  tags: {', '.join(own)}" if own else "  ·  untagged"
         info = QLabel(f"{os.path.basename(path)}{tag}\n"
-                      f"    {os.path.dirname(path)}  ·  {when}")
+                      f"    {os.path.dirname(path)}  ·  {when}{tagline}")
         info.setStyleSheet(f"color: {config.FG_MID};")
         info.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
         h.addWidget(info, 1)
@@ -261,6 +299,21 @@ class DuplicatesDialog(QDialog):
             group = next((g for g in self._groups if path in g), None)
             cb.setChecked(bool(group) and path != self._newest_in(group))
 
+    def _choose_keeper(self, keep: str, group: "list[str]") -> None:
+        """Keep `keep` and tick every other copy in its group for deletion."""
+        for cb in self._checks:
+            p = cb.property("path")
+            if p in group:
+                cb.setChecked(p != keep)
+
+    def _survivors(self, doomed: "set[str]") -> "list[tuple[list[str], list[str]]]":
+        """(group, survivors) for every group losing at least one copy."""
+        out = []
+        for g in self._groups:
+            if any(p in doomed for p in g):
+                out.append((list(g), [p for p in g if p not in doomed]))
+        return out
+
     def _clear_selection(self) -> None:
         for cb in self._checks:
             cb.setChecked(False)
@@ -284,8 +337,18 @@ class DuplicatesDialog(QDialog):
                         ) != QMessageBox.StandardButton.Yes:
                     return
                 break
-        self.trashRequested.emit(paths)
-        # Drop the trashed paths and re-group what remains.
+        # Preserve tagging work: before the redundant copies go, give each
+        # survivor the fullest tag set found anywhere in its group, so tags
+        # applied only to a copy being deleted aren't silently lost.
         gone = set(paths)
+        stamped = 0
+        for group, survivors in self._survivors(gone):
+            stamped += len(dupes.stamp_richest_tags(group, survivors))
+
+        self.trashRequested.emit(paths)
+        if stamped:
+            self._header.setText(
+                f"{self._header.text()}   ·   tags merged onto {stamped} kept file(s)")
+        # Drop the trashed paths and re-group what remains.
         remaining = [[p for p in g if p not in gone] for g in self._groups]
         self._populate([g for g in remaining if len(g) > 1])

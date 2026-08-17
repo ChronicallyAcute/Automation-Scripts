@@ -617,6 +617,10 @@ class MainWindow(QMainWindow):
         self._tag_matchall_act = None
         self._rebuild_tag_filter_menu()
         self._tag_menu_btn.setMenu(self._tag_menu)
+        # Without InstantPopup a QToolButton only opens its menu on press-and-
+        # hold, so a plain click appeared to do nothing.
+        self._tag_menu_btn.setPopupMode(
+            QToolButton.ToolButtonPopupMode.InstantPopup)
         h.addWidget(self._tag_menu_btn)
 
         self._search = QLineEdit()
@@ -630,7 +634,10 @@ class MainWindow(QMainWindow):
         self._search_timer = QTimer(self)
         self._search_timer.setSingleShot(True)
         self._search_timer.timeout.connect(self._apply_filter)
-        self._search.textChanged.connect(lambda _: self._search_timer.start(200))
+        # 350 ms: filtering re-scans (and previously re-sorted) every path, so
+        # a short debounce made mid-word typing feel like a freeze on big
+        # libraries.  Long enough to coalesce a burst, short enough to feel live.
+        self._search.textChanged.connect(lambda _: self._search_timer.start(350))
         h.addWidget(self._search)
 
         # Saved searches: capture the whole filter bar under a name and recall
@@ -1214,6 +1221,20 @@ class MainWindow(QMainWindow):
         self._apply_filter()
 
     def _apply_filter(self) -> None:
+        """Re-run the filter, surviving (and logging) any per-item failure.
+
+        This runs on every keystroke via the search debounce, so an exception
+        raised here would propagate out of a Qt slot and abort the process —
+        a bad file or a corrupt tag entry must never take the window down.
+        """
+        try:
+            self._apply_filter_inner()
+        except Exception as exc:
+            from . import crash
+            crash.log_crash("filter failed", exc)
+            self._status.setText("Filter failed — see the crash log")
+
+    def _apply_filter_inner(self) -> None:
         tag_filter = self._selected_filter_tags()
         self._model.set_filter(self._img_btn.isChecked(),
                                self._vid_btn.isChecked(),

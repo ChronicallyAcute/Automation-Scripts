@@ -85,6 +85,8 @@ class GalleryModel(QAbstractListModel):
         self._tag_match_all = False
         self._query = ""
         self._query_pred = None
+        # Cached sort order over _all; None means "recompute on next reindex".
+        self._sorted_cache: "list[str] | None" = None
         # Sort chain: keys applied in order (first differentiates, later ones
         # break ties).  Default: group by like sizes, then by name.
         self._sort_chain: list[str] = ["like_dims", "name"]
@@ -113,6 +115,7 @@ class GalleryModel(QAbstractListModel):
             return
         self._all.extend(new)
         self._all_set.update(new)
+        self._sorted_cache = None        # new paths: sort order is stale
         accepted = [p for p in new if self._passes_filter(p)]
         if not accepted:
             return
@@ -134,6 +137,7 @@ class GalleryModel(QAbstractListModel):
         if new:
             self._all.extend(new)
             self._all_set.update(new)
+            self._sorted_cache = None    # new paths: sort order is stale
 
     def finalize_scan(self) -> None:
         """Sort and deduplicate after a streaming scan completes."""
@@ -212,7 +216,9 @@ class GalleryModel(QAbstractListModel):
         self._query = query.strip()
         from .engine.query import compile_query
         self._query_pred = compile_query(self._query)
-        self._reindex()
+        # Only membership changed, not ranking — reuse the cached sort order so
+        # a keystroke costs one filter pass instead of a full re-sort.
+        self._reindex(keep_order=True)
 
     def set_sort(self, mode: str) -> None:
         self.set_sort_chain([mode])
@@ -325,9 +331,17 @@ class GalleryModel(QAbstractListModel):
             "like_dims": self._like_dims_key,
         }.get(mode)
 
-    def _reindex(self) -> None:
-        self.beginResetModel()
-        rows = [p for p in self._all if self._passes_filter(p)]
+    def _sorted_all(self) -> "list[str]":
+        """Every path in sort order, computed once and cached.
+
+        Sort keys (name, rating, dimensions, favourite…) don't depend on the
+        filter, so re-sorting on every keystroke was pure waste — building the
+        key tuples dominates a filter pass.  The cache is dropped by
+        _reindex() whenever anything other than the filter changed.
+        """
+        if self._sorted_cache is not None:
+            return self._sorted_cache
+        order = list(self._all)
         if self._sort != "manual":
             # Chain the selected sort keys; a final name component guarantees
             # a stable, deterministic tiebreak.
@@ -335,10 +349,24 @@ class GalleryModel(QAbstractListModel):
             if "name" not in chain:
                 chain = chain + ["name"]
             funcs = [f for f in (self._key_component(m) for m in chain) if f]
-            rows.sort(key=lambda p: tuple(v for f in funcs for v in f(p)))
+            order.sort(key=lambda p: tuple(v for f in funcs for v in f(p)))
         # manual: preserve the current _all order (set by swap_paths)
         if self._descending:
-            rows.reverse()
+            order.reverse()
+        self._sorted_cache = order
+        return order
+
+    def _reindex(self, keep_order: bool = False) -> None:
+        """Rebuild the visible rows.
+
+        `keep_order=True` reuses the cached sort order — used by set_filter,
+        where only which items pass changed, not how they rank.  Every other
+        caller recomputes (and refreshes) that cache.
+        """
+        if not keep_order:
+            self._sorted_cache = None
+        self.beginResetModel()
+        rows = [p for p in self._sorted_all() if self._passes_filter(p)]
         self._rows = rows
         # Rebuild reverse index in one pass -- O(n), amortised over many lookups.
         self._path_to_row = {p: i for i, p in enumerate(rows)}
@@ -455,6 +483,7 @@ class GalleryModel(QAbstractListModel):
             return
         self._all.remove(path)       # O(n) list remove, but this is rare
         self._all_set.discard(path)
+        self._sorted_cache = None
         self._pixmaps.pop(path, None)
         self._failed.discard(path)
         row = self._path_to_row.pop(path, None)
@@ -485,6 +514,7 @@ class GalleryModel(QAbstractListModel):
         self.beginResetModel()
         self._all = [p for p in self._all if p not in drop]
         self._all_set -= drop
+        self._sorted_cache = None
         for p in drop:
             self._pixmaps.pop(p, None)
             self._failed.discard(p)
