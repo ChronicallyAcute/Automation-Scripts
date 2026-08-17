@@ -6,7 +6,7 @@ import shutil
 
 from PIL import Image
 
-from gallery_py_qt.engine import tags, ratings, sidecar
+from gallery_py_qt.engine import tags, ratings, sidecar, favorites
 
 
 def _img(path):
@@ -82,6 +82,9 @@ def test_missing_files_are_counted_not_applied(tmp_path):
     tags.toggle_tag(a, "Az")
     dest = str(tmp_path / "meta.json")
     sidecar.export_metadata(str(root), dest)
+    # Tagging dispatches a background metadata embed that rewrites the file;
+    # let it finish first, or it can land after the remove and recreate it.
+    favorites.flush_mirror_ops()
     os.remove(a)                                             # file gone
     tags._store = {}
     updated, missing = sidecar.import_metadata(str(root), dest)

@@ -19,7 +19,8 @@ from PySide6.QtGui import (QPixmap, QImage, QKeySequence, QShortcut,
 from PySide6.QtWidgets import (QDialog, QGraphicsView, QGraphicsScene,
                                QGraphicsPixmapItem, QVBoxLayout, QHBoxLayout,
                                QToolButton, QLabel, QStackedWidget, QWidget,
-                               QSlider, QListView, QAbstractItemView)
+                               QSlider, QListView, QAbstractItemView, QMenu,
+                               QApplication)
 from PySide6.QtMultimedia import QMediaPlayer, QAudioOutput, QtAudio
 from PySide6.QtMultimediaWidgets import QVideoWidget
 
@@ -245,13 +246,23 @@ class Lightbox(QDialog):
             b = self._tb("☆", lambda _=False, k=n: self._set_rating(k), bar)
             b.setToolTip(f"Rate {n} star(s)")
             self._star_btns.append(b)
-        # Permanent rotation in 45° steps — each button rewrites the file on
-        # disk (right angles are exact; diagonals grow the canvas).
+        # Permanent rotation, collapsed into one split button (click = 90°,
+        # arrow = the rest) — five separate degree buttons were a third of this
+        # bar.  Mirrors the multi-view tile's rotate control.
+        self._rot_btn = self._tb(
+            config.ICON_ROTATE_CW,
+            lambda: self.rotateRequested.emit(90), bar)
+        self._rot_menu = QMenu(self._rot_btn)
         for deg in (90, 135, 180, 225, 270):
-            b = self._tb(f"{deg}°",
-                         lambda _=False, d=deg: self.rotateRequested.emit(d),
-                         bar)
-            b.setToolTip(f"Rotate {deg}° clockwise (permanent)")
+            act = self._rot_menu.addAction(f"Rotate {deg}°")
+            act.setToolTip(f"Rotate {deg}° clockwise (permanent)")
+            act.triggered.connect(
+                lambda _=False, d=deg: self.rotateRequested.emit(d))
+        self._rot_btn.setMenu(self._rot_menu)
+        self._rot_btn.setPopupMode(
+            QToolButton.ToolButtonPopupMode.MenuButtonPopup)
+        self._rot_btn.setToolTip(
+            "Rotate 90° clockwise (permanent) — use the arrow for 135°–270°")
         self._slide_btn = self._tb("▶", self._toggle_slideshow, bar,
                                    checkable=True)
         self._slide_btn.setToolTip(
@@ -351,6 +362,20 @@ class Lightbox(QDialog):
         self._loading_timer.setSingleShot(True)
         self._loading_timer.setInterval(150)
         self._loading_timer.timeout.connect(self._show_loading)
+
+        # Chrome auto-hide — the same rule multi-view already uses, so the whole
+        # app behaves one way: bars idle out after a pause and wake on any mouse
+        # movement, and never vanish while the pointer is on them or a popup is
+        # open.  Applied to the top bar and (for video) the transport.
+        self._chrome_hide_timer = QTimer(self)
+        self._chrome_hide_timer.setSingleShot(True)
+        self._chrome_hide_timer.setInterval(2500)
+        self._chrome_hide_timer.timeout.connect(self._maybe_hide_chrome)
+        self.setMouseTracking(True)
+        for w in (self._stack, self._img, self._video_panel, self._strip):
+            w.setMouseTracking(True)
+            w.installEventFilter(self)
+        self._chrome_hide_timer.start()
 
         # Slideshow: auto-advance images/GIFs on a timer; a video is allowed to
         # play through once and then advances on EndOfMedia.  The per-image
@@ -580,6 +605,7 @@ class Lightbox(QDialog):
                                   self._img_sig,
                                   gen_now=lambda: self._img_gen))
         self._position_overlays()
+        self._wake_chrome()
         self._slide_kick()
         self._sync_strip()
 
@@ -656,6 +682,44 @@ class Lightbox(QDialog):
             return
         if self._model.rowCount():
             self.show_row((self._row + 1) % self._model.rowCount())
+
+    # -- chrome auto-hide ------------------------------------------------------
+    def _wake_chrome(self) -> None:
+        """Show the bars and re-arm the idle timer (mirrors MultiView)."""
+        if self._bar_widget.isHidden():
+            self._bar_widget.show()
+            self._bar_widget.raise_()
+            if self._stack.currentIndex() == 1:
+                self._transport.show()
+                self._transport.raise_()
+            self._position_overlays()
+        # Mouse-move events arrive in the hundreds per second; only restart the
+        # timer as it nears expiry so the handler stays near-free.
+        if self._chrome_hide_timer.remainingTime() < 2200:
+            self._chrome_hide_timer.start()
+
+    def _maybe_hide_chrome(self) -> None:
+        # Keep the chrome while the user is on it, a menu is open, or the
+        # keyboard-help overlay is up.
+        # isHidden(), not isVisible(): the latter is False for every child of a
+        # window that hasn't been shown, which would let the chrome hide out
+        # from under an open help overlay in exactly that case.
+        if (self._bar_widget.underMouse() or self._transport.underMouse()
+                or QApplication.activePopupWidget() is not None
+                or not self._help.isHidden()):
+            self._chrome_hide_timer.start()
+            return
+        self._bar_widget.hide()
+        self._transport.hide()
+
+    def eventFilter(self, obj, event):
+        if event.type() in (QEvent.Type.MouseMove, QEvent.Type.Enter):
+            self._wake_chrome()
+        return super().eventFilter(obj, event)
+
+    def mouseMoveEvent(self, e):
+        self._wake_chrome()
+        super().mouseMoveEvent(e)
 
     # -- save a video frame ----------------------------------------------------
     def _save_frame(self) -> None:

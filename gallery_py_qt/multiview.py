@@ -256,6 +256,12 @@ class _Slot(QWidget):
         self._taglay.setContentsMargins(2, 1, 2, 1)
         self._taglay.setSpacing(2)
         self._tag_btns: dict[str, QToolButton] = {}
+        # Resting state shows only the tags this file HAS — that is the part
+        # worth reading while scanning a grid.  The full, editable chip row
+        # (every tag plus ditto / new-tag / per-tile zoom) appears on hover,
+        # matching how _btnbar already behaves, so a 3x2 page paints a handful
+        # of coloured labels instead of ~78 permanent controls.
+        self._tag_editing = False
         self.rebuild_tag_buttons()
 
         p = self.palette()
@@ -491,6 +497,7 @@ class _Slot(QWidget):
         self._bar_hide_timer.stop()
         self._btnbar.show()
         self._btnbar.raise_()
+        self.set_tag_editing(True)       # expand to the full, editable chip row
         self._position_overlays()        # reveal pan sliders if media overflows
 
     def leaveEvent(self, e):
@@ -508,6 +515,8 @@ class _Slot(QWidget):
             self._btnbar.hide()
             for b in self._pan_btns:     # pan arrows follow the button bar
                 b.hide()
+            self.set_tag_editing(False)  # collapse back to just the set tags
+            self._position_overlays()
 
     # -- video sizing ----------------------------------------------------------
     def _fit_video(self) -> None:
@@ -824,7 +833,7 @@ class _Slot(QWidget):
                                                     "Grow this media 10%")
         self._taglay.addWidget(self._tile_zoom_out_btn)
         self._taglay.addWidget(self._tile_zoom_in_btn)
-        self._refresh_tag_styles()
+        self._refresh_tag_styles()       # also re-applies the collapsed/expanded state
         self._sync_tile_zoom_btns()
 
     _TILE_ZOOM_CSS = (
@@ -904,7 +913,31 @@ class _Slot(QWidget):
             tags.sync_tag_folders(self._path, self._favs.is_fav(self._path))
             self._refresh_tag_styles()
 
+    def set_tag_editing(self, on: bool) -> None:
+        """Expand the tag row to the full editable set (hover), or collapse it."""
+        self._tag_editing = bool(on)
+        self._apply_tag_visibility()
+
+    def _apply_tag_visibility(self) -> None:
+        """Show every chip while editing; otherwise only the tags that are set."""
+        cur = set(tags.tags_for(self._path)) if self._path else set()
+        on = self._tag_editing
+        for t, b in self._tag_btns.items():
+            b.setVisible(on or t in cur)
+        for b in (getattr(self, "_repeat_btn", None),
+                  getattr(self, "_new_tag_btn", None),
+                  getattr(self, "_tile_zoom_out_btn", None),
+                  getattr(self, "_tile_zoom_in_btn", None)):
+            if b is not None:
+                b.setVisible(on)
+        # With nothing to show the bar would still cast its drop shadow, so
+        # hide the container outright rather than leave an empty smudge.
+        self._tagbar.setVisible(bool(on or cur))
+        if self._tagbar.isVisible():
+            self._tagbar.raise_()
+
     def _refresh_tag_styles(self) -> None:
+        self._apply_tag_visibility()
         cur = set(tags.tags_for(self._path)) if self._path else set()
         for t, b in self._tag_btns.items():
             # A set tag wears its own colour (falling back to the accent), so a

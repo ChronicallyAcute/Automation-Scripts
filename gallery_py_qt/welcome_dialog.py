@@ -42,16 +42,24 @@ SECTIONS: "list[tuple[str, list[tuple[str, str]]]]" = [
         ("★  Ratings",
          "Rate items 0–5 stars in the viewer, then sort or search by rating."),
         ("Tag albums",
-         "Tag whole folders at once — each tagged album is copied or linked "
-         "into a “folder tags” subfolder."),
+         "Tag whole folders at once — every media file inside gets the tag. "
+         "Found under the “⋯” menu on the toolbar."),
+        ("Tag chips on a tile",
+         "A multi-view tile shows only the tags it already carries; hover the "
+         "tile to reveal the full row plus 〃 (repeat last), ＋# (new tag) and "
+         "the per-tile − / + size buttons."),
     ]),
     ("Find", [
         ("Search",
          "Filter with a small query language — e.g. rating>=4, tag names, and "
          "combinations."),
         ("Duplicates",
-         "Scan the loaded media for byte-identical copies and move the "
-         "redundant ones to the trash."),
+         "Scan for byte-identical copies (under “⋯”). Each group shows where "
+         "the copies live and flags differing tags; pick which to Keep and the "
+         "survivor inherits the fullest tag set."),
+        ("Saved ▾",
+         "Store the whole filter bar — media toggles, tags, query — under a "
+         "name and recall it in one click."),
     ]),
     ("View", [
         (f"{config.ICON_ENLARGE}  Lightbox",
@@ -73,8 +81,12 @@ SECTIONS: "list[tuple[str, list[tuple[str, str]]]]" = [
     ]),
     ("Keep tidy", [
         (f"{config.ICON_TRASH}  Trash",
-         "Deletions go to a recoverable trash with one-click Undo; browse, "
-         "restore or empty it whenever you like."),
+         "Deletions go to a recoverable trash with Undo (Ctrl+Z, and it keeps "
+         "working after the toast fades); browse, restore or empty it under "
+         "the “⋯” menu."),
+        ("⋯  More",
+         "Trash, Duplicates, Tag albums, Theme, Guide and Settings live in the "
+         "“⋯” menu at the right of the toolbar, keeping the bar itself short."),
         ("⚙  Settings",
          "Copy-vs-link mode, colour themes, trash auto-purge, and a low-I/O "
          "mode for slow or external drives."),

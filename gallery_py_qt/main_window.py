@@ -15,6 +15,7 @@ import os
 from PySide6.QtCore import (Qt, QObject, QRunnable, QThreadPool, Signal,
                             QTimer, QSize, QDir, QModelIndex)
 from PySide6.QtGui import QAction, QKeySequence, QShortcut, QPixmap
+from PySide6.QtWidgets import QWidgetAction
 from PySide6.QtWidgets import (QMainWindow, QWidget, QFrame, QHBoxLayout,
                                QVBoxLayout, QLabel, QToolButton, QLineEdit,
                                QComboBox, QSpinBox, QMenu, QPushButton,
@@ -536,28 +537,28 @@ class MainWindow(QMainWindow):
         self._recent_btn.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
         self._rebuild_recent_menu()
         h.addWidget(self._recent_btn)
+        # Occasional, dialog-opening actions live in the "⋯" overflow menu
+        # rather than spending permanent toolbar width (built at the end, once
+        # every button it hosts exists).
         self._trash_btn = self._btn(f"{config.ICON_TRASH} Trash",
                                     self._open_trash)
         self._trash_btn.setToolTip("Browse, restore, or empty trashed items")
-        h.addWidget(self._trash_btn)
         self._dupes_btn = self._btn("Duplicates", self._open_dupes)
         self._dupes_btn.setToolTip(
             "Find byte-identical copies among the loaded media")
-        h.addWidget(self._dupes_btn)
         self._album_tags_btn = self._btn("Tag albums", self._open_album_tags)
         self._album_tags_btn.setToolTip(
             "Tag whole folders; each mirrors into a folder-tags subfolder")
-        h.addWidget(self._album_tags_btn)
         h.addWidget(self._sep())
 
-        h.addWidget(QLabel("cols"))
         self._cols_spin = QSpinBox()
+        self._cols_spin.setToolTip("Grid columns")
+        self._cols_spin.setPrefix("⊞ ")      # replaces the "cols" text label
         self._cols_spin.setRange(config.MIN_COLS, config.MAX_COLS)
         self._cols_spin.setValue(config.DEFAULT_COLS)
         self._cols_spin.valueChanged.connect(self._on_cols)
         h.addWidget(self._cols_spin)
 
-        h.addWidget(QLabel("sort"))
         self._sort = QComboBox()
         self._sort.addItem("Dimensions \u00b7 like sizes", "like_dims")
         self._sort.addItem("Name", "name")
@@ -570,9 +571,7 @@ class MainWindow(QMainWindow):
         self._sort.addItem("Dimensions \u00b7 height", "height")
         self._sort.addItem("Manual order", "manual")
         self._sort.currentIndexChanged.connect(lambda _: self._on_sort_changed())
-        h.addWidget(self._sort)
         # Secondary sort: ties from the primary key break by this one.
-        h.addWidget(QLabel("then"))
         self._sort2 = QComboBox()
         self._sort2.setToolTip("Secondary sort \u2014 breaks ties from the primary")
         self._sort2.addItem("Name", "name")
@@ -584,19 +583,41 @@ class MainWindow(QMainWindow):
         self._sort2.addItem("Dimensions \u00b7 width", "width")
         self._sort2.addItem("Dimensions \u00b7 height", "height")
         self._sort2.currentIndexChanged.connect(lambda _: self._on_sort_changed())
-        h.addWidget(self._sort2)
         self._dir_btn = self._btn("\u2191", self._toggle_sort_dir)
         self._dir_btn.setToolTip("Ascending \u2014 click for descending")
-        h.addWidget(self._dir_btn)
+
+        # One "Sort: <key> \u2191" button that states its own setting; the two combos
+        # and the direction toggle live inside its menu instead of costing three
+        # permanent slots plus two text labels.
+        self._sort_btn = self._btn("Sort \u25be", None)
+        self._sort_menu = QMenu(self._sort_btn)
+        for label, w in (("Sort by", self._sort),
+                         ("Then by", self._sort2),
+                         ("Direction", self._dir_btn)):
+            head = self._sort_menu.addAction(label)
+            head.setEnabled(False)
+            wa = QWidgetAction(self._sort_menu)
+            wa.setDefaultWidget(w)
+            self._sort_menu.addAction(wa)
+        self._sort_btn.setMenu(self._sort_menu)
+        self._sort_btn.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
+        self._sync_sort_btn()
+        h.addWidget(self._cols_spin)
+        h.addWidget(self._sort_btn)
 
         h.addWidget(self._sep())
-        self._img_btn = self._btn("Images", self._apply_filter, checkable=True)
+        # Segmented media toggles: high-frequency, so they stay one click away,
+        # but abbreviated (tooltips carry the full name) to reclaim the width
+        # three full words were spending.
+        self._img_btn = self._btn("IMG", self._apply_filter, checkable=True)
         self._img_btn.setChecked(True)
-        self._gif_btn = self._btn("GIFs", self._apply_filter, checkable=True)
+        self._img_btn.setToolTip("Show / hide still images")
+        self._gif_btn = self._btn("GIF", self._apply_filter, checkable=True)
         self._gif_btn.setChecked(True)
         self._gif_btn.setToolTip("Show / hide animated GIFs")
-        self._vid_btn = self._btn("Videos", self._apply_filter, checkable=True)
+        self._vid_btn = self._btn("VID", self._apply_filter, checkable=True)
         self._vid_btn.setChecked(True)
+        self._vid_btn.setToolTip("Show / hide videos")
         self._favs_btn = self._btn(f"{config.ICON_HEART_FULL} Favs",
                                    self._apply_filter, checkable=True)
         self._favs_btn.setToolTip("Show only favourites")
@@ -673,16 +694,31 @@ class MainWindow(QMainWindow):
             act.triggered.connect(lambda _=False, n=name: self._set_theme(n))
         self._theme_btn.setMenu(self._theme_menu)
         self._theme_btn.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
-        h.addWidget(self._theme_btn)
-
-        settings_btn = self._btn("⚙", self._open_settings)
-        settings_btn.setToolTip("Settings")
-        h.addWidget(settings_btn)
 
         self._guide_btn = self._btn(f"{config.ICON_INFO} Guide",
                                     self.show_welcome)
         self._guide_btn.setToolTip("What this program can do (welcome guide)")
-        h.addWidget(self._guide_btn)
+
+        # Overflow: everything that opens a dialog and isn't needed every
+        # session.  The real buttons are embedded (not duplicated) so their
+        # tooltips, labels and slots stay the single source of truth.
+        self._more_btn = self._btn("⋯", None)
+        self._more_btn.setToolTip("Trash, duplicates, album tags, theme, settings…")
+        self._more_menu = QMenu(self._more_btn)
+        for w in (self._trash_btn, self._dupes_btn, self._album_tags_btn,
+                  self._theme_btn, self._guide_btn):
+            wa = QWidgetAction(self._more_menu)
+            wa.setDefaultWidget(w)
+            self._more_menu.addAction(wa)
+            # A button inside a menu doesn't dismiss it — do that by hand so the
+            # menu behaves like the menu items it replaced.
+            if w is not self._theme_btn:      # theme opens its own submenu
+                w.clicked.connect(self._more_menu.close)
+        self._more_menu.addSeparator()
+        self._more_menu.addAction("⚙  Settings…", self._open_settings)
+        self._more_btn.setMenu(self._more_menu)
+        self._more_btn.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
+        h.addWidget(self._more_btn)
 
         h.addWidget(self._btn(config.ICON_FULLSCREEN, self._toggle_fs))
 
@@ -1292,7 +1328,21 @@ class MainWindow(QMainWindow):
         self._model.set_sort_chain(chain)
         if self._model.needs_dimensions():
             self._ensure_dims()
+        self._sync_sort_btn()
         self._refresh_mv_after_model_change()
+
+    def _sync_sort_btn(self) -> None:
+        """Put the active sort on the button so collapsing it hid no state."""
+        btn = getattr(self, "_sort_btn", None)
+        if btn is None:
+            return
+        arrow = "↓" if self._model.descending() else "↑"
+        btn.setText(f"Sort: {self._sort.currentText()}  {arrow} ▾")
+        btn.setToolTip(
+            f"Sort by {self._sort.currentText()}"
+            + (f", then {self._sort2.currentText()}"
+               if self._sort2.currentData() else "")
+            + f" ({'descending' if self._model.descending() else 'ascending'})")
 
     def _sync_sort_combo(self, mode: str) -> None:
         """Reflect a model-driven sort change (e.g. drag-reorder -> manual)
@@ -1315,6 +1365,7 @@ class MainWindow(QMainWindow):
         self._dir_btn.setText("\u2193" if desc else "\u2191")
         self._dir_btn.setToolTip("Descending \u2014 click for ascending" if desc
                                  else "Ascending \u2014 click for descending")
+        self._sync_sort_btn()
 
     def _ensure_dims(self) -> None:
         # One pass at a time \u2014 a second call while a pass runs would re-scan the
