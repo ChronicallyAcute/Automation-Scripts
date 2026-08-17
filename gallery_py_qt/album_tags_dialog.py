@@ -60,12 +60,20 @@ class _DimsJob(QRunnable):
         self._signals = signals
 
     def run(self) -> None:
+        from .engine import dimcache
         out: "dict[str, tuple[int, int]]" = {}
         for p in self._paths:
             try:
-                out[p] = media.peek_size(p)
+                hit = dimcache.get(p)
+                if hit is not None:
+                    out[p] = hit
+                    continue
+                wh = media.peek_size(p)
+                out[p] = wh
+                dimcache.put(p, wh[0], wh[1])
             except Exception:
                 out[p] = (0, 0)
+        dimcache.flush()
         self._signals.done.emit(self._gen, self._folder, out)
 
 

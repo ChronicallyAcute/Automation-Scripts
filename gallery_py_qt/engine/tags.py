@@ -34,19 +34,59 @@ _TAGSET_FILE = os.path.join(config.HOME, ".gallery_py_qt_tagset.json")
 _store: dict[str, list[str]] | None = None
 
 
+_tagset_load_failed = False
+
+
 def _load_tagset() -> tuple[str, ...]:
+    """The user's tag set, falling back to the shipped defaults.
+
+    An unreadable file is flagged rather than silently accepted: resetting to
+    the defaults would hide every custom tag, and the next _save_tagset() would
+    then make that loss permanent.
+    """
+    global _tagset_load_failed
+    _tagset_load_failed = False
+    if not os.path.exists(_TAGSET_FILE):
+        return DEFAULT_TAGS
     try:
         with open(_TAGSET_FILE, encoding="utf-8") as f:
             d = json.load(f)
         if isinstance(d, list) and d and all(isinstance(x, str) for x in d):
             # de-dup preserving order
             return tuple(dict.fromkeys(x for x in d if x.strip()))
-    except Exception:
-        pass
+        _tagset_load_failed = True
+    except Exception as exc:
+        _tagset_load_failed = True
+        print(f"[tagset] could not read {_TAGSET_FILE}: {exc}", file=sys.stderr)
     return DEFAULT_TAGS
 
 
 TAGS = _load_tagset()
+
+
+def adopt_tags_in_use() -> "list[str]":
+    """Re-add tags that files carry but the tag set has lost.
+
+    If the tag-set file was reset or damaged, custom descriptors would vanish
+    from every button row while still sitting on the files — indistinguishable,
+    to the user, from "my tags were deleted".  Called at startup so the set
+    heals itself from the data.  Returns the names recovered.
+    """
+    global TAGS
+    if _load_failed:                      # store unreadable: infer nothing
+        return []
+    in_use: "list[str]" = []
+    for lst in _load().values():
+        for t in lst:
+            if t and t not in TAGS and t not in in_use:
+                in_use.append(t)
+    if in_use:
+        TAGS = tuple(list(TAGS) + sorted(in_use))
+        if not _tagset_load_failed:       # don't overwrite a file we couldn't read
+            _save_tagset()
+        print(f"[tagset] recovered {len(in_use)} tag(s) still in use: "
+              + ", ".join(sorted(in_use)), file=sys.stderr)
+    return sorted(in_use)
 
 
 def get_tags() -> tuple[str, ...]:
@@ -247,21 +287,69 @@ def _rename_tag_folder(old: str, new: str) -> None:
         _save_tagdb(db)
 
 
+# Set when the tag file EXISTS but could not be read (locked by antivirus, a
+# sharing violation, truncated by an earlier crash…).  In that state the
+# in-memory store is empty but that emptiness is NOT the truth, so saving would
+# destroy every tag on disk.  _save() refuses to write until a load succeeds.
+_load_failed = False
+_backed_up = False
+
+
 def _load() -> dict[str, list[str]]:
-    global _store
+    global _store, _load_failed
     if _store is None:
+        if not os.path.exists(_TAGS_FILE):
+            _store, _load_failed = {}, False      # genuinely no tags yet
+            return _store
         try:
             with open(_TAGS_FILE, encoding="utf-8") as f:
                 d = json.load(f)
-                _store = {k: list(v) for k, v in d.items()} \
-                    if isinstance(d, dict) else {}
-        except Exception:
-            _store = {}
+            _store = ({k: list(v) for k, v in d.items()}
+                      if isinstance(d, dict) else {})
+            _load_failed = False
+        except Exception as exc:
+            # Do NOT treat an unreadable file as "no tags" — that would let the
+            # next save overwrite the real data with an empty store.
+            _store, _load_failed = {}, True
+            print(f"[tags] COULD NOT READ {_TAGS_FILE}: {exc}\n"
+                  "[tags] Tag saving is disabled this session to protect the "
+                  "existing file. Fix or restore it, then restart.",
+                  file=sys.stderr)
     return _store
 
 
-def _save() -> None:
+def reload() -> dict[str, list[str]]:
+    """Drop the cached store and re-read from disk (retry after a failure)."""
+    global _store
+    _store = None
+    return _load()
+
+
+def load_failed() -> bool:
+    """True when the tag file exists but couldn't be parsed this session."""
+    _load()
+    return _load_failed
+
+
+def _backup_once() -> None:
+    """Keep one .bak of the tag file per session, before the first overwrite."""
+    global _backed_up
+    if _backed_up or not os.path.exists(_TAGS_FILE):
+        return
     try:
+        shutil.copy2(_TAGS_FILE, _TAGS_FILE + ".bak")
+    except OSError as exc:
+        print(f"[tags] backup failed: {exc}", file=sys.stderr)
+    _backed_up = True                              # don't retry every save
+
+
+def _save() -> None:
+    if _load_failed:
+        print("[tags] refusing to save over an unreadable tag file",
+              file=sys.stderr)
+        return
+    try:
+        _backup_once()
         tmp = _TAGS_FILE + ".tmp"
         with open(tmp, "w", encoding="utf-8") as f:
             json.dump(_load(), f, indent=1)

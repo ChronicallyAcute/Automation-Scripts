@@ -4,6 +4,15 @@ import argparse
 import os
 import sys
 
+# Quieten the media backends BEFORE anything imports cv2 or Qt Multimedia:
+# both read these at plugin-load time, so setting them later has no effect.
+# Damaged or unusual files ("moov atom not found", "co located POCs
+# unavailable", "Referenced QT chapter track not found") make FFmpeg chatty on
+# stderr even though the app handles them; these keep the console readable.
+os.environ.setdefault("OPENCV_LOG_LEVEL", "ERROR")
+os.environ.setdefault("OPENCV_FFMPEG_LOGLEVEL", "-8")   # AV_LOG_QUIET
+os.environ.setdefault("QT_LOGGING_RULES", "qt.multimedia.*=false")
+
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(

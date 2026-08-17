@@ -386,13 +386,23 @@ class _DimsJob(QRunnable):
         self._signals = signals
 
     def run(self) -> None:
-        from .engine import media
+        from .engine import media, dimcache
         out: dict[str, tuple[int, int]] = {}
         for p in self._paths:
             try:
-                out[p] = media.peek_size(p)
+                # A cache hit skips the cv2/FFmpeg open entirely — the whole
+                # reason a big video folder used to re-probe for minutes on
+                # every launch.
+                hit = dimcache.get(p)
+                if hit is not None:
+                    out[p] = hit
+                    continue
+                wh = media.peek_size(p)
+                out[p] = wh
+                dimcache.put(p, wh[0], wh[1])
             except Exception:
                 out[p] = (0, 0)
+        dimcache.flush()          # one write per chunk, not per file
         self._signals.done.emit(out)
 
 
@@ -493,6 +503,15 @@ class MainWindow(QMainWindow):
                 pass
         QTimer.singleShot(
             1500, lambda: self._scan_pool.start(_FnJob(_housekeeping)))
+        # An unreadable tag/rating file must be loud, not a silent "no tags":
+        # saving is disabled in that state to protect what's on disk.
+        QTimer.singleShot(300, self._warn_if_stores_unreadable)
+        # Heal the tag set from the data: if the tag-set file was reset or
+        # damaged, descriptors still on files would otherwise have no button
+        # and look deleted.
+        from .engine import tags as _tags0
+        if _tags0.adopt_tags_in_use():
+            self._rebuild_tag_filter_menu()
 
     # -- UI --------------------------------------------------------------------
     def _build_ui(self) -> None:
@@ -716,6 +735,7 @@ class MainWindow(QMainWindow):
                 w.clicked.connect(self._more_menu.close)
         self._more_menu.addSeparator()
         self._more_menu.addAction("⚙  Settings…", self._open_settings)
+        self._more_menu.addAction("⟲  Recover tags…", self._recover_tags)
         self._more_btn.setMenu(self._more_menu)
         self._more_btn.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
         h.addWidget(self._more_btn)
@@ -1162,6 +1182,71 @@ class MainWindow(QMainWindow):
         if missing:
             note += f"\n{missing} manifest entr(y/ies) had no matching file here."
         QMessageBox.information(self, "Metadata imported", note)
+
+    def _recover_tags(self) -> None:
+        """Pull tags back from every historical store into the live one."""
+        from PySide6.QtWidgets import QMessageBox
+        from .engine import tagmigrate, tags as _tags
+        if _tags.load_failed():
+            QMessageBox.warning(
+                self, "Recover tags",
+                "The tag file can't be read, so recovery is disabled — fixing "
+                "that first would risk writing over it.")
+            return
+        loaded = self._model.all_paths()
+        srcs = tagmigrate.legacy_json_sources()
+        detail = ("\n".join(f"  • {os.path.basename(s)}" for s in srcs)
+                  or "  • (no legacy JSON stores found)")
+        if QMessageBox.question(
+                self, "Recover tags",
+                "Scan every historical tag store and merge what it finds into "
+                "your current tags?\n\n"
+                "Sources:\n" + detail +
+                "\n  • tag folders under your Favorites directory\n"
+                f"  • metadata embedded in the {len(loaded)} loaded file(s)\n\n"
+                "This only ADDS tags — nothing is removed."
+                ) != QMessageBox.StandardButton.Yes:
+            return
+        rep = tagmigrate.recover(loaded)
+        lines = "\n".join(
+            f"  • {name}: {d['tags']} tag(s) on {d['files']} file(s)"
+            for name, d in rep["sources"].items() if d["tags"])
+        self._rebuild_tag_filter_menu()
+        if self._mv is not None:
+            self._mv.rebuild_tag_buttons()
+        self._apply_filter()
+        QMessageBox.information(
+            self, "Recover tags",
+            (f"Recovered {rep['tags']} tag(s) across {rep['files']} file(s).\n\n"
+             + lines) if rep["tags"] else
+            "No additional tags were found — everything those stores hold is "
+            "already in your current tags.")
+
+    def _warn_if_stores_unreadable(self) -> None:
+        """Tell the user plainly when tags/ratings couldn't be read.
+
+        Silence here is what turns a transient file-lock into apparent data
+        loss: the app would look like it simply has no tags.
+        """
+        from PySide6.QtWidgets import QMessageBox
+        from .engine import tags as _tags, ratings as _ratings
+        broken = []
+        if _tags.load_failed():
+            broken.append(("tags", _tags._TAGS_FILE))
+        if _ratings.load_failed():
+            broken.append(("ratings", _ratings._RATINGS_FILE))
+        if not broken:
+            return
+        lines = "\n".join(f"  • {what}:  {path}" for what, path in broken)
+        self._status.setText("Tag/rating file unreadable — saving disabled")
+        QMessageBox.warning(
+            self, "Couldn't read your tags",
+            "These files exist but could not be read:\n\n" + lines +
+            "\n\nYour existing data has NOT been changed — saving is disabled "
+            "this session so it can't be overwritten with an empty set.\n\n"
+            "A antivirus/sync lock is the usual cause; close other programs "
+            "and restart. If a file is corrupt, look for a “.bak” copy beside "
+            "it, or re-import a metadata sidecar.")
 
     # -- saved searches (smart collections) ------------------------------------
     def _current_filter_state(self) -> dict:

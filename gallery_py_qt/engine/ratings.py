@@ -15,20 +15,42 @@ _RATINGS_FILE = os.path.join(config.HOME, ".gallery_py_qt_ratings.json")
 _store: "dict[str, int] | None" = None
 
 
+# See tags._load: an unreadable (not absent) file must never be mistaken for
+# "no ratings", or the next save would wipe the real data.
+_load_failed = False
+
+
 def _load() -> dict:
-    global _store
+    global _store, _load_failed
     if _store is None:
+        if not os.path.exists(_RATINGS_FILE):
+            _store, _load_failed = {}, False
+            return _store
         try:
             with open(_RATINGS_FILE, encoding="utf-8") as f:
                 d = json.load(f)
-            _store = {k: int(v) for k, v in d.items()
-                      if isinstance(v, (int, float))} if isinstance(d, dict) else {}
-        except Exception:
-            _store = {}
+            _store = ({k: int(v) for k, v in d.items()
+                       if isinstance(v, (int, float))}
+                      if isinstance(d, dict) else {})
+            _load_failed = False
+        except Exception as exc:
+            _store, _load_failed = {}, True
+            print(f"[ratings] COULD NOT READ {_RATINGS_FILE}: {exc}\n"
+                  "[ratings] Rating saving is disabled this session to protect "
+                  "the existing file.", file=sys.stderr)
     return _store
 
 
+def load_failed() -> bool:
+    _load()
+    return _load_failed
+
+
 def _save() -> None:
+    if _load_failed:
+        print("[ratings] refusing to save over an unreadable ratings file",
+              file=sys.stderr)
+        return
     try:
         tmp = _RATINGS_FILE + ".tmp"
         with open(tmp, "w", encoding="utf-8") as f:
