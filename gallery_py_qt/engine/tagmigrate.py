@@ -217,3 +217,34 @@ def recover(paths: "list[str] | None" = None) -> dict:
                 embedded[p] = names
         _run("embedded metadata", embedded)
     return report
+
+
+# -- diagnosis ----------------------------------------------------------------
+
+def diagnose(paths: "list[str]") -> dict:
+    """Explain why loaded files may show no tags.
+
+    Distinguishes the three real cases: the file genuinely has no tags, its
+    entry is found only after path normalisation (a spelling mismatch — the
+    cause of "my tags vanished" while the JSON is perfectly valid), and its
+    tags exist but carry names the tag set no longer has (no button to show).
+    """
+    store = _tags._load()
+    report = {"loaded": len(paths), "store_entries": len(store),
+              "exact": 0, "normalised_only": 0, "untagged": 0,
+              "tags_without_buttons": []}
+    known = set(_tags.get_tags())
+    missing_names: "set[str]" = set()
+    for p in paths:
+        if p in store:
+            report["exact"] += 1
+        elif _tags._resolve(p) is not None:
+            report["normalised_only"] += 1
+        else:
+            report["untagged"] += 1
+            continue
+        for t in _tags.tags_for(p):
+            if t not in known:
+                missing_names.add(t)
+    report["tags_without_buttons"] = sorted(missing_names)
+    return report

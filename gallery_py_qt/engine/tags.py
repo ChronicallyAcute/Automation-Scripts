@@ -296,8 +296,9 @@ _backed_up = False
 
 
 def _load() -> dict[str, list[str]]:
-    global _store, _load_failed
+    global _store, _load_failed, _norm_index
     if _store is None:
+        _norm_index = None                 # rebuilt lazily against the new store
         if not os.path.exists(_TAGS_FILE):
             _store, _load_failed = {}, False      # genuinely no tags yet
             return _store
@@ -358,8 +359,57 @@ def _save() -> None:
         print(f"[tags] {exc}", file=sys.stderr)
 
 
+# -- Path-key resolution -------------------------------------------------------
+# The store is keyed by whatever path string was current when a tag was
+# applied, but the SAME file reaches us spelled several ways: Qt's file model
+# returns "C:/Users/..." with forward slashes, os.scandir appends with os.sep,
+# and Windows is case-insensitive besides.  An exact dict lookup therefore
+# missed perfectly good entries and the tags looked deleted.  We keep a
+# normalised index alongside the store so any spelling finds its entry, and
+# writers reuse the existing key rather than adding a duplicate under a second
+# spelling.  On POSIX normcase() is the identity, so case-sensitive
+# filesystems are unaffected.
+_norm_index: "dict[str, str] | None" = None
+
+
+def _norm(path: str) -> str:
+    try:
+        return os.path.normcase(os.path.normpath(path))
+    except Exception:
+        return path
+
+
+def _index() -> "dict[str, str]":
+    global _norm_index
+    if _norm_index is None:
+        _norm_index = {_norm(k): k for k in _load()}
+    return _norm_index
+
+
+def _resolve(path: str) -> "str | None":
+    """The store key holding `path`'s tags, whatever spelling it arrived in."""
+    store = _load()
+    if path in store:                      # fast path: exact match
+        return path
+    return _index().get(_norm(path))
+
+
+def store_key(path: str) -> str:
+    """Key to write `path` under — an existing entry's, else `path` itself."""
+    return _resolve(path) or path
+
+
+def _index_put(key: str) -> None:
+    _index()[_norm(key)] = key
+
+
+def _index_drop(key: str) -> None:
+    _index().pop(_norm(key), None)
+
+
 def tags_for(path: str) -> list[str]:
-    return list(_load().get(path, []))
+    key = _resolve(path)
+    return list(_load().get(key, [])) if key is not None else []
 
 
 # -- Tag folders: aggregate tagged + favourited media by tag -------------------
@@ -499,8 +549,10 @@ def apply_tag_to_paths(paths: "list[str]", tag: str, add: bool = True
     global _recent
     store = _load()
     changed: "list[str]" = []
-    for p in paths:
+    for raw in paths:
+        p = store_key(raw)                 # reuse an existing entry's spelling
         cur = store.setdefault(p, [])
+        _index_put(p)
         has = tag in cur
         if add and not has:
             cur.append(tag)
@@ -510,6 +562,7 @@ def apply_tag_to_paths(paths: "list[str]", tag: str, add: bool = True
             changed.append(p)
         if not cur:
             store.pop(p, None)
+            _index_drop(p)
     if changed:
         _save()
         if add:
@@ -528,10 +581,13 @@ def set_tags_for(path: str, taglist: "list[str]") -> "list[str]":
     """
     clean = list(dict.fromkeys(t for t in taglist if t and t.strip()))
     store = _load()
+    path = store_key(path)
     if clean:
         store[path] = list(clean)
+        _index_put(path)
     else:
         store.pop(path, None)
+        _index_drop(path)
     _save()
     _MIRROR_POOL.submit(_embed_tags, path, list(clean))
     return clean
@@ -541,7 +597,9 @@ def toggle_tag(path: str, tag: str) -> bool:
     """Add/remove `tag` on `path`; returns True if the tag is now present."""
     global _recent
     store = _load()
+    path = store_key(path)
     cur = store.setdefault(path, [])
+    _index_put(path)
     if tag in cur:
         cur.remove(tag)
         present = False
@@ -550,6 +608,7 @@ def toggle_tag(path: str, tag: str) -> bool:
         present = True
     if not cur:
         store.pop(path, None)
+        _index_drop(path)
     else:
         # Remember the file's tag set as the "most recently applied" one.
         _recent = list(cur)

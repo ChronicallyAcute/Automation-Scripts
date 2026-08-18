@@ -1207,6 +1207,7 @@ class MainWindow(QMainWindow):
                 "This only ADDS tags — nothing is removed."
                 ) != QMessageBox.StandardButton.Yes:
             return
+        diag = tagmigrate.diagnose(loaded)
         rep = tagmigrate.recover(loaded)
         lines = "\n".join(
             f"  • {name}: {d['tags']} tag(s) on {d['files']} file(s)"
@@ -1215,12 +1216,27 @@ class MainWindow(QMainWindow):
         if self._mv is not None:
             self._mv.rebuild_tag_buttons()
         self._apply_filter()
+        summary = (
+            f"Loaded files: {diag['loaded']}\n"
+            f"Entries in your tag file: {diag['store_entries']}\n"
+            f"  • matched directly: {diag['exact']}\n"
+            f"  • matched only after path normalising: "
+            f"{diag['normalised_only']}\n"
+            f"  • no tags stored: {diag['untagged']}")
+        if diag["normalised_only"]:
+            summary += ("\n\nThose normalised matches are files whose tags "
+                        "were stored under a different spelling of the same "
+                        "path (e.g. C:/… vs C:\\…). They display correctly now.")
+        if diag["tags_without_buttons"]:
+            summary += ("\n\nTags present on files but missing from your tag "
+                        "set (now restored): "
+                        + ", ".join(diag["tags_without_buttons"]))
         QMessageBox.information(
             self, "Recover tags",
-            (f"Recovered {rep['tags']} tag(s) across {rep['files']} file(s).\n\n"
-             + lines) if rep["tags"] else
-            "No additional tags were found — everything those stores hold is "
-            "already in your current tags.")
+            ((f"Recovered {rep['tags']} tag(s) across {rep['files']} file(s).\n\n"
+              + lines + "\n\n") if rep["tags"] else
+             "No additional tags were found in the legacy stores.\n\n")
+            + summary)
 
     def _warn_if_stores_unreadable(self) -> None:
         """Tell the user plainly when tags/ratings couldn't be read.
