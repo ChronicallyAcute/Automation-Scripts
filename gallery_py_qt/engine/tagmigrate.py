@@ -248,3 +248,76 @@ def diagnose(paths: "list[str]") -> dict:
                 missing_names.add(t)
     report["tags_without_buttons"] = sorted(missing_names)
     return report
+
+
+# -- filename-based tag reconciliation ----------------------------------------
+# The same media often exists several times across a library — re-downloaded,
+# re-encoded, or copied between folders — under the SAME filename but as
+# different bytes, so the duplicate finder (which compares content) never pairs
+# them.  Tagging applied to one copy therefore never reaches the others, and
+# successive "iterations of tag formatting" leave the library inconsistent.
+#
+# This reconciles by filename: every copy of a name receives the UNION of the
+# tags held by any copy of that name.  Union, not "richest wins", so a copy
+# that uniquely carries a tag never loses it.
+
+def _name_key(path: str, ignore_case: bool = True) -> str:
+    name = os.path.basename(path)
+    return name.lower() if ignore_case else name
+
+
+def group_by_filename(paths: "list[str]", ignore_case: bool = True
+                      ) -> "dict[str, list[str]]":
+    """{filename: [paths]} for names that occur more than once."""
+    groups: "dict[str, list[str]]" = {}
+    for p in paths:
+        groups.setdefault(_name_key(p, ignore_case), []).append(p)
+    return {k: v for k, v in groups.items() if len(v) > 1}
+
+
+def preview_filename_sync(paths: "list[str]", ignore_case: bool = True
+                          ) -> "list[dict]":
+    """What reconcile_by_filename() would do, without changing anything.
+
+    Returns one entry per name that would gain tags:
+        {"name", "union", "paths": [(path, [tags_it_would_gain]), ...]}
+    """
+    out: "list[dict]" = []
+    for name, members in sorted(group_by_filename(paths, ignore_case).items()):
+        union: "list[str]" = []
+        for p in members:
+            for t in _tags.tags_for(p):
+                if t not in union:
+                    union.append(t)
+        if not union:
+            continue
+        gains = []
+        for p in members:
+            cur = set(_tags.tags_for(p))
+            missing = [t for t in union if t not in cur]
+            if missing:
+                gains.append((p, missing))
+        if gains:
+            out.append({"name": name, "union": sorted(union), "paths": gains})
+    return out
+
+
+def reconcile_by_filename(paths: "list[str]", ignore_case: bool = True
+                          ) -> "tuple[int, int, int]":
+    """Give every same-named file the union of that name's tags.
+
+    Returns (names_touched, files_updated, tags_added).  Purely additive: no
+    file ever loses a tag, so this is safe to re-run.
+    """
+    if _tags.load_failed():
+        return (0, 0, 0)
+    names = files = added = 0
+    for entry in preview_filename_sync(paths, ignore_case):
+        names += 1
+        for path, missing in entry["paths"]:
+            _tags.set_tags_for(path, _tags.tags_for(path) + missing)
+            files += 1
+            added += len(missing)
+    if added:
+        _tags.adopt_tags_in_use()
+    return names, files, added

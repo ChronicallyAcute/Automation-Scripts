@@ -839,6 +839,31 @@ def read_gif_tags(path: str) -> list[str]:
 
 # -- Video: Windows Property System (System.Keywords) --------------------------
 
+# Tri-state: None = not probed yet, True/False = the answer for this session.
+# Some Windows installs ship a propsys.dll that doesn't export
+# SHGetPropertyStoreFromParsingName; ctypes then raises "function not found"
+# for EVERY video, which the caller logged per file.  Probe once and stay quiet
+# — writing Explorer's "Tags" column for videos is a bonus, and the JSON store
+# remains the source of truth either way.
+_win_propsys_ok: "bool | None" = None
+
+
+def _win_propsys_available() -> bool:
+    global _win_propsys_ok
+    if _win_propsys_ok is None:
+        try:
+            import ctypes
+            _win_propsys_ok = hasattr(ctypes.windll.propsys,
+                                      "SHGetPropertyStoreFromParsingName")
+        except Exception:
+            _win_propsys_ok = False
+        if not _win_propsys_ok:
+            print("[tags-embed] Windows property-store API unavailable; video "
+                  "tags stay in the app's store only (Explorer's Tags column "
+                  "for videos will not be written).", file=sys.stderr)
+    return _win_propsys_ok
+
+
 def _embed_windows_keywords(path: str, tag_list: list[str]) -> None:
     """Ask Windows to write System.Keywords — the Explorer 'Tags' field —
     through the format's own property handler (MP4/M4V/MOV/WMV).
@@ -848,6 +873,8 @@ def _embed_windows_keywords(path: str, tag_list: list[str]) -> None:
     """
     if sys.platform != "win32":
         return
+    if not _win_propsys_available():
+        return                       # no property-store API here; JSON still has the tags
     import ctypes
     from ctypes import POINTER, byref, c_void_p, c_wchar_p, c_uint, c_ushort
 

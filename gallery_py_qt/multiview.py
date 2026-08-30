@@ -2277,6 +2277,11 @@ class MultiView(QWidget):
 
     # -- bar auto-hide -----------------------------------------------------------
 
+    # The FOOTER (page navigation, layout, zoom, orientation, tag-page) stays
+    # put: auto-hiding it resized the grid every couple of seconds, and each
+    # resize re-fits every video — the periodic jitter mid-playback.  It is also
+    # the strip you actually reach for, so it should not move under the cursor.
+    # Only the header auto-hides; per-tile overlays keep their own hover rule.
     def _show_bars(self) -> None:
         if not self._chrome_widget.isVisible():
             self._chrome_widget.show()
@@ -2295,8 +2300,7 @@ class MultiView(QWidget):
                 or QApplication.activePopupWidget() is not None):
             self._bars_hide_timer.start()
             return
-        self._chrome_widget.hide()
-        self._autoscroll_widget.hide()
+        self._chrome_widget.hide()      # footer deliberately stays visible
         self.barsVisibleChanged.emit(False)
 
     def _toggle_bars(self) -> None:

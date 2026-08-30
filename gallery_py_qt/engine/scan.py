@@ -106,9 +106,13 @@ def scan_iter(folders: list[str], batch_size: int = 200,
         yield batch, result
 
 
-def scan_media(folder: str) -> ScanResult:
-    """Non-streaming scan of a single folder (backward-compatible API)."""
+def scan_media(folder: str, recursive: bool = False) -> ScanResult:
+    """Non-streaming scan of a folder.
+
+    Defaults to the folder itself (the long-standing behaviour); pass
+    recursive=True to walk the whole tree, e.g. to reconcile a repository.
+    """
     res = ScanResult()
-    res.paths = list(_iter_folder(folder, res))
+    res.paths = list(_iter_folder(folder, res, recursive=recursive))
     res.paths.sort()
     return res

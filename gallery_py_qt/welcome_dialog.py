@@ -57,6 +57,11 @@ SECTIONS: "list[tuple[str, list[tuple[str, str]]]]" = [
          "Scan for byte-identical copies (under “⋯”). Each group shows where "
          "the copies live and flags differing tags; pick which to Keep and the "
          "survivor inherits the fullest tag set."),
+        ("⇄  Sync tags by filename",
+         "Under “⋯”. Copies of the same filename across a repository — "
+         "re-downloaded or re-encoded, so the duplicate finder can't pair them "
+         "by content — each receive the union of that name's tags. Purely "
+         "additive, and it previews before writing."),
         ("Saved ▾",
          "Store the whole filter bar — media toggles, tags, query — under a "
          "name and recall it in one click."),

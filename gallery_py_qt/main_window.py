@@ -736,6 +736,8 @@ class MainWindow(QMainWindow):
         self._more_menu.addSeparator()
         self._more_menu.addAction("⚙  Settings…", self._open_settings)
         self._more_menu.addAction("⟲  Recover tags…", self._recover_tags)
+        self._more_menu.addAction("⇄  Sync tags by filename…",
+                                  self._sync_tags_by_filename)
         self._more_btn.setMenu(self._more_menu)
         self._more_btn.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
         h.addWidget(self._more_btn)
@@ -937,7 +939,28 @@ class MainWindow(QMainWindow):
         if dlg.exec() == QDialog.DialogCode.Accepted:
             folders, files = dlg.selected_items()
             if folders or files:
+                # The picker has its own tag filter, and so does the toolbar.
+                # Leaving them to disagree meant importing "everything tagged
+                # Az" into a gallery filtered to Bp showed an empty grid, as if
+                # the import had failed.  Carry the picker's choice across so
+                # the view matches what was just asked for.
+                self._adopt_picker_tag_filter(dlg)
                 self.open_media(folders, files, recursive=dlg.recursive())
+
+    def _adopt_picker_tag_filter(self, dlg) -> None:
+        """Mirror the import picker's tag filter onto the toolbar's."""
+        btn = getattr(getattr(dlg, "_path_row", None), "_tag_btn", None)
+        if btn is None:
+            return
+        chosen = {t for t, a in getattr(btn, "_tag_actions", {}).items()
+                  if a.isChecked()}
+        match_all = getattr(btn, "_match_all_action", None)
+        if not chosen:
+            return                     # picker unfiltered: leave the toolbar be
+        for tag, act in self._tag_filter_actions.items():
+            act.setChecked(tag in chosen)
+        if self._tag_matchall_act is not None and match_all is not None:
+            self._tag_matchall_act.setChecked(match_all.isChecked())
 
 
     def open_folder(self, folder: str) -> None:
@@ -1238,6 +1261,68 @@ class MainWindow(QMainWindow):
              "No additional tags were found in the legacy stores.\n\n")
             + summary)
 
+    def _sync_tags_by_filename(self) -> None:
+        """Share tags between same-named copies across a chosen repository.
+
+        The duplicate finder pairs files by CONTENT, so re-encoded or
+        re-downloaded copies of the same item — same name, different bytes —
+        never matched and their tags stayed isolated.  This reconciles by name.
+        """
+        from PySide6.QtWidgets import QFileDialog, QMessageBox
+        from .engine import scan, tagmigrate, tags as _tags
+        if _tags.load_failed():
+            QMessageBox.warning(
+                self, "Sync tags",
+                "The tag file can't be read, so this is disabled — writing now "
+                "would risk overwriting it.")
+            return
+        start = self._current_folder or QDir.homePath()
+        root = QFileDialog.getExistingDirectory(
+            self, "Choose the repository to reconcile", start)
+        if not root:
+            return
+        self._status.setText("Scanning for same-named media…")
+        QApplication.processEvents()
+        try:
+            paths = scan.scan_media(root, recursive=True).paths
+        except Exception as exc:
+            QMessageBox.warning(self, "Sync tags", f"Couldn't scan: {exc}")
+            return
+        plan = tagmigrate.preview_filename_sync(paths)
+        if not plan:
+            self._status.setText("")
+            QMessageBox.information(
+                self, "Sync tags",
+                f"Scanned {len(paths)} file(s) under:\n{root}\n\n"
+                "No same-named copies are missing tags — nothing to do.")
+            return
+        n_files = sum(len(e["paths"]) for e in plan)
+        n_tags = sum(len(m) for e in plan for _p, m in e["paths"])
+        sample = "\n".join(
+            f"  • {e['name']}  →  {', '.join(e['union'])}" for e in plan[:12])
+        more = f"\n  … and {len(plan) - 12} more name(s)" if len(plan) > 12 else ""
+        if QMessageBox.question(
+                self, "Sync tags by filename",
+                f"{len(plan)} filename(s) have copies with differing tags.\n"
+                f"{n_files} file(s) would gain {n_tags} tag(s).\n\n"
+                f"{sample}{more}\n\n"
+                "Every copy of a name receives the union of that name's tags. "
+                "This only ADDS — no file loses a tag. Proceed?"
+                ) != QMessageBox.StandardButton.Yes:
+            self._status.setText("")
+            return
+        names, files, added = tagmigrate.reconcile_by_filename(paths)
+        self._rebuild_tag_filter_menu()
+        if self._mv is not None:
+            self._mv.rebuild_tag_buttons()
+        self._apply_filter()
+        self._status.setText(
+            f"Shared {added} tag(s) across {files} file(s)")
+        QMessageBox.information(
+            self, "Sync tags by filename",
+            f"Reconciled {names} filename(s): {files} file(s) gained "
+            f"{added} tag(s).")
+
     def _warn_if_stores_unreadable(self) -> None:
         """Tell the user plainly when tags/ratings couldn't be read.
 
@@ -1387,10 +1472,28 @@ class MainWindow(QMainWindow):
         # If a folder is loaded but the filter hides everything, explain why
         # the grid is blank rather than leaving a bare black screen.
         if self._model.all_paths() and self._model.rowCount() == 0:
+            # Name the filter that is actually responsible — the tag filter was
+            # never mentioned, so an import hidden by it looked like a failure.
+            active = []
+            if tag_filter:
+                active.append("tags: " + ", ".join(sorted(tag_filter)))
+            if self._search.text().strip():
+                active.append(f"search: {self._search.text().strip()!r}")
+            off = [n for n, b in (("images", self._img_btn),
+                                  ("GIFs", self._gif_btn),
+                                  ("videos", self._vid_btn))
+                   if not b.isChecked()]
+            if off:
+                active.append("hidden: " + ", ".join(off))
             if self._favs_btn.isChecked():
                 self._view.set_empty_hint(
                     "No favourites here",
                     "Tap the heart on items, or turn off the Favs filter")
+            elif active:
+                self._view.set_empty_hint(
+                    f"{len(self._model.all_paths())} item(s) loaded, "
+                    "none match the current filter",
+                    "Active: " + "   ·   ".join(active))
             else:
                 self._view.set_empty_hint(
                     "Nothing matches the current filter",
