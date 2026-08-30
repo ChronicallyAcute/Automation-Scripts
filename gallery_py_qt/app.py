@@ -29,6 +29,20 @@ def main(argv: list[str] | None = None) -> int:
     from gallery_py_qt import crash
     crash.install()
 
+    # Confirm the troubleshooting switches took effect.  Without this, silence
+    # is ambiguous — "no stalls were detected" and "the variable never reached
+    # the app" look identical.
+    if os.environ.get("GALLERY_VIDEO_DIAG") == "1":
+        print("[video-diag] ENABLED — frame gaps over ~70ms will be reported "
+              "as: slot N file: <gap>ms gap at media <position>s",
+              file=sys.stderr)
+    if os.environ.get("GALLERY_NO_GL") == "1":
+        print("[video] GPU viewport DISABLED — video tiles use the raster path",
+              file=sys.stderr)
+    else:
+        print("[video] GPU viewport enabled (set GALLERY_NO_GL=1 to disable)",
+              file=sys.stderr)
+
     from PySide6.QtWidgets import QApplication
     from gallery_py_qt.main_window import MainWindow
     from gallery_py_qt.engine import prefs
