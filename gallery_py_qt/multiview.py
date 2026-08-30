@@ -271,6 +271,8 @@ class _Slot(QWidget):
         self.setAutoFillBackground(True)
 
         self._is_video = False
+        self._last_vid_geom = None      # last geometry applied to _video_item
+        self._last_shown_sec = -1       # last whole second painted in _time
         self._disp = QSizeF(0, 0)
         self._pm: QPixmap = QPixmap()
 
@@ -535,15 +537,24 @@ class _Slot(QWidget):
                 scale = min(vw / ns.width(), vh / ns.height())
             scale *= self._zoom          # ±10% coverage steps
             disp_w, disp_h = ns.width() * scale, ns.height() * scale
-        self._video_item.setSize(QSizeF(disp_w, disp_h))
         # Offset by _ox/_oy on whichever axis overflows (centre = 0.5); a
         # letterboxed axis stays centred.
         self._vid_ovx = disp_w > vw + 0.5
         self._vid_ovy = disp_h > vh + 0.5
         px = (vw - disp_w) * self._ox if self._vid_ovx else (vw - disp_w) / 2.0
         py = (vh - disp_h) * self._oy if self._vid_ovy else (vh - disp_h) / 2.0
-        self._video_item.setPos(px, py)
-        self._scene.setSceneRect(0, 0, vw, vh)   # clips any cover overflow
+        # Resizing a QGraphicsVideoItem makes the backend rebuild its output
+        # surface — a visible hitch mid-playback.  This runs on every layout
+        # pass (hover, pan, tag refresh, the chrome auto-hide, zoom…), almost
+        # always with identical numbers, so apply it only when it actually
+        # changed.  Rounded to 0.01px: sub-pixel float noise is not a resize.
+        geom = (round(disp_w, 2), round(disp_h, 2),
+                round(px, 2), round(py, 2), vw, vh)
+        if geom != self._last_vid_geom:
+            self._last_vid_geom = geom
+            self._video_item.setSize(QSizeF(disp_w, disp_h))
+            self._video_item.setPos(px, py)
+            self._scene.setSceneRect(0, 0, vw, vh)   # clips any cover overflow
         # Overlays sit inside the visible area — the whole tile when filling.
         self._disp = QSizeF(min(disp_w, float(vw)), min(disp_h, float(vh)))
         self._position_overlays()
@@ -771,6 +782,7 @@ class _Slot(QWidget):
             b.hide()
         self._clear_loop()
         self._reset_pan()
+        self._last_vid_geom = None
         self._is_video = False
         self._row  = -1
         self._path = ""
@@ -987,6 +999,7 @@ class _Slot(QWidget):
         self._refresh_tag_styles()
         self._refresh_srclink()
         self._img_gen += 1                      # invalidate any pending decode
+        self._last_vid_geom = None              # new media: force a re-fit
         if media.is_video(path):
             self._gif.stop()
             self._is_video = True
@@ -1153,7 +1166,13 @@ class _Slot(QWidget):
             self._player.setPosition(self._loop_a_ms)
             pos = self._loop_a_ms
         self._scrub.set_position(pos)
-        self._time.setText(fmt_time(pos))
+        # positionChanged fires many times a second per tile; setText relayouts
+        # the transport row, so only touch it when the displayed second — the
+        # only thing fmt_time shows — actually changes.
+        secs = pos // 1000
+        if secs != self._last_shown_sec:
+            self._last_shown_sec = secs
+            self._time.setText(fmt_time(pos))
 
     def _on_loop_changed(self, a_frac: float, b_frac: float) -> None:
         dur = self._dur_ms or self._player.duration()
