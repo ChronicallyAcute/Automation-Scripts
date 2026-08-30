@@ -295,12 +295,12 @@ class _Slot(QWidget):
         # simultaneous videos saturated the GUI thread and every click lagged.
         # An OpenGL viewport uploads frames as textures instead.  Set the env
         # var GALLERY_NO_GL=1 to force the raster path if GL misbehaves.
-        if os.environ.get("GALLERY_NO_GL") != "1":
-            try:
-                from PySide6.QtOpenGLWidgets import QOpenGLWidget
-                self._gview.setViewport(QOpenGLWidget())
-            except Exception:
-                pass
+        # The GL viewport is installed LAZILY, on the first video this slot
+        # shows.  Creating one per slot up front meant a page of six tiles held
+        # six OpenGL contexts even when every tile was a still image — real
+        # cost on Windows, where per-context switching and swap-chain work is a
+        # known source of periodic stutter.
+        self._gl_viewport = False
         # Full-viewport updates are cheaper than per-frame dirty-region math
         # for a constantly-changing video (and required for the GL path).
         self._gview.setViewportUpdateMode(
@@ -314,6 +314,21 @@ class _Slot(QWidget):
         self._video_item.setAspectRatioMode(Qt.AspectRatioMode.KeepAspectRatio)
         self._scene.addItem(self._video_item)
         self._video_item.nativeSizeChanged.connect(lambda *_: self._fit_video())
+
+        # Playback stall diagnostic.  Set GALLERY_VIDEO_DIAG=1 to log every
+        # gap between presented frames that exceeds twice the expected spacing,
+        # with the media position it happened at.  That distinguishes a stall
+        # tied to a point IN THE FILE from one tied to wall-clock (a timer, a
+        # background pass), which is the thing worth knowing when a hitch can't
+        # be reproduced on another machine.
+        self._diag = os.environ.get("GALLERY_VIDEO_DIAG") == "1"
+        self._diag_last = 0.0
+        if self._diag:
+            try:
+                self._video_item.videoSink().videoFrameChanged.connect(
+                    self._on_diag_frame)
+            except Exception:
+                self._diag = False
 
         self._player = QMediaPlayer(self)
         self._player.setVideoOutput(self._video_item)
@@ -522,6 +537,44 @@ class _Slot(QWidget):
             self._position_overlays()
 
     # -- video sizing ----------------------------------------------------------
+    def _on_diag_frame(self, frame) -> None:
+        """Log frame-to-frame stalls during playback (GALLERY_VIDEO_DIAG=1)."""
+        import time as _t
+        now = _t.perf_counter()
+        prev, self._diag_last = self._diag_last, now
+        if not prev or not self._is_video:
+            return
+        gap_ms = (now - prev) * 1000.0
+        # 16fps clips space frames ~62ms apart; flag anything over ~2x a
+        # 30fps budget so the log stays short and only real hitches appear.
+        if gap_ms >= 70.0:
+            pos = self._player.position() / 1000.0 if self._player else -1
+            print(f"[video-diag] slot {self._idx} "
+                  f"{os.path.basename(self._path or '?')}: "
+                  f"{gap_ms:6.1f}ms gap at media {pos:5.2f}s", file=sys.stderr)
+
+    def _ensure_gl_viewport(self) -> None:
+        """Install the OpenGL viewport the first time this slot plays a video.
+
+        With the raster viewport QGraphicsVideoItem converts every frame
+        YUV->RGB on the CPU, which saturates the GUI thread with several videos
+        running; a GL viewport uploads frames as textures instead.  Doing it on
+        demand keeps image-only pages free of GL contexts entirely.
+        Set GALLERY_NO_GL=1 to stay on the raster path.
+        """
+        if self._gl_viewport or os.environ.get("GALLERY_NO_GL") == "1":
+            return
+        try:
+            from PySide6.QtOpenGLWidgets import QOpenGLWidget
+            self._gview.setViewport(QOpenGLWidget())
+            self._gl_viewport = True
+            # viewport() is a NEW widget after the swap — re-apply the
+            # click-through flag or the tile stops starting reorder drags.
+            self._gview.viewport().setAttribute(
+                Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
+        except Exception:
+            self._gl_viewport = False
+
     def _fit_video(self) -> None:
         vw, vh = self._gview.width(), self._gview.height()
         if vw <= 0 or vh <= 0:
@@ -1002,6 +1055,7 @@ class _Slot(QWidget):
         self._last_vid_geom = None              # new media: force a re-fit
         if media.is_video(path):
             self._gif.stop()
+            self._ensure_gl_viewport()
             self._is_video = True
             self._pm = QPixmap()
             self._stack.setCurrentIndex(1)
