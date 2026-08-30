@@ -321,7 +321,8 @@ class _Slot(QWidget):
         # tied to a point IN THE FILE from one tied to wall-clock (a timer, a
         # background pass), which is the thing worth knowing when a hitch can't
         # be reproduced on another machine.
-        self._diag = os.environ.get("GALLERY_VIDEO_DIAG") == "1"
+        from . import diag as _diagmod
+        self._diag = _diagmod.enabled() is not None
         self._diag_last = 0.0
         if self._diag:
             try:
@@ -549,9 +550,10 @@ class _Slot(QWidget):
         # 30fps budget so the log stays short and only real hitches appear.
         if gap_ms >= 70.0:
             pos = self._player.position() / 1000.0 if self._player else -1
-            print(f"[video-diag] slot {self._idx} "
-                  f"{os.path.basename(self._path or '?')}: "
-                  f"{gap_ms:6.1f}ms gap at media {pos:5.2f}s", file=sys.stderr)
+            from . import diag as _diagmod
+            _diagmod.write(f"video gap {gap_ms:6.1f}ms  slot {self._idx}  "
+                           f"media {pos:5.2f}s  "
+                           f"{os.path.basename(self._path or '?')}")
 
     def _ensure_gl_viewport(self) -> None:
         """Install the OpenGL viewport the first time this slot plays a video.

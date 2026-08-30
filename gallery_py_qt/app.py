@@ -50,6 +50,17 @@ def main(argv: list[str] | None = None) -> int:
     app = QApplication(sys.argv)
     app.setApplicationName("Gallery-Py-Qt")
 
+    # GALLERY_DIAG=1 (or a ms threshold) watches the GUI thread and records
+    # what was running whenever the event loop stalls.  Written to a file, not
+    # stderr: PowerShell wraps native stderr in error records, which made shell
+    # redirection unreliable.
+    from gallery_py_qt import diag as _diag
+    _thresh = _diag.enabled()
+    if _thresh:
+        _diag.install(app, _thresh)
+        print(f"[diag] ENABLED — stalls over {_thresh}ms are logged to:\n"
+              f"       {_diag.LOG_PATH}", file=sys.stderr)
+
     win = MainWindow()
     win.show()
 
