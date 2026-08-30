@@ -95,14 +95,19 @@ class _VideoPreviewPool(QWidget):
             self.stop(path)
 
     def _on_error(self, player, error) -> None:
-        """A hovered video that won't decode ('moov atom not found', bad codec)
-        is remembered and released so it isn't retried on the next hover."""
+        """Release a preview that errored; only blacklist one that never played.
+
+        A file that already reported a duration is decodable, so a later error
+        is a transient glitch — remembering it as unplayable would also kill its
+        thumbnail and dimensions, long after the hover ended.
+        """
         if error == QMediaPlayer.Error.NoError:
             return
         from .engine import media
         for path, (pl, _sink) in list(self._used.items()):
             if pl is player:
-                media._mark_bad_video(path)
+                if pl.duration() <= 0:      # never got going: genuinely bad
+                    media._mark_bad_video(path)
                 self.stop(path)
                 break
 

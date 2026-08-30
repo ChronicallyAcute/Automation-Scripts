@@ -11,6 +11,7 @@ Changes vs original:
 """
 from __future__ import annotations
 import os
+import sys
 
 from PySide6.QtCore import (Qt, QUrl, Signal, QTimer, QObject, QRunnable,
                             QThreadPool, QEvent, QSize)
@@ -1012,18 +1013,30 @@ class Lightbox(QDialog):
 
     def _on_media_status(self, status) -> None:
         if status == QMediaPlayer.MediaStatus.EndOfMedia:
+            # Only the slideshow needs to act here: it sets loops to 1 so the
+            # clip plays through once and then advances.  Otherwise the player
+            # loops natively, and seeking back to 0 as well raced two restarts
+            # at every loop boundary — the stutter and the decoder complaints
+            # short clips showed every few seconds.
             if self._slideshow_on:
-                self._slide_advance()      # video finished → next item
-            else:
-                self._player.setPosition(0)
-                self._player.play()
+                self._slide_advance()
         elif status == QMediaPlayer.MediaStatus.InvalidMedia:
             self._fail_video()
 
     def _on_media_error(self, error, msg: str = "") -> None:
-        """Corrupt / unsupported video ('moov atom not found', bad codec):
-        release the handle so the backend stops retrying, and show a note."""
+        """Give up on a file that never played; ride out a mid-playback hiccup.
+
+        See _Slot._on_media_error: an error after the file has produced a
+        duration is a transient decode glitch, not an unplayable file, and must
+        not blacklist it for thumbnails and dimensions.
+        """
         if error == QMediaPlayer.Error.NoError:
+            return
+        if self._player is not None and (self._player.duration() > 0
+                                         or self._dur_ms > 0):
+            print(f"[video] transient decode error on "
+                  f"{os.path.basename(self._path() or '?')}: {msg}",
+                  file=sys.stderr)
             return
         self._fail_video()
 

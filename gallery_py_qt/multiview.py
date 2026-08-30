@@ -29,6 +29,7 @@ Audio
 """
 from __future__ import annotations
 import os
+import sys
 
 from PySide6.QtCore import (Qt, QUrl, Signal, QSizeF, QSize, QRectF, QTimer,
                             QMimeData, QObject, QRunnable, QThreadPool, QEvent)
@@ -1103,16 +1104,29 @@ class _Slot(QWidget):
 
     # -- media player callbacks ------------------------------------------------
     def _on_status(self, status):
-        if status == QMediaPlayer.MediaStatus.EndOfMedia:
-            self._player.setPosition(0)
-            self._player.play()
-        elif status == QMediaPlayer.MediaStatus.InvalidMedia:
+        # The player already loops natively (setLoops(Infinite)).  Seeking back
+        # to 0 here as well meant TWO restarts raced at every loop boundary, and
+        # the extra seek landed on a non-keyframe — the stutter and the
+        # "co located POCs unavailable" decoder complaints on short clips, which
+        # come round every few seconds on a 5-second file.
+        if status == QMediaPlayer.MediaStatus.InvalidMedia:
             self._fail_video()
 
     def _on_media_error(self, error, msg: str = "") -> None:
-        """A corrupt / unsupported file (e.g. 'moov atom not found') must not be
-        left churning in the multimedia backend — release it and show a note."""
+        """Give up on a file that never played; ride out a mid-playback hiccup.
+
+        A file that has already produced a duration is decodable, so an error
+        arriving later is a transient decode glitch (a damaged GOP, a seek onto
+        a non-keyframe).  Tearing the tile down and blacklisting the file for
+        thumbnails and dimensions over that would turn a momentary stutter into
+        permanent breakage.
+        """
         if error == QMediaPlayer.Error.NoError:
+            return
+        if self._player.duration() > 0 or self._dur_ms > 0:
+            print(f"[video] transient decode error on "
+                  f"{os.path.basename(self._path or '?')}: {msg}",
+                  file=sys.stderr)
             return
         self._fail_video()
 
