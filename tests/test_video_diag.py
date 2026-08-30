@@ -53,14 +53,17 @@ def test_no_gl_env_keeps_the_raster_path(qapp, tmp_path, monkeypatch):
 
 
 def test_diagnostic_is_off_unless_requested(qapp, monkeypatch):
-    monkeypatch.delenv("GALLERY_VIDEO_DIAG", raising=False)
+    monkeypatch.delenv("GALLERY_DIAG", raising=False)
     s = _Slot(0, Favorites())
     assert s._diag is False
     s.deleteLater()
 
 
-def test_diagnostic_reports_a_stall(qapp, tmp_path, monkeypatch, capsys):
-    monkeypatch.setenv("GALLERY_VIDEO_DIAG", "1")
+def test_diagnostic_reports_a_stall(qapp, tmp_path, monkeypatch):
+    """Frame gaps go to the shared diagnostic log, not stderr."""
+    from gallery_py_qt import diag
+    monkeypatch.setenv("GALLERY_DIAG", "1")
+    monkeypatch.setattr(diag, "LOG_PATH", str(tmp_path / "diag.log"))
     s = _Slot(0, Favorites())
     s._is_video = True
     s._path = _vid(tmp_path)
@@ -70,13 +73,15 @@ def test_diagnostic_reports_a_stall(qapp, tmp_path, monkeypatch, capsys):
     import time
     s._diag_last = time.perf_counter() - 0.5    # pretend 500ms passed
     s._on_diag_frame(None)
-    err = capsys.readouterr().err
-    assert "[video-diag]" in err and "gap at media" in err
+    text = open(diag.LOG_PATH, encoding="utf-8").read()
+    assert "video gap" in text and "media" in text
     s.deleteLater()
 
 
-def test_diagnostic_ignores_normal_spacing(qapp, tmp_path, monkeypatch, capsys):
-    monkeypatch.setenv("GALLERY_VIDEO_DIAG", "1")
+def test_diagnostic_ignores_normal_spacing(qapp, tmp_path, monkeypatch):
+    from gallery_py_qt import diag
+    monkeypatch.setenv("GALLERY_DIAG", "1")
+    monkeypatch.setattr(diag, "LOG_PATH", str(tmp_path / "diag.log"))
     s = _Slot(0, Favorites())
     s._is_video = True
     s._path = _vid(tmp_path)
@@ -84,5 +89,6 @@ def test_diagnostic_ignores_normal_spacing(qapp, tmp_path, monkeypatch, capsys):
     import time
     s._diag_last = time.perf_counter() - 0.03   # 30ms: healthy
     s._on_diag_frame(None)
-    assert "[video-diag]" not in capsys.readouterr().err
+    assert not os.path.exists(diag.LOG_PATH) or \
+        "video gap" not in open(diag.LOG_PATH, encoding="utf-8").read()
     s.deleteLater()
