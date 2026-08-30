@@ -572,7 +572,9 @@ class MainWindow(QMainWindow):
 
         self._cols_spin = QSpinBox()
         self._cols_spin.setToolTip("Grid columns")
-        self._cols_spin.setPrefix("⊞ ")      # replaces the "cols" text label
+        # Plain ASCII: a non-Latin glyph here cost ~677ms at startup on Windows
+        # while the font engine hunted through fallback fonts for it.
+        self._cols_spin.setPrefix("cols ")
         self._cols_spin.setRange(config.MIN_COLS, config.MAX_COLS)
         self._cols_spin.setValue(config.DEFAULT_COLS)
         self._cols_spin.valueChanged.connect(self._on_cols)

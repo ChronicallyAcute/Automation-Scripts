@@ -272,6 +272,7 @@ class _Slot(QWidget):
 
         self._is_video = False
         self._last_vid_geom = None      # last geometry applied to _video_item
+        self._play_gen = 0              # guards staggered, delayed play() calls
         self._last_shown_sec = -1       # last whole second painted in _time
         self._disp = QSizeF(0, 0)
         self._pm: QPixmap = QPixmap()
@@ -555,6 +556,14 @@ class _Slot(QWidget):
                            f"media {pos:5.2f}s  "
                            f"{os.path.basename(self._path or '?')}")
 
+    # Milliseconds of offset per slot index before playback starts.
+    _PLAY_STAGGER_MS = 220
+
+    def _play_if_current(self, gen: int) -> None:
+        """Start playback unless this tile has since been given other media."""
+        if gen == self._play_gen and self._is_video and self._path:
+            self._player.play()
+
     def _ensure_gl_viewport(self) -> None:
         """Install the OpenGL viewport the first time this slot plays a video.
 
@@ -824,6 +833,7 @@ class _Slot(QWidget):
         and makes deleting a video that is (or recently was) playing fail.
         """
         self._gif.stop()                        # release the GIF's file handle too
+        self._play_gen += 1                     # cancel any pending staggered start
         self._player.stop()
         self._player.setSource(QUrl())
 
@@ -838,6 +848,7 @@ class _Slot(QWidget):
         self._clear_loop()
         self._reset_pan()
         self._last_vid_geom = None
+        self._play_gen += 1                     # cancel any pending staggered start
         self._is_video = False
         self._row  = -1
         self._path = ""
@@ -1063,8 +1074,22 @@ class _Slot(QWidget):
             self._stack.setCurrentIndex(1)
             self._seekwrap.show()
             self._player.setSource(QUrl.fromLocalFile(path))
-            self._player.play()
             self._player.setPlaybackRate(self._SPEEDS[self._speed_idx])
+            # Stagger the start by slot index.  Tiles are filled in one pass, so
+            # clips of equal length (a folder of 5s videos is the common case)
+            # reach end-of-media together and every decoder seeks back to zero
+            # at the same instant — measured as a 400-970ms stall across all
+            # tiles at once.  Offsetting the starts spreads those seeks out.
+            # The generation token means a tile re-filled before its turn never
+            # starts the file it has already moved off.
+            self._play_gen += 1
+            gen = self._play_gen
+            delay = self._idx * self._PLAY_STAGGER_MS
+            if delay <= 0:
+                self._player.play()
+            else:
+                QTimer.singleShot(
+                    delay, lambda g=gen: self._play_if_current(g))
             self._sync_rotate_btn()
             self._fit_video()
         else:
