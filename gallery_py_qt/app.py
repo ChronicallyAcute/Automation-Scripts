@@ -31,10 +31,10 @@ def main(argv: list[str] | None = None) -> int:
 
     # Confirm the troubleshooting switches took effect.  Without this, silence
     # is ambiguous — "no stalls were detected" and "the variable never reached
-    # the app" look identical.
-    if os.environ.get("GALLERY_VIDEO_DIAG") == "1":
-        print("[video-diag] ENABLED — frame gaps over ~70ms will be reported "
-              "as: slot N file: <gap>ms gap at media <position>s",
+    # the app" look identical.  (GALLERY_VIDEO_DIAG was replaced by
+    # GALLERY_DIAG, which is announced after the QApplication exists.)
+    if os.environ.get("GALLERY_LOOP") == "manual":
+        print("[video] loop mode: MANUAL (restart on end-of-media)",
               file=sys.stderr)
     if os.environ.get("GALLERY_NO_GL") == "1":
         print("[video] GPU viewport DISABLED — video tiles use the raster path",

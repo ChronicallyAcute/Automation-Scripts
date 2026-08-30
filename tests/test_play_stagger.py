@@ -89,3 +89,29 @@ def test_clearing_cancels_a_pending_start(qapp, tmp_path):
         time.sleep(0.01)
     assert s._player.plays == 0
     s.deleteLater()
+
+
+# -- looping strategy ---------------------------------------------------------
+def test_native_looping_by_default(qapp, monkeypatch):
+    from PySide6.QtMultimedia import QMediaPlayer
+    monkeypatch.delenv("GALLERY_LOOP", raising=False)
+    s = _Slot(0, Favorites())
+    assert s._manual_loop is False
+    # EndOfMedia must NOT restart by hand: that raced Qt's own loop.
+    s._player = _FakePlayer()
+    s._is_video = True
+    s._on_status(QMediaPlayer.MediaStatus.EndOfMedia)
+    assert s._player.plays == 0
+    s.deleteLater()
+
+
+def test_manual_looping_restarts_on_end(qapp, monkeypatch):
+    from PySide6.QtMultimedia import QMediaPlayer
+    monkeypatch.setenv("GALLERY_LOOP", "manual")
+    s = _Slot(0, Favorites())
+    assert s._manual_loop is True
+    s._player = _FakePlayer()
+    s._is_video = True
+    s._on_status(QMediaPlayer.MediaStatus.EndOfMedia)
+    assert s._player.plays == 1          # exactly one restart, never two
+    s.deleteLater()

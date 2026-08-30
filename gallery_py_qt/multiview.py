@@ -334,7 +334,15 @@ class _Slot(QWidget):
 
         self._player = QMediaPlayer(self)
         self._player.setVideoOutput(self._video_item)
-        self._player.setLoops(QMediaPlayer.Loops.Infinite)
+        # Looping strategy.  Measured on Windows, Qt's native Infinite loop
+        # costs 400-600ms per wrap on short clips — it appears to rebuild the
+        # demuxer/decoder rather than rewind.  GALLERY_LOOP=manual instead
+        # plays once and restarts from EndOfMedia, which on some backends is
+        # the cheaper path.  Only ONE of the two may be active: running both
+        # races two restarts at the wrap (that was an earlier bug).
+        self._manual_loop = os.environ.get("GALLERY_LOOP") == "manual"
+        self._player.setLoops(
+            1 if self._manual_loop else QMediaPlayer.Loops.Infinite)
         self._player.mediaStatusChanged.connect(self._on_status)
         self._player.errorOccurred.connect(self._on_media_error)
         self._player.positionChanged.connect(self._on_pos)
@@ -557,7 +565,9 @@ class _Slot(QWidget):
                            f"{os.path.basename(self._path or '?')}")
 
     # Milliseconds of offset per slot index before playback starts.
-    _PLAY_STAGGER_MS = 220
+    # 400ms: the loop stall itself measures 400-600ms, so a smaller offset
+    # left the tiles' hitches overlapping into one larger visible event.
+    _PLAY_STAGGER_MS = 400
 
     def _play_if_current(self, gen: int) -> None:
         """Start playback unless this tile has since been given other media."""
@@ -1203,7 +1213,11 @@ class _Slot(QWidget):
         # the extra seek landed on a non-keyframe — the stutter and the
         # "co located POCs unavailable" decoder complaints on short clips, which
         # come round every few seconds on a 5-second file.
-        if status == QMediaPlayer.MediaStatus.InvalidMedia:
+        if status == QMediaPlayer.MediaStatus.EndOfMedia and self._manual_loop:
+            # Only when native looping is off, so the two never race.
+            self._player.setPosition(0)
+            self._player.play()
+        elif status == QMediaPlayer.MediaStatus.InvalidMedia:
             self._fail_video()
 
     def _on_media_error(self, error, msg: str = "") -> None:
