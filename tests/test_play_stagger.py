@@ -63,6 +63,26 @@ def test_delayed_start_fires_for_the_current_media(qapp, tmp_path):
     s.deleteLater()
 
 
+def test_destroying_a_slot_cancels_its_pending_start(qapp, tmp_path):
+    """The crash this guards: a bare QTimer.singleShot(lambda: ...self...)
+    outlived the slot, so an import that tore tiles down left a callback that
+    touched an already-deleted C++ QMediaPlayer and killed the process.  A
+    slot-owned timer dies with the slot."""
+    import time
+    from PySide6.QtCore import QTimer
+    s = _Slot(4, Favorites())          # a late slot => long stagger delay
+    s.show_item(0, _vid(tmp_path))
+    assert s._play_timer.isActive()    # a start is pending
+    # The timer is parented to the slot, so it goes when the slot does.
+    assert s._play_timer.parent() is s
+    s.deleteLater()
+    qapp.processEvents()
+    end = time.time() + 2.0            # outlive the stagger delay
+    while time.time() < end:
+        qapp.processEvents()
+        time.sleep(0.01)               # must not crash the process
+
+
 def test_pending_start_is_cancelled_by_new_media(qapp, tmp_path):
     import time
     s = _Slot(3, Favorites())

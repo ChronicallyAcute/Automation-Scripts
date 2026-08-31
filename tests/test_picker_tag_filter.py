@@ -103,3 +103,26 @@ def test_picker_exposes_tag_menu(qapp, tmp_path):
     assert dlg._fs.tag_filter()[0] == {"Az"}
     assert "Az" in btn.text()
     dlg.done(0)
+
+
+def test_huge_tag_match_falls_back_instead_of_wedging(qapp, tmp_path, monkeypatch):
+    """QFileSystemModel tests every pattern against every entry, so thousands
+    of patterns would wedge the picker.  Past the cap it degrades to the
+    extension filter and says so, rather than freezing."""
+    from gallery_py_qt.engine import tags as _tags
+    fs = _CheckFSModel()
+    huge = {f"C:/x/f{i}.jpg": ["Az"] for i in range(fs._MAX_NAME_PATTERNS + 50)}
+    monkeypatch.setattr(_tags, "_load", lambda: huge)
+    fs.set_tag_filter({"Az"})
+    assert fs.tag_filter_truncated
+    assert "*.jpg" in set(fs.nameFilters())      # fell back, did not wedge
+
+
+def test_modest_tag_match_still_filters(qapp, tmp_path, monkeypatch):
+    from gallery_py_qt.engine import tags as _tags
+    fs = _CheckFSModel()
+    small = {f"C:/x/f{i}.jpg": ["Az"] for i in range(5)}
+    monkeypatch.setattr(_tags, "_load", lambda: small)
+    fs.set_tag_filter({"Az"})
+    assert not fs.tag_filter_truncated
+    assert "f0.jpg" in set(fs.nameFilters())

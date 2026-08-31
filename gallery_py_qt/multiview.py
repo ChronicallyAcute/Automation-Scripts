@@ -272,7 +272,16 @@ class _Slot(QWidget):
 
         self._is_video = False
         self._last_vid_geom = None      # last geometry applied to _video_item
-        self._play_gen = 0              # guards staggered, delayed play() calls
+        self._play_gen = 0              # bumped whenever the media changes
+        # The staggered start MUST use a timer owned by this slot.  A bare
+        # QTimer.singleShot(lambda: ...self._player...) outlives the slot: on
+        # an import the tiles are torn down and rebuilt, the pending callback
+        # then touched an already-deleted C++ QMediaPlayer, and the process
+        # died outright.  A child QTimer is destroyed with its parent, so the
+        # pending start is cancelled automatically.
+        self._play_timer = QTimer(self)
+        self._play_timer.setSingleShot(True)
+        self._play_timer.timeout.connect(self._start_pending_play)
         self._last_shown_sec = -1       # last whole second painted in _time
         self._disp = QSizeF(0, 0)
         self._pm: QPixmap = QPixmap()
@@ -569,9 +578,9 @@ class _Slot(QWidget):
     # left the tiles' hitches overlapping into one larger visible event.
     _PLAY_STAGGER_MS = 400
 
-    def _play_if_current(self, gen: int) -> None:
-        """Start playback unless this tile has since been given other media."""
-        if gen == self._play_gen and self._is_video and self._path:
+    def _start_pending_play(self) -> None:
+        """Fire the staggered start, if this tile still holds playable media."""
+        if self._is_video and self._path:
             self._player.play()
 
     def _ensure_gl_viewport(self) -> None:
@@ -844,6 +853,7 @@ class _Slot(QWidget):
         """
         self._gif.stop()                        # release the GIF's file handle too
         self._play_gen += 1                     # cancel any pending staggered start
+        self._play_timer.stop()
         self._player.stop()
         self._player.setSource(QUrl())
 
@@ -859,6 +869,7 @@ class _Slot(QWidget):
         self._reset_pan()
         self._last_vid_geom = None
         self._play_gen += 1                     # cancel any pending staggered start
+        self._play_timer.stop()
         self._is_video = False
         self._row  = -1
         self._path = ""
@@ -1093,13 +1104,12 @@ class _Slot(QWidget):
             # The generation token means a tile re-filled before its turn never
             # starts the file it has already moved off.
             self._play_gen += 1
-            gen = self._play_gen
             delay = self._idx * self._PLAY_STAGGER_MS
+            self._play_timer.stop()
             if delay <= 0:
                 self._player.play()
             else:
-                QTimer.singleShot(
-                    delay, lambda g=gen: self._play_if_current(g))
+                self._play_timer.start(delay)
             self._sync_rotate_btn()
             self._fit_video()
         else:

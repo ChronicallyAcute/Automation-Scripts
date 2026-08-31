@@ -42,6 +42,7 @@ class _CheckFSModel(QFileSystemModel):
         # be navigated down to the matches.
         self._tag_filter: "set[str]" = set()
         self._tag_match_all = False
+        self.tag_filter_truncated = False
         self.setFilter(QDir.Filter.AllDirs | QDir.Filter.Files
                        | QDir.Filter.NoDotAndDotDot)
         # Only media files are relevant; hide everything else entirely.
@@ -56,6 +57,8 @@ class _CheckFSModel(QFileSystemModel):
     # are matched by BASENAME, so an untagged file that happens to share a name
     # with a tagged one in another folder can slip through — acceptable for a
     # browse-and-pick aid, and it never hides a genuine match.
+    _MAX_NAME_PATTERNS = 400
+
     def set_tag_filter(self, tags_wanted, match_all: bool = False) -> None:
         """Show only files carrying these tags (empty = no tag filtering)."""
         self._tag_filter = {str(t) for t in (tags_wanted or ())}
@@ -119,6 +122,15 @@ class _CheckFSModel(QFileSystemModel):
             return
         names = {self._as_pattern(n) for n in self._tagged_basenames()
                  if os.path.splitext(n.lower())[1] in exts}
+        # QFileSystemModel tests EVERY pattern against EVERY entry, so the cost
+        # is files x patterns.  A large tag store would put thousands of
+        # patterns in here and wedge the picker on a big folder.  Past the cap,
+        # fall back to the extension filter rather than freeze; the caller
+        # surfaces that the tag filter was too broad to apply.
+        self.tag_filter_truncated = len(names) > self._MAX_NAME_PATTERNS
+        if self.tag_filter_truncated:
+            self.setNameFilters([f"*{e}" for e in sorted(exts)])
+            return
         # Qt treats an EMPTY name-filter list as "no filtering", which would
         # show everything — exactly backwards.  Use a pattern that matches
         # nothing so "no tagged files here" reads as an empty result.
@@ -305,6 +317,13 @@ def _tag_menu_button(fs_model) -> QToolButton:
     def _apply() -> None:
         chosen = {t for t, a in actions.items() if a.isChecked()}
         fs_model.set_tag_filter(chosen, match_all_act.isChecked())
+        if getattr(fs_model, "tag_filter_truncated", False):
+            btn.setText("Tags: too many ▾")
+            btn.setToolTip(
+                "That tag matches too many files to filter the tree by name; "
+                "showing all media instead. Narrow the tag selection.")
+            return
+        btn.setToolTip("Show only files carrying the checked tags")
         if not chosen:
             btn.setText("Tags: all ▾")
         else:

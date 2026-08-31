@@ -20,7 +20,36 @@ def log_crash(kind: str, exc: BaseException | None = None, extra: str = "") -> N
         pass
 
 
+def install_faulthandler() -> None:
+    """Capture HARD crashes (access violations), which no Python hook sees.
+
+    A native crash kills the process outright: sys.excepthook never runs and
+    the stall watchdog dies with it, so the diagnostic log simply stops — which
+    is exactly what an unexplained "app closed" looks like.  faulthandler
+    installs OS-level signal handlers that dump the Python stack of every
+    thread as the process dies, which turns that silence into evidence.
+    """
+    try:
+        import faulthandler
+        # Keep the stream open for the process lifetime: faulthandler writes to
+        # the raw file descriptor from a signal handler.
+        global _fault_stream
+        _fault_stream = open(config.CRASH_LOG, "a", buffering=1,
+                             encoding="utf-8", errors="replace")
+        _fault_stream.write(
+            f"\n{'=' * 70}\n[{datetime.datetime.now():%Y-%m-%d %H:%M:%S}] "
+            "session started (faulthandler armed)\n")
+        faulthandler.enable(file=_fault_stream, all_threads=True)
+    except Exception:
+        pass
+
+
+_fault_stream = None
+
+
 def install() -> None:
+    install_faulthandler()
+
     def _hook(exc_type, exc_value, exc_tb):
         if issubclass(exc_type, KeyboardInterrupt):
             sys.__excepthook__(exc_type, exc_value, exc_tb)
