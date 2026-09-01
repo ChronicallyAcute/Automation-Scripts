@@ -740,6 +740,8 @@ class MainWindow(QMainWindow):
         self._more_menu.addAction("⟲  Recover tags…", self._recover_tags)
         self._more_menu.addAction("⇄  Sync tags by filename…",
                                   self._sync_tags_by_filename)
+        self._more_menu.addAction("⚕  Check media health…",
+                                  self._check_media_health)
         self._more_btn.setMenu(self._more_menu)
         self._more_btn.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
         h.addWidget(self._more_btn)
@@ -1029,6 +1031,11 @@ class MainWindow(QMainWindow):
             self._probed_gen = gen
             sample = paths[:: max(1, len(paths) // 4)][:4]
             self._scan_pool.start(_IoProbeJob(gen, sample, self._probe_sig))
+        # Files already known to be damaged are skipped before anything opens
+        # them: one FFmpeg backward scan over a truncated 100MB file costs more
+        # than stat-ing the whole batch.
+        from .engine import health
+        health.seed_blacklist(paths)
         if self._model.needs_dimensions():
             # Buffer silently — view stays empty until dims arrive and sort can
             # be applied correctly, avoiding the mid-scan reorder flash.
@@ -1324,6 +1331,77 @@ class MainWindow(QMainWindow):
             self, "Sync tags by filename",
             f"Reconciled {names} filename(s): {files} file(s) gained "
             f"{added} tag(s).")
+
+    def _check_media_health(self) -> None:
+        """Find truncated / unreadable videos among the loaded files.
+
+        A partially downloaded video still opens and plays: the header claims
+        the full duration, so the decoder only discovers the truth when it runs
+        past the real end of the data.  FFmpeg then scans backwards through the
+        whole file looking for a readable sample — slow, blocking work repeated
+        on every thumbnail, dimension probe and playback loop, which is felt as
+        stutter.  Checking once and remembering the verdict makes those files
+        cheap to skip instead.
+        """
+        from PySide6.QtWidgets import QMessageBox, QProgressDialog
+        from .engine import health, media as _media
+        paths = self._model.all_paths()
+        vids = [p for p in paths if _media.is_video(p)]
+        if not vids:
+            QMessageBox.information(
+                self, "Check media health",
+                "No videos are loaded — there is nothing to check.\n\n"
+                "Open a folder of videos first.")
+            return
+        if QMessageBox.question(
+                self, "Check media health",
+                f"Check {len(vids)} loaded video(s) for truncated or "
+                "unreadable data?\n\n"
+                "Each file is opened once and decoded near its end. Results "
+                "are remembered (and re-checked automatically if a file "
+                "changes), so damaged files stop costing time afterwards.\n\n"
+                "Nothing is modified or deleted by the check itself."
+                ) != QMessageBox.StandardButton.Yes:
+            return
+
+        dlg = QProgressDialog("Checking media\u2026", "Cancel", 0, len(vids), self)
+        dlg.setWindowTitle("Check media health")
+        dlg.setMinimumDuration(0)
+        dlg.setValue(0)
+
+        def _tick(done: int, total: int, path: str) -> bool:
+            dlg.setValue(done)
+            dlg.setLabelText(f"{done + 1} / {total}\n{os.path.basename(path)}")
+            QApplication.processEvents()
+            return not dlg.wasCanceled()
+
+        rep = health.check(vids, progress=_tick)
+        dlg.setValue(len(vids))
+        dlg.close()
+
+        bad = rep["damaged"]
+        head = (f"Checked {rep['checked']} file(s)"
+                + (f" ({rep['cached']} already known)" if rep["cached"] else "")
+                + ("  \u2014 cancelled early" if rep["cancelled"] else "") + ".")
+        if not bad:
+            self._status.setText("No damaged media found")
+            QMessageBox.information(
+                self, "Check media health",
+                head + f"\n\nAll {rep['ok']} video(s) read cleanly.")
+            return
+        self._status.setText(f"{len(bad)} damaged file(s) — now skipped")
+        sample = "\n".join(f"  \u2022 {os.path.basename(p)}  \u2014  {why}"
+                            for p, why in bad[:15])
+        more = f"\n  \u2026 and {len(bad) - 15} more" if len(bad) > 15 else ""
+        if QMessageBox.question(
+                self, "Damaged media found",
+                head + f"\n\n{len(bad)} file(s) are damaged:\n\n"
+                f"{sample}{more}\n\n"
+                "They are now skipped, so they no longer slow the gallery "
+                "down. Move them to the trash as well?\n"
+                "(Recoverable \u2014 Undo, or the Trash dialog.)"
+                ) == QMessageBox.StandardButton.Yes:
+            self._trash_paths([p for p, _why in bad])
 
     def _warn_if_stores_unreadable(self) -> None:
         """Tell the user plainly when tags/ratings couldn't be read.

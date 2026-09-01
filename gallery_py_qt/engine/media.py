@@ -347,6 +347,43 @@ def save_frame(path: str, position_ms: float, dest: str) -> bool:
         return False
 
 
+def probe_integrity(path: str) -> "tuple[bool, str]":
+    """Is this video fully readable?  Returns (ok, reason).
+
+    A truncated download keeps a valid header claiming the full duration, so
+    the file opens and plays — until the decoder runs past the real end of the
+    data.  FFmpeg then reports "partial file" and scans BACKWARDS looking for a
+    readable sample, which on a 100MB+ file is slow, blocking work repeated
+    every time the file is touched.  Checking the tail up front lets the app
+    quarantine such files instead of paying that cost repeatedly.
+    """
+    if not is_video(path):
+        return True, ""
+    if not HAS_CV2:
+        return True, "not checked (opencv unavailable)"
+    with _CV2_LOCK:
+        cap = cv2.VideoCapture(path)
+        try:
+            if not cap.isOpened():
+                return False, "cannot be opened"
+            frames = cap.get(cv2.CAP_PROP_FRAME_COUNT)
+            fps = cap.get(cv2.CAP_PROP_FPS)
+            if not fps or fps <= 0 or frames <= 0:
+                return False, "no readable duration"
+            # Seek close to the declared end and try to decode there.  A
+            # truncated file declares frames it does not actually contain.
+            target = max(0, int(frames) - 3)
+            cap.set(cv2.CAP_PROP_POS_FRAMES, target)
+            ok, _frame = cap.read()
+            if not ok:
+                return False, "truncated (data ends before the declared end)"
+            return True, ""
+        except Exception as exc:
+            return False, f"probe failed: {exc}"
+        finally:
+            cap.release()
+
+
 def load_thumbnail(path: str, max_px: int) -> QImage | None:
     """Load `path` scaled to <= max_px on its longest side. Returns QImage."""
     if is_video(path):

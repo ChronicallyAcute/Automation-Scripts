@@ -30,7 +30,7 @@ def isolated(tmp_path, monkeypatch):
     """Redirect every on-disk location + reset in-memory caches per test."""
     from gallery_py_qt import config
     from gallery_py_qt.engine import (favorites, tags, ratings, foldertags,
-                                      media, smartsets, dimcache)
+                                      media, smartsets, dimcache, health)
 
     monkeypatch.setattr(config, "FAVORITES_DIR", str(tmp_path / "GalleryFavorites"))
     monkeypatch.setattr(config, "FAVS_FILE", str(tmp_path / "favs.json"))
@@ -63,6 +63,10 @@ def isolated(tmp_path, monkeypatch):
     monkeypatch.setattr(dimcache, "_store", None)
     monkeypatch.setattr(dimcache, "_dirty", False)
     monkeypatch.setattr(dimcache, "_load_failed", False)
+    monkeypatch.setattr(health, "_FILE", str(tmp_path / "health.json"))
+    monkeypatch.setattr(health, "_store", None)
+    monkeypatch.setattr(health, "_dirty", False)
+    monkeypatch.setattr(health, "_load_failed", False)
     monkeypatch.setattr(tags, "_load_failed", False)
     monkeypatch.setattr(tags, "_backed_up", False)
     monkeypatch.setattr(ratings, "_load_failed", False)
