@@ -71,8 +71,14 @@ class _FolderPickDlg(QDialog):
         self._tree.setSelectionMode(
             QAbstractItemView.SelectionMode.ExtendedSelection)
         self._tree.setAnimated(True)
-        for col in range(1, 4):           # hide size/type/date
-            self._tree.hideColumn(col)
+        # Size and date stay VISIBLE and sortable: picking what to import when
+        # a drive is filling up is a size question, and hiding the column made
+        # that impossible to answer without leaving the dialog.
+        self._tree.hideColumn(2)          # "Type" adds nothing next to the icon
+        self._tree.setSortingEnabled(True)
+        self._tree.sortByColumn(0, Qt.SortOrder.AscendingOrder)
+        self._tree.header().setStretchLastSection(False)
+        self._tree.setColumnWidth(0, 320)
         home = self._fs.index(QDir.homePath())
         self._tree.expand(home)
         self._tree.scrollTo(home)
@@ -87,6 +93,7 @@ class _FolderPickDlg(QDialog):
         # plus the media-type filter for what the tree shows/imports.
         quick, self._type_btn = quick_access_row(self._fs, self._goto)
         self._path_row = quick
+        self._sort_btn = self._build_sort_button()
 
         # Checked-paths list
         self._list = QListView()
@@ -104,6 +111,10 @@ class _FolderPickDlg(QDialog):
         rlay.setContentsMargins(0, 0, 0, 0)
         rlay.addWidget(list_label)
         rlay.addWidget(self._list, 1)
+        self._sel_total = QLabel("Nothing selected")
+        self._sel_total.setStyleSheet(f"color: {config.FG_DIM}; font-size: 11px;")
+        self._sel_total.setWordWrap(True)
+        rlay.addWidget(self._sel_total)
         clear_btn = QPushButton("Clear all")
         clear_btn.clicked.connect(self._clear_all)
         rlay.addWidget(clear_btn)
@@ -123,6 +134,16 @@ class _FolderPickDlg(QDialog):
         llay = QVBoxLayout(left_panel)
         llay.setContentsMargins(0, 0, 0, 0)
         llay.addLayout(quick)
+        sort_row = QHBoxLayout()
+        sort_row.addWidget(self._sort_btn)
+        sort_row.addStretch(1)
+        self._folder_size_btn = QPushButton("Measure folder sizes")
+        self._folder_size_btn.setToolTip(
+            "Folders report no size of their own — measure what is actually "
+            "inside them, biggest first")
+        self._folder_size_btn.clicked.connect(self._measure_folders)
+        sort_row.addWidget(self._folder_size_btn)
+        llay.addLayout(sort_row)
         llay.addWidget(self._tree, 1)
 
         splitter = QSplitter(Qt.Orientation.Horizontal)
@@ -151,6 +172,72 @@ class _FolderPickDlg(QDialog):
 
         # Keep checked-list in sync with checkbox changes
         self._fs.dataChanged.connect(self._refresh_list)
+
+    # -- sorting / size triage -------------------------------------------------
+    _SORTS = (("Name", 0, Qt.SortOrder.AscendingOrder),
+              ("Largest first", 1, Qt.SortOrder.DescendingOrder),
+              ("Smallest first", 1, Qt.SortOrder.AscendingOrder),
+              ("Newest first", 3, Qt.SortOrder.DescendingOrder),
+              ("Oldest first", 3, Qt.SortOrder.AscendingOrder))
+
+    def _build_sort_button(self) -> QToolButton:
+        """Sort the tree by name, size or date.
+
+        Size-first ordering is the one that matters when the goal is freeing
+        space: it puts the files worth deleting at the top of the list.
+        """
+        btn = QToolButton()
+        btn.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
+        menu = QMenu(btn)
+        for label, col, order in self._SORTS:
+            act = menu.addAction(label)
+            act.triggered.connect(
+                lambda _=False, l=label, c=col, o=order:
+                self._apply_sort(l, c, o))
+        btn.setMenu(menu)
+        btn.setText("Sort: Name ▾")
+        btn._sort_menu = menu             # exposed for tests
+        return btn
+
+    def _apply_sort(self, label: str, col: int, order) -> None:
+        self._tree.sortByColumn(col, order)
+        self._sort_btn.setText(f"Sort: {label} ▾")
+
+    def _measure_folders(self) -> None:
+        """Report the subfolders of the current location, biggest first.
+
+        QFileSystemModel reports no size for a directory, so sorting by the
+        Size column cannot rank folders — the bytes are in their descendants.
+        This walks them and shows the answer.
+        """
+        from PySide6.QtWidgets import QMessageBox
+        from .engine import foldersize
+        here = self._fs.filePath(self._tree.currentIndex()) or QDir.homePath()
+        if not os.path.isdir(here):
+            here = os.path.dirname(here)
+        self._folder_size_btn.setEnabled(False)
+        self._folder_size_btn.setText("Measuring…")
+        QApplication.processEvents()
+        try:
+            rows = foldersize.children_sizes(here)
+        finally:
+            self._folder_size_btn.setEnabled(True)
+            self._folder_size_btn.setText("Measure folder sizes")
+        folders = [e for e in rows if e.is_dir][:20]
+        if not folders:
+            QMessageBox.information(
+                self, "Folder sizes",
+                f"{here}\n\nNo subfolders here. The Size column already "
+                "ranks the files — sort by 'Largest first'.")
+            return
+        listing = "\n".join(
+            f"  {foldersize.fmt_size(e.bytes):>10}   {e.files:>6} files   {e.name}"
+            for e in folders)
+        QMessageBox.information(
+            self, "Folder sizes — biggest first",
+            f"{here}\n\n{listing}\n\n"
+            "Hard links are counted once, so these totals reflect the space "
+            "actually used.")
 
     # -- internal helpers -----------------------------------------------------
     def _goto(self, path: str) -> None:
@@ -202,7 +289,36 @@ class _FolderPickDlg(QDialog):
             [Qt.ItemDataRole.CheckStateRole])
 
     def _refresh_list(self, *_) -> None:
-        self._list_model.setStringList(self._fs.checked_all())
+        picked = self._fs.checked_all()
+        self._list_model.setStringList(picked)
+        self._refresh_selection_total(picked)
+
+    def _refresh_selection_total(self, picked: "list[str]") -> None:
+        """Show how much the current selection weighs.
+
+        Only FILES are totalled: measuring every ticked folder recursively on
+        each checkbox click would walk the tree on the GUI thread. The count of
+        folders is shown separately so the number is never mistaken for a
+        complete total.
+        """
+        from .engine import foldersize
+        files = [p for p in picked if os.path.isfile(p)]
+        folders = len(picked) - len(files)
+        total = 0
+        for p in files:
+            try:
+                total += os.path.getsize(p)
+            except OSError:
+                pass
+        if not picked:
+            self._sel_total.setText("Nothing selected")
+            return
+        bits = []
+        if files:
+            bits.append(f"{len(files)} file(s), {foldersize.fmt_size(total)}")
+        if folders:
+            bits.append(f"{folders} folder(s) (size not counted)")
+        self._sel_total.setText("Selected: " + "  ·  ".join(bits))
 
     # -- result ---------------------------------------------------------------
     def selected_items(self) -> tuple[list[str], list[str]]:
@@ -372,6 +488,38 @@ class _TrashJob(QRunnable):
         self._signals.done.emit(moved, failed)
 
 
+# -- Duplicate detection for the viewer's automatic collapsing -----------------
+
+class _DupeSignals(QObject):
+    done = Signal(int, object)     # (scan generation, list[list[str]])
+
+
+class _DupeScanJob(QRunnable):
+    """Hash the loaded media off the GUI thread to find identical copies.
+
+    Cheap in the common case: engine.dupes buckets by size first, so files
+    with a unique size are never read at all.  Carries the scan generation so
+    a result for a folder the user has already navigated away from is dropped
+    rather than applied to the wrong library.
+    """
+    def __init__(self, gen: int, paths: list[str], signals: _DupeSignals):
+        super().__init__()
+        self._gen = gen
+        self._paths = list(paths)
+        self._signals = signals
+        self._cancelled = False
+
+    def cancel(self) -> None:
+        self._cancelled = True
+
+    def run(self) -> None:
+        from .engine import dupes
+        groups = dupes.find_duplicates(
+            self._paths, cancelled=lambda: self._cancelled)
+        if not self._cancelled:
+            self._signals.done.emit(self._gen, groups)
+
+
 # -- Dimension pre-fetch -------------------------------------------------------
 
 class _DimsSignals(QObject):
@@ -480,6 +628,12 @@ class MainWindow(QMainWindow):
         self._dims_apply_timer.setInterval(350)
         self._dims_apply_timer.timeout.connect(self._apply_dims_batch)
 
+        # Automatic duplicate collapsing: one hash pass per folder load, then
+        # the model shows only the best-tagged copy of each identical set.
+        self._dupe_sig = _DupeSignals(self)
+        self._dupe_sig.done.connect(self._on_dupes_found)
+        self._dupe_job: "_DupeScanJob | None" = None
+
         self._build_ui()
         self._restore_session()
 
@@ -564,7 +718,8 @@ class MainWindow(QMainWindow):
         self._trash_btn.setToolTip("Browse, restore, or empty trashed items")
         self._dupes_btn = self._btn("Duplicates", self._open_dupes)
         self._dupes_btn.setToolTip(
-            "Find byte-identical copies among the loaded media")
+            "Find byte-identical copies — in the loaded media, or in any "
+            "folder you point it at (no import needed)")
         self._album_tags_btn = self._btn("Tag albums", self._open_album_tags)
         self._album_tags_btn.setToolTip(
             "Tag whole folders; each mirrors into a folder-tags subfolder")
@@ -742,6 +897,19 @@ class MainWindow(QMainWindow):
                                   self._sync_tags_by_filename)
         self._more_menu.addAction("⚕  Check media health…",
                                   self._check_media_health)
+        self._more_menu.addAction("▦  Size triage (free up space)…",
+                                  self._open_size_triage)
+        self._more_menu.addAction("◔  Storage report…", self._storage_report)
+        self._more_menu.addSeparator()
+        self._collapse_act = self._more_menu.addAction("Hide duplicate copies")
+        self._collapse_act.setCheckable(True)
+        self._collapse_act.setToolTip(
+            "Show only one tile per set of byte-identical files — the copy "
+            "carrying the most tags")
+        self._collapse_act.setChecked(
+            bool(self._prefs.get("collapse_duplicates", False)))
+        self._model.set_collapse_duplicates(self._collapse_act.isChecked())
+        self._collapse_act.toggled.connect(self._toggle_collapse_dupes)
         self._more_btn.setMenu(self._more_menu)
         self._more_btn.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
         h.addWidget(self._more_btn)
@@ -1050,6 +1218,7 @@ class MainWindow(QMainWindow):
         if gen != self._scan_gen:
             return
         self._dims_done_for.clear()
+        self._start_dupe_scan()
         if not self._model.all_paths():
             self._view.set_empty_hint(
                 "No media found in this folder",
@@ -1504,6 +1673,10 @@ class MainWindow(QMainWindow):
                                         "Search:", names, 0, False)
         if ok and name and smartsets.delete(name):
             self._status.setText(f"Deleted saved search “{name}”")
+
+    def _refresh_dupe_choice(self) -> None:
+        """Tags decide which copy is shown, so re-pick when they change."""
+        self._model.refresh_duplicate_choice()
 
     def _on_tag_set_changed(self) -> None:
         """A tag coined inline in multi-view: mirror the tag-manager refresh."""
@@ -1991,13 +2164,131 @@ class MainWindow(QMainWindow):
             self._prefs["trash_purge_days"] = dlg.auto_purge_days
             prefs.save_prefs(self._prefs)
 
-    # -- duplicate finder ------------------------------------------------------
-    def _open_dupes(self) -> None:
-        from .dupes_dialog import DuplicatesDialog
+    # -- automatic duplicate collapsing ----------------------------------------
+    def _start_dupe_scan(self) -> None:
+        """Hash the loaded media so identical copies can be folded to one tile.
+
+        Skipped entirely when collapsing is off, so nobody pays for a feature
+        they are not using.
+        """
+        if not self._model.collapse_duplicates():
+            return
+        if self._dupe_job is not None:
+            self._dupe_job.cancel()
         paths = self._model.all_paths()
         if not paths:
-            self._status.setText("No media loaded to scan for duplicates.")
             return
+        self._dupe_job = _DupeScanJob(self._scan_gen, paths, self._dupe_sig)
+        self._scan_pool.start(self._dupe_job)
+
+    def _on_dupes_found(self, gen: int, groups) -> None:
+        if gen != self._scan_gen:
+            return                      # the folder changed under us
+        self._dupe_job = None
+        self._model.set_duplicate_groups(list(groups))
+        self._report_collapsed()
+
+    def _report_collapsed(self) -> None:
+        n = self._model.duplicates_hidden()
+        if n:
+            self._status.setText(
+                f"{n} duplicate copy(ies) hidden — showing the best-tagged of "
+                "each. Toggle in ⋯ → Hide duplicate copies")
+
+    def _toggle_collapse_dupes(self, on: bool) -> None:
+        self._model.set_collapse_duplicates(on)
+        self._prefs["collapse_duplicates"] = bool(on)
+        prefs.save_prefs(self._prefs)
+        if on:
+            self._start_dupe_scan()
+            self._report_collapsed()
+        else:
+            self._status.setText("Showing every copy")
+
+    # -- storage report --------------------------------------------------------
+    def _storage_report(self) -> None:
+        """What the app itself is using, and whether link mode is really working.
+
+        The second half matters more than it looks: a link that cannot be made
+        silently becomes a full copy, so "hardlink" can be selected while every
+        favourite still costs a second copy of the file.
+        """
+        from PySide6.QtWidgets import QMessageBox
+        from .engine import foldersize, favorites as _favs
+        self._status.setText("Measuring storage…")
+        QApplication.processEvents()
+        rep = foldersize.app_storage_report(self._model.all_paths())
+        self._status.setText("")
+
+        lines = []
+        for place in rep["places"]:
+            lines.append(
+                f"  {foldersize.fmt_size(place['bytes']):>10}   {place['label']}"
+                + (f"\n               {place['note']}" if place["note"] else ""))
+        if rep["mirror_dirs"]:
+            lines.append(
+                f"  {foldersize.fmt_size(rep['mirrors']):>10}   "
+                f"Favourites mirrors ({rep['mirror_dirs']} folder(s) beside "
+                "your media)")
+
+        mode = _favs.LINK_MODE
+        eff_media, why_media = "copy", "No folder is open."
+        if self._current_folder:
+            eff_media, why_media = _favs.probe_link_mode(self._current_folder)
+        eff_tags, why_tags = _favs.probe_link_mode(config.FAVORITES_DIR)
+        fallbacks, reason = _favs.link_fallbacks()
+
+        detail = (
+            f"Setting: {mode}\n\n"
+            f"  Favourites mirror (beside your media):  {eff_media}\n"
+            f"      {why_media}\n\n"
+            f"  Tag folders ({config.FAVORITES_DIR}):  {eff_tags}\n"
+            f"      {why_tags}")
+        if fallbacks:
+            detail += (f"\n\n{fallbacks} placement(s) this session silently "
+                       f"became full copies.\nLast reason: {reason}")
+
+        QMessageBox.information(
+            self, "Storage report",
+            "App-managed storage:\n\n" + "\n".join(lines)
+            + f"\n\n  {foldersize.fmt_size(rep['total']):>10}   TOTAL\n\n"
+            "— — —\n\nHow favourites and tags are stored:\n\n" + detail
+            + "\n\nEmpty the trash from ⋯ → Trash. The thumbnail cache is "
+              "capped at 400 MB and rebuilds itself, so clearing it is safe.")
+
+    # -- size triage -----------------------------------------------------------
+    def _open_size_triage(self) -> None:
+        """Show what is using the disk, biggest first.
+
+        Opens on the current folder's parent when one is loaded, since the
+        question is usually "which of my media folders is the big one".
+        """
+        from .size_triage import SizeTriageDialog
+        start = self._current_folder or QDir.homePath()
+        parent = os.path.dirname(start.rstrip(os.sep)) or start
+        dlg = SizeTriageDialog(parent, self)
+        dlg.importRequested.connect(self.open_folder)
+        dlg.dupesRequested.connect(self._dupes_for_folder)
+        dlg.exec()
+
+    def _dupes_for_folder(self, folder: str) -> None:
+        """Duplicate-scan one folder directly, without importing it."""
+        from .dupes_dialog import DuplicatesDialog
+        dlg = DuplicatesDialog([], self, roots=[folder], recursive=True)
+        dlg.revealRequested.connect(self._reveal_path)
+        dlg.trashRequested.connect(lambda ps: self._trash_paths(list(ps)))
+        dlg.exec()
+
+    # -- duplicate finder ------------------------------------------------------
+    def _open_dupes(self) -> None:
+        """Open the duplicate finder.
+
+        It no longer requires anything to be loaded: with an empty gallery it
+        opens ready to take a folder, so a drive can be de-duplicated without
+        importing media that is only going to be deleted.
+        """
+        from .dupes_dialog import DuplicatesDialog
+        paths = self._model.all_paths()
         dlg = DuplicatesDialog(paths, self)
         dlg.revealRequested.connect(self._reveal_path)
         # Route trashing through the existing pipeline (worker move + undo bar).
@@ -2011,9 +2302,18 @@ class MainWindow(QMainWindow):
                 self._view.reveal_row(row)
                 self._status.setText(os.path.basename(path))
                 return
-        # It may be filtered out of the current view.
-        self._status.setText(
-            f"{os.path.basename(path)} is hidden by the current filter.")
+        # Not in the grid at all: the duplicate finder can scan folders that
+        # were never imported, so "reveal" has nothing to select.
+        from .engine import shell
+        if path in self._model.all_paths():
+            self._status.setText(
+                f"{os.path.basename(path)} is hidden by the current filter.")
+        elif shell.reveal_path(path):
+            self._status.setText(
+                f"{os.path.basename(path)} shown in your file manager")
+        else:
+            self._status.setText(
+                f"{os.path.basename(path)} isn't loaded in the gallery")
 
     # -- album (folder) tagging ------------------------------------------------
     def _open_album_tags(self) -> None:

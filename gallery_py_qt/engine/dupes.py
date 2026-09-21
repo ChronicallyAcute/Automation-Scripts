@@ -169,3 +169,118 @@ def stamp_richest_tags(group: "list[str]", survivors: "list[str]") -> "list[str]
             _tags.set_tags_for(p, merged)
             changed.append(p)
     return changed
+
+
+# -- Hard-link awareness -------------------------------------------------------
+# With link_mode="hardlink", a favourited or tag-foldered file is a SECOND NAME
+# for the same bytes, not a second copy.  Byte-comparison cannot tell the two
+# apart, so the finder reports those names as duplicates and offers to reclaim
+# space that was never occupied.  Deleting one name frees nothing until the
+# last name is gone, so the estimate has to account for shared storage or it
+# will overstate the win — badly, for anyone running in hardlink mode.
+
+def storage_id(path: str) -> "tuple[int, int] | None":
+    """(device, inode) identifying the bytes behind `path`, or None.
+
+    Two paths sharing this pair are the same file on disk. Populated on
+    Windows as well as POSIX; None when the platform cannot report it.
+    """
+    try:
+        st = os.stat(path)
+    except OSError:
+        return None
+    if not st.st_ino:              # some filesystems report 0 — unusable
+        return None
+    return (st.st_dev, st.st_ino)
+
+
+def link_clusters(paths: "list[str]") -> "list[list[str]]":
+    """Group `paths` by the storage they share; singletons included."""
+    by_id: "dict[tuple[int, int], list[str]]" = {}
+    loose: "list[list[str]]" = []
+    for p in paths:
+        sid = storage_id(p)
+        if sid is None:
+            loose.append([p])
+        else:
+            by_id.setdefault(sid, []).append(p)
+    return [sorted(v) for v in by_id.values()] + loose
+
+
+def is_all_one_file(paths: "list[str]") -> bool:
+    """True when every path names the SAME bytes (hard links to one file)."""
+    if len(paths) < 2:
+        return False
+    ids = [storage_id(p) for p in paths]
+    return ids[0] is not None and all(i == ids[0] for i in ids)
+
+
+def reclaimable_bytes(group: "list[str]", doomed: "list[str] | None" = None
+                      ) -> int:
+    """Bytes actually freed by deleting `doomed` (default: all but one).
+
+    Space is only released when the LAST name for a given set of bytes goes,
+    so a cluster of hard links that keeps any survivor frees nothing.
+    """
+    if not group:
+        return 0
+    try:
+        size = os.stat(group[0]).st_size
+    except OSError:
+        return 0
+    gone = set(doomed) if doomed is not None else set(group[1:])
+    freed = 0
+    for cluster in link_clusters(group):
+        if cluster and all(p in gone for p in cluster):
+            freed += size          # every name for these bytes is going
+    return freed
+
+
+# -- Choosing which copy to keep / show ---------------------------------------
+# One rule, used in two places: the duplicate dialog's "select all but
+# best-tagged" button and the gallery's automatic duplicate collapsing.  They
+# must agree, or hiding a copy in the grid and keeping a different one in the
+# cleanup dialog would contradict each other.
+
+def best_tagged(group: "list[str]") -> str:
+    """The copy worth keeping: most tags, then newest, then stable by path.
+
+    Tag count comes first because tagging is the work that cannot be recovered
+    from the bytes — the files are byte-identical, so every other difference is
+    cosmetic.  mtime breaks the common tie (neither copy tagged); the path
+    breaks the rest so the choice never depends on dict ordering.
+    """
+    from . import tags as _tags
+
+    def rank(p: str):
+        try:
+            mtime = os.stat(p).st_mtime
+        except OSError:
+            mtime = 0.0
+        return (len(_tags.tags_for(p)), mtime, p)
+
+    return max(group, key=rank) if group else ""
+
+
+def collapse(paths: "list[str]",
+             groups: "list[list[str]]") -> "tuple[list[str], dict[str, list[str]]]":
+    """Drop duplicate copies from `paths`, keeping the best of each group.
+
+    Returns (kept_paths, hidden_by_keeper) where hidden_by_keeper maps the
+    surviving path to the copies it now stands in for — so the UI can say what
+    was hidden and offer to show it again.  Order is preserved; paths not in
+    any group pass through untouched.
+    """
+    hidden: "dict[str, list[str]]" = {}
+    drop: "set[str]" = set()
+    have = set(paths)                     # hoisted: groups can be numerous
+    for g in groups:
+        present = [p for p in g if p in have]
+        if len(present) < 2:
+            continue
+        keeper = best_tagged(present)
+        others = [p for p in present if p != keeper]
+        if others:
+            hidden[keeper] = sorted(others)
+            drop.update(others)
+    return [p for p in paths if p not in drop], hidden

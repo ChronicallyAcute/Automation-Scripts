@@ -51,10 +51,52 @@ def set_link_mode(mode: str) -> None:
     LINK_MODE = mode if mode in ("copy", "hardlink", "symlink") else "copy"
 
 
-def place_file(src: str, dst: str) -> None:
+# When a link is requested but cannot be made, we fall back to a real copy so
+# the mirror still works.  That fallback is SILENT and costs full disk space,
+# which is how someone can run in "hardlink" mode, believe they are saving
+# space, and still fill a drive.  The two usual causes are structural rather
+# than transient:
+#   * hardlink across volumes — os.link cannot span drives, and the tag folders
+#     live under FAVORITES_DIR, which is often on a different drive than the
+#     media;
+#   * symlink without privilege — Windows needs Developer Mode or an elevated
+#     process to create one.
+# So count the fallbacks and say so once, rather than leaving it invisible.
+_link_fallbacks = 0
+_link_fallback_reason = ""
+_warned_fallback = False
+
+
+def link_fallbacks() -> "tuple[int, str]":
+    """(how many placements silently became full copies, last reason)."""
+    return _link_fallbacks, _link_fallback_reason
+
+
+def reset_link_fallbacks() -> None:
+    global _link_fallbacks, _link_fallback_reason, _warned_fallback
+    _link_fallbacks = 0
+    _link_fallback_reason = ""
+    _warned_fallback = False
+
+
+def _note_fallback(exc: OSError) -> None:
+    global _link_fallbacks, _link_fallback_reason, _warned_fallback
+    _link_fallbacks += 1
+    _link_fallback_reason = str(exc)
+    if not _warned_fallback:
+        _warned_fallback = True
+        print(f"[favs] {LINK_MODE} not possible here ({exc}) — falling back to "
+              "full copies, which use disk space. Check that the favourites "
+              "folder is on the same drive as your media (hardlink), or "
+              "enable Developer Mode (symlink).", file=sys.stderr)
+
+
+def place_file(src: str, dst: str) -> str:
     """Put a copy-or-link of `src` at `dst` per LINK_MODE, replacing whatever
-    is there.  Links fall back to a real copy when unsupported (cross-device
-    hardlink, no symlink privilege, FS without link support)."""
+    is there.  Returns the mode ACTUALLY used ("hardlink"/"symlink"/"copy"),
+    which is not always the one requested — links fall back to a real copy when
+    unsupported (cross-device hardlink, no symlink privilege, FS without link
+    support)."""
     try:
         if os.path.lexists(dst):
             os.remove(dst)
@@ -63,16 +105,53 @@ def place_file(src: str, dst: str) -> None:
     if LINK_MODE == "hardlink":
         try:
             os.link(src, dst)
-            return
-        except OSError:
-            pass
+            return "hardlink"
+        except OSError as exc:
+            _note_fallback(exc)
     elif LINK_MODE == "symlink":
         try:
             os.symlink(os.path.abspath(src), dst)
-            return
-        except OSError:
-            pass
+            return "symlink"
+        except OSError as exc:
+            _note_fallback(exc)
     shutil.copy2(src, dst)
+    return "copy"
+
+
+def probe_link_mode(folder: str) -> "tuple[str, str]":
+    """Would LINK_MODE actually work for files placed into `folder`?
+
+    Returns (effective_mode, explanation).  Makes a real link to a scratch file
+    and deletes it, because the answer depends on the pair of locations — the
+    same setting can work for the per-folder Favorites mirror and silently
+    degrade to copying for the tag folders on another drive.
+    """
+    if LINK_MODE == "copy":
+        return "copy", "Copying is selected."
+    probe_dir = os.path.abspath(folder)
+    src = os.path.join(probe_dir, ".gallery_linkprobe.tmp")
+    dst = src + ".link"
+    try:
+        os.makedirs(probe_dir, exist_ok=True)
+        with open(src, "wb") as f:
+            f.write(b"0")
+    except OSError as exc:
+        return "copy", f"Cannot write to {probe_dir}: {exc}"
+    try:
+        if LINK_MODE == "hardlink":
+            os.link(src, dst)
+        else:
+            os.symlink(src, dst)
+        return LINK_MODE, f"{LINK_MODE} works for files placed in {probe_dir}."
+    except OSError as exc:
+        return "copy", (f"{LINK_MODE} is NOT possible for {probe_dir} "
+                        f"({exc}) — full copies are being made instead.")
+    finally:
+        for p in (dst, src):
+            try:
+                os.remove(p)
+            except OSError:
+                pass
 
 
 class Favorites:

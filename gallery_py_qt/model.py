@@ -85,6 +85,14 @@ class GalleryModel(QAbstractListModel):
         self._tag_match_all = False
         self._query = ""
         self._query_pred = None
+        # Duplicate collapsing: byte-identical copies are folded down to one
+        # visible tile.  `_dupe_groups` is the (expensive) hash result; the
+        # hidden SET is derived from it and recomputed whenever tags change,
+        # since the copy worth showing is the best-tagged one.
+        self._collapse_dupes = False
+        self._dupe_groups: "list[list[str]]" = []
+        self._dupe_hidden: "set[str]" = set()
+        self._dupe_keeper: "dict[str, list[str]]" = {}
         # Cached sort order over _all; None means "recompute on next reindex".
         self._sorted_cache: "list[str] | None" = None
         # Sort chain: keys applied in order (first differentiates, later ones
@@ -163,6 +171,10 @@ class GalleryModel(QAbstractListModel):
 
     # -- filter helpers --------------------------------------------------------
     def _passes_filter(self, p: str) -> bool:
+        # Redundant copies drop out first: a set lookup, cheaper than any of
+        # the tests below, and it should win regardless of the other filters.
+        if self._collapse_dupes and p in self._dupe_hidden:
+            return False
         # Three media classes: still images, GIFs, and videos.
         if media.is_video(p):
             if not self._show_videos:
@@ -219,6 +231,44 @@ class GalleryModel(QAbstractListModel):
         # Only membership changed, not ranking — reuse the cached sort order so
         # a keystroke costs one filter pass instead of a full re-sort.
         self._reindex(keep_order=True)
+
+    # -- duplicate collapsing --------------------------------------------------
+    def set_duplicate_groups(self, groups: "list[list[str]]") -> None:
+        """Record byte-identical groups (from a background hash pass)."""
+        self._dupe_groups = [list(g) for g in groups]
+        self._recompute_dupe_hidden()
+
+    def set_collapse_duplicates(self, on: bool) -> None:
+        self._collapse_dupes = bool(on)
+        self._reindex(keep_order=True)
+
+    def collapse_duplicates(self) -> bool:
+        return self._collapse_dupes
+
+    def _recompute_dupe_hidden(self) -> None:
+        """Pick the copy to show per group and hide the rest.
+
+        Separate from the hashing so a tag change — which can move the "best"
+        copy — costs a re-pick rather than a re-hash of the whole library.
+        """
+        from .engine import dupes
+        _kept, hidden_by_keeper = dupes.collapse(self._all, self._dupe_groups)
+        self._dupe_keeper = hidden_by_keeper
+        self._dupe_hidden = {p for ps in hidden_by_keeper.values() for p in ps}
+        if self._collapse_dupes:
+            self._reindex(keep_order=True)
+
+    def refresh_duplicate_choice(self) -> None:
+        """Re-pick the visible copy in each group (call after tags change)."""
+        if self._dupe_groups:
+            self._recompute_dupe_hidden()
+
+    def duplicates_hidden(self) -> int:
+        return len(self._dupe_hidden) if self._collapse_dupes else 0
+
+    def hidden_copies_of(self, path: str) -> "list[str]":
+        """The copies `path` is standing in for, if any."""
+        return list(self._dupe_keeper.get(path, ()))
 
     def set_sort(self, mode: str) -> None:
         self.set_sort_chain([mode])
