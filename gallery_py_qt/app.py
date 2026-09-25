@@ -61,6 +61,22 @@ def main(argv: list[str] | None = None) -> int:
         print(f"[diag] ENABLED — stalls over {_thresh}ms are logged to:\n"
               f"       {_diag.LOG_PATH}", file=sys.stderr)
 
+    # Report what the app actually sees, so a display-scaling problem can be
+    # confirmed rather than guessed at.  At 300% scaling a 3840x2160 panel is a
+    # 1280x720 LOGICAL desktop: Qt sizes every widget in logical pixels, so the
+    # app has as much room to lay out chrome as it would on a 720p monitor.
+    screen = app.primaryScreen()
+    if screen is not None:
+        g = screen.geometry()
+        dpr = screen.devicePixelRatio()
+        print(f"[display] {int(g.width() * dpr)}x{int(g.height() * dpr)} "
+              f"at {dpr:.2f}x scaling  →  {g.width()}x{g.height()} logical",
+              file=sys.stderr)
+        if dpr > 1.5:
+            print("[display] high-DPI: tag chips use a flat plate instead of a "
+                  "blurred shadow (GALLERY_TAG_SHADOW=1 to override)",
+                  file=sys.stderr)
+
     win = MainWindow()
     win.show()
 

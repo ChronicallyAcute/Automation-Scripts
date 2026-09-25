@@ -16,6 +16,9 @@ class SettingsDialog(QDialog):
     _LINK_LABELS = [("Copy files (default)", "copy"),
                     ("Hard-link (save space, same drive)", "hardlink"),
                     ("Symlink (save space)", "symlink")]
+    _CHROME_LABELS = [
+        ("Reflow tiles into the freed space (default)", False),
+        ("Keep the tile layout stable (faster)", True)]
     _IO_LABELS = [("Auto-detect (default)", "auto"),
                   ("Force reduced (external/slow storage)", "on"),
                   ("Force full speed", "off")]
@@ -43,6 +46,17 @@ class SettingsDialog(QDialog):
             self._link.addItem(label, val)
         self._select(self._link, prefs.get("link_mode", "copy"))
         form.addRow("Favourites / tag folders", self._link)
+
+        self._chrome = QComboBox()
+        for label, val in self._CHROME_LABELS:
+            self._chrome.addItem(label, val)
+        self._select(self._chrome, bool(prefs.get("stable_layout", False)))
+        self._chrome.setToolTip(
+            "When the top bars auto-hide, the tiles can grow into the space "
+            "they leave. That re-lays every tile and re-fits every video, "
+            "which is costly on a high-resolution or scaled display — keeping "
+            "the layout stable avoids it.")
+        form.addRow("When bars auto-hide", self._chrome)
 
         self._io = QComboBox()
         for label, val in self._IO_LABELS:
@@ -91,4 +105,5 @@ class SettingsDialog(QDialog):
         p["low_io_mode"] = (True if io == "on" else False if io == "off"
                             else None)
         p["trash_purge_days"] = self._purge.value()
+        p["stable_layout"] = bool(self._chrome.currentData())
         return p

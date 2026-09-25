@@ -1286,6 +1286,8 @@ class MainWindow(QMainWindow):
         if new.get("theme") != self._prefs.get("theme"):
             self._set_theme(new["theme"])
         favorites.set_link_mode(new.get("link_mode", "copy"))
+        if self._mv is not None:
+            self._mv.set_stable_layout(bool(new.get("stable_layout", False)))
         li = new.get("low_io_mode")
         self._low_io_forced = isinstance(li, bool)
         if self._low_io_forced:
@@ -2369,6 +2371,8 @@ class MainWindow(QMainWindow):
         self._view.suspend_video_previews()
         if self._mv is None:
             self._mv = MultiView(self._model, self._favs, self)
+            self._mv.set_stable_layout(
+                bool(self._prefs.get("stable_layout", False)))
             self._mv.favToggled.connect(self._toggle_fav_path)
             self._mv.trashed.connect(self._trash_path)
             self._mv.rotated.connect(self._rotate_from_multiview)

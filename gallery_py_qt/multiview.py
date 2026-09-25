@@ -44,6 +44,7 @@ from PySide6.QtMultimedia import QMediaPlayer, QAudioOutput, QtAudio
 from PySide6.QtMultimediaWidgets import QGraphicsVideoItem
 
 from . import config
+from .flowlayout import FlowLayout
 from .engine import media, shell, tags
 from .gifplayer import GifPlayer
 from .help_overlay import make_help_panel, toggle_help_panel
@@ -197,6 +198,27 @@ class _AspectLabel(QLabel):
         self._apply()
 
 
+# A drop shadow is a QGraphicsEffect: Qt renders the widget to an offscreen
+# pixmap and blurs it on the CPU for every repaint.  The cost grows with the
+# pixel area of that surface, so at 200-300% display scaling it is 4-9x what it
+# costs at 100% — enough to make hover show/hide visibly stutter.  Past this
+# device-pixel ratio we use a flat plate instead.  GALLERY_TAG_SHADOW=1 forces
+# the shadow back on, =0 forces it off.
+_SHADOW_MAX_DPR = 1.5
+
+
+def _shadow_affordable() -> bool:
+    env = os.environ.get("GALLERY_TAG_SHADOW")
+    if env in ("0", "1"):
+        return env == "1"
+    try:
+        from PySide6.QtGui import QGuiApplication
+        screen = QGuiApplication.primaryScreen()
+        return screen is None or screen.devicePixelRatio() <= _SHADOW_MAX_DPR
+    except Exception:
+        return True
+
+
 class _Slot(QWidget):
     """One pane in the multi-view grid."""
     favToggled = Signal(str)        # path
@@ -246,16 +268,30 @@ class _Slot(QWidget):
         # the media shows through between the tag chips (matching _btnbar).
         self._tagbar = QWidget(self)
         self._tagbar.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
-        # With no bar behind them the chips would vanish on bright media, so a
-        # tight dark shadow gives every glyph its own contrast instead.
-        _tagshadow = QGraphicsDropShadowEffect(self._tagbar)
-        _tagshadow.setBlurRadius(4)
-        _tagshadow.setOffset(0, 1)
-        _tagshadow.setColor(QColor(0, 0, 0, 230))
-        self._tagbar.setGraphicsEffect(_tagshadow)
-        self._taglay = QHBoxLayout(self._tagbar)
+        # With no bar behind them the chips would vanish on bright media, so
+        # they need their own contrast.  A drop shadow looks best, but a
+        # QGraphicsEffect forces Qt to render the widget into an offscreen
+        # pixmap and blur it ON THE CPU for every repaint — and showing or
+        # hiding the row on hover is a repaint.  That cost scales with the
+        # SURFACE AREA, so at 300% display scaling it is nine times what it is
+        # at 100%, which is where the hover stutter comes from.  Above a
+        # modest device-pixel ratio, fall back to a flat translucent plate
+        # behind each chip: visually close, and free.
+        self._chip_plate = not _shadow_affordable()
+        if not self._chip_plate:
+            _tagshadow = QGraphicsDropShadowEffect(self._tagbar)
+            _tagshadow.setBlurRadius(4)
+            _tagshadow.setOffset(0, 1)
+            _tagshadow.setColor(QColor(0, 0, 0, 230))
+            self._tagbar.setGraphicsEffect(_tagshadow)
+        # A wrapping layout, not QHBoxLayout: a box layout squeezes chips to
+        # their minimum and then overflows the widget, so on a narrow tile the
+        # chips past the right edge were clipped away — invisible AND
+        # unclickable, with nothing to show they existed.  This wraps instead.
+        # It bites hardest on a high-DPI display: 3840x2160 at 300% is a
+        # 1280x720 LOGICAL desktop, so every tile is narrow.
+        self._taglay = FlowLayout(self._tagbar, margin=0, spacing=2)
         self._taglay.setContentsMargins(2, 1, 2, 1)
-        self._taglay.setSpacing(2)
         self._tag_btns: dict[str, QToolButton] = {}
         # Resting state shows only the tags this file HAS — that is the part
         # worth reading while scanning a grid.  The full, editable chip row
@@ -686,12 +722,20 @@ class _Slot(QWidget):
             lw = min(self._srclink.sizeHint().width(), max(1, dw))
             self._srclink.setGeometry(max(0, x), max(0, y + bh), lw, lh)
             self._srclink.raise_()
-        th = self._tagbar.sizeHint().height()
         seek_h = (max(20, self._seekwrap.sizeHint().height()) + 6
                   if self._is_video else 0)
+        # Ask how tall the chips need to be AT THIS WIDTH: the row wraps, so
+        # its height depends on how much room it was given.  sizeHint() would
+        # report one row's worth and clip the rest.
+        bar_w = max(1, dw)
+        th = max(1, self._taglay.heightForWidth(bar_w))
+        # Never let the chips eat the whole tile: past a third of the media
+        # height they stop being an overlay.  The rest stays reachable because
+        # hovering expands the row over the media above it.
+        th = min(th, max(1, int(dh * 0.5)))
         self._tagbar.setGeometry(max(0, x),
                                  max(0, y + dh - th - seek_h),
-                                 max(1, dw), th)
+                                 bar_w, th)
         self._tagbar.raise_()
         if self._is_video:
             self._position_seek()
@@ -914,7 +958,8 @@ class _Slot(QWidget):
         self._new_tag_btn.setText("＋#")
         self._new_tag_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         self._new_tag_btn.setToolTip("Create a new tag and apply it to this file")
-        self._new_tag_btn.setStyleSheet(self._TAG_CSS_OFF % config.OVERLAY_FG)
+        self._new_tag_btn.setStyleSheet(
+            self._plated(self._TAG_CSS_OFF % config.OVERLAY_FG))
         self._new_tag_btn.clicked.connect(self._create_tag_inline)
         self._taglay.addWidget(self._new_tag_btn)
         for t in tags.get_tags():
@@ -925,8 +970,9 @@ class _Slot(QWidget):
             b.clicked.connect(lambda _=False, tg=t: self._toggle_tag(tg))
             self._taglay.addWidget(b)
             self._tag_btns[t] = b
-        self._taglay.addStretch(1)
-        # Far-right: per-tile resize (±10%), sized like the tag chips.
+        # (No stretch item: a flow layout packs from the left and wraps, so a
+        # spacer would consume a whole row.)
+        # Per-tile resize (±10%), sized like the tag chips.
         self._tile_zoom_out_btn = self._mk_tile_zoom("−", -self._TILE_ZOOM_STEP,
                                                      "Shrink this media 10%")
         self._tile_zoom_in_btn = self._mk_tile_zoom("+", self._TILE_ZOOM_STEP,
@@ -1036,6 +1082,27 @@ class _Slot(QWidget):
         if self._tagbar.isVisible():
             self._tagbar.raise_()
 
+    # When the drop shadow is too expensive (high-DPI), each chip carries its
+    # own translucent plate instead.  Appended as a later rule so it overrides
+    # the "background: transparent" in the base template.
+    _CHIP_PLATE = " QToolButton { background: rgba(0,0,0,150); }"
+
+    def _plated(self, css: str) -> str:
+        return css + self._CHIP_PLATE if self._chip_plate else css
+
+    @staticmethod
+    def _set_css(widget, css: str) -> None:
+        """Apply a stylesheet only when it actually changed.
+
+        setStyleSheet() forces Qt to re-resolve and re-polish the widget's
+        style — the single most expensive thing in this refresh — and the
+        refresh runs across every slot whenever tags change anywhere.  Most of
+        those writes set the string that was already there.
+        """
+        if widget.property("_css_cache") != css:
+            widget.setProperty("_css_cache", css)
+            widget.setStyleSheet(css)
+
     def _refresh_tag_styles(self) -> None:
         self._apply_tag_visibility()
         cur = set(tags.tags_for(self._path)) if self._path else set()
@@ -1043,17 +1110,17 @@ class _Slot(QWidget):
             # A set tag wears its own colour (falling back to the accent), so a
             # dense chip row is scannable without reading every label.
             hue = tags.color_of(t) or config.ACCENT
-            b.setStyleSheet(
+            self._set_css(b, self._plated(
                 (self._TAG_CSS_ON % (hue, hue)) if t in cur
-                else (self._TAG_CSS_OFF % config.OVERLAY_FG))
+                else (self._TAG_CSS_OFF % config.OVERLAY_FG)))
         # The ditto button lights up only when there are remembered tags to add.
         recent = tags.recent_tags()
         pending = bool(self._path) and any(
             t not in cur for t in recent if t in tags.TAGS)
         self._repeat_btn.setEnabled(pending)
-        self._repeat_btn.setStyleSheet(
+        self._set_css(self._repeat_btn, self._plated(
             (self._TAG_CSS_ON % (config.ACCENT, config.ACCENT)) if pending
-            else (self._TAG_CSS_OFF % config.FG_DIM))
+            else (self._TAG_CSS_OFF % config.FG_DIM)))
         if recent:
             self._repeat_btn.setToolTip(
                 "Apply the most recently used tags: " + ", ".join(recent))
@@ -1675,6 +1742,14 @@ class MultiView(QWidget):
         self._bars_hide_timer.setSingleShot(True)
         self._bars_hide_timer.setInterval(2500)
         self._bars_hide_timer.timeout.connect(self._maybe_hide_bars)
+        # Coalesces bursts of grid-host resizes into one relayout (see
+        # eventFilter).  One frame at 60Hz is long enough to swallow a drag's
+        # per-frame events without the tiles visibly lagging the window.
+        self._relayout_timer = QTimer(self)
+        self._relayout_timer.setSingleShot(True)
+        self._relayout_timer.setInterval(16)
+        self._relayout_timer.timeout.connect(self._do_relayout)
+        self._stable_layout = False
 
         # Keyboard/mouse help (?/F1 dispatched here by MainWindow — binding
         # them locally too would make the shortcuts ambiguous, like H was).
@@ -2354,10 +2429,12 @@ class MultiView(QWidget):
         et = event.type()
         if obj is self._grid_host and et == QEvent.Type.Resize:
             # Host resizes when the panel resizes AND when the bars hide/show.
-            if self._ss_slot_order:
-                self._ss_reposition()
-            else:
-                self._layout_tiles()
+            # Both arrive in bursts — a window drag emits a resize per frame,
+            # and the chrome auto-hide resizes the host every time the pointer
+            # wakes it — while re-laying the tiles is expensive (each video
+            # tile re-fits its surface).  Coalesce: do it once when the burst
+            # settles instead of once per event.
+            self._relayout_timer.start()
         elif et in (QEvent.Type.MouseMove, QEvent.Type.Enter):
             if isinstance(obj, _Slot):
                 self._hover_slot = obj      # target for the Delete key
@@ -2387,6 +2464,29 @@ class MultiView(QWidget):
     # resize re-fits every video — the periodic jitter mid-playback.  It is also
     # the strip you actually reach for, so it should not move under the cursor.
     # Only the header auto-hides; per-tile overlays keep their own hover rule.
+    def _do_relayout(self) -> None:
+        if self._ss_slot_order:
+            self._ss_reposition()
+        else:
+            self._layout_tiles()
+
+    def set_stable_layout(self, on: bool) -> None:
+        """Stop the chrome auto-hide from resizing the grid.
+
+        With this on, the chrome's space is retained while it is hidden: the
+        bars still vanish (the decluttering the auto-hide was added for) but
+        the tiles keep their geometry, so nothing re-lays and no video re-fits.
+        The cost is that tiles no longer grow into the freed strip.
+        """
+        self._stable_layout = bool(on)
+        for w in (self._chrome_widget, self._autoscroll_widget):
+            sp = w.sizePolicy()
+            sp.setRetainSizeWhenHidden(self._stable_layout)
+            w.setSizePolicy(sp)
+
+    def stable_layout(self) -> bool:
+        return getattr(self, "_stable_layout", False)
+
     def _show_bars(self) -> None:
         if not self._chrome_widget.isVisible():
             self._chrome_widget.show()
