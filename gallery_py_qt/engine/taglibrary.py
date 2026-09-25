@@ -211,12 +211,6 @@ def mirror_roots(media_folders: "list[str] | None" = None,
     return [r for r in dict.fromkeys(roots) if os.path.isdir(r)]
 
 
-def _under_any(path: str, roots: "list[str]") -> bool:
-    ap = os.path.abspath(path)
-    return any(ap == r or ap.startswith(r + os.sep)
-               for r in (os.path.abspath(x) for x in roots))
-
-
 def index_originals(roots: "list[str]",
                     exclude: "list[str] | None" = None,
                     recursive: bool = True,
@@ -249,7 +243,7 @@ def index_originals(roots: "list[str]",
         if not root or not os.path.isdir(root):
             continue
         for dirpath, dirnames, filenames in os.walk(root):
-            if _under_any(dirpath, skip):
+            if favorites.under_any(dirpath, skip):
                 dirnames[:] = []
                 continue
             dirnames[:] = [d for d in dirnames if d != "Favorites"]
@@ -288,21 +282,18 @@ def plan_relink(roots: "list[str]", index: "dict[str, str]") -> "list[dict]":
         for dirpath, _dirnames, filenames in os.walk(root):
             for fn in filenames:
                 path = os.path.join(dirpath, fn)
-                if os.path.islink(path):
-                    continue                # already a link
+
                 if os.path.splitext(fn.lower())[1] not in config.SUPPORTED:
                     continue
                 original = index.get(fn)
                 if original and os.path.abspath(original) == os.path.abspath(path):
                     continue                # this IS the original
-                size = 0
+                # A hard link is already a link, whatever the name suggests:
+                # more than one name for these bytes means no copy exists.
+                if favorites.is_link_entry(path):
+                    continue
                 try:
-                    st = os.stat(path)
-                    # A hard link is already a link, whatever the name says:
-                    # more than one name for these bytes means no copy exists.
-                    if st.st_nlink > 1:
-                        continue
-                    size = st.st_size
+                    size = os.stat(path).st_size
                 except OSError:
                     continue
                 out.append({"copy": path, "original": original or "",
@@ -327,26 +318,12 @@ def relink_copies(plan: "list[dict]") -> "tuple[int, int, list[str]]":
         if not os.path.exists(original):
             errors.append(f"{original}: original has gone")
             continue
-        tmp = copy + ".relink.tmp"
         try:
-            if os.path.lexists(tmp):
-                os.remove(tmp)
-            how = favorites.place_file(original, tmp)
-            if how == "copy":
-                # Replacing a copy with another copy reclaims nothing and
-                # would just churn the disk.
-                os.remove(tmp)
+            if favorites.link_in_place(original, copy) == "copy":
                 errors.append(f"{copy}: no link possible (would stay a copy)")
                 continue
-            os.remove(copy)
-            os.rename(tmp, copy)      # rename, not replace: tmp may be a symlink
             relinked += 1
             freed += item["bytes"]
         except OSError as exc:
             errors.append(f"{copy}: {exc}")
-            try:
-                if os.path.lexists(tmp):
-                    os.remove(tmp)
-            except OSError:
-                pass
     return relinked, freed, errors

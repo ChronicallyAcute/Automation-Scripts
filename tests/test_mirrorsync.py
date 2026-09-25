@@ -318,3 +318,94 @@ def test_sync_populates_the_central_favourites_folder(lib, tmp_path):
     root = favorites.central_favorites_root()
     hits = [f for _d, _s, fs in os.walk(root) for f in fs]
     assert "a.png" in hits
+
+
+# -- filtering the rebuild by tag ----------------------------------------------
+
+def test_only_the_chosen_tags_are_mirrored(lib, tmp_path):
+    a = _img(str(tmp_path / "media" / "a.png"))
+    tags.toggle_tag(a, "T - Face")
+    tags.toggle_tag(a, "T - Landscape")
+    got = mirrorsync.collect_tagged([], only_tags={"T - Face"})
+    assert got == {a: ["T - Face"]}
+
+
+def test_no_filter_still_mirrors_everything(lib, tmp_path):
+    a = _img(str(tmp_path / "media" / "a.png"))
+    tags.toggle_tag(a, "T - Face")
+    tags.toggle_tag(a, "T - Landscape")
+    assert mirrorsync.collect_tagged([], None) == {
+        a: ["T - Face", "T - Landscape"]}
+
+
+def test_an_unknown_tag_in_the_filter_matches_nothing(lib, tmp_path):
+    a = _img(str(tmp_path / "media" / "a.png"))
+    tags.toggle_tag(a, "T - Face")
+    assert mirrorsync.collect_tagged([], only_tags={"T - Nope"}) == {}
+
+
+def test_a_filtered_run_leaves_other_tag_folders_alone(lib, tmp_path):
+    """The important one: pruning must not treat an unmentioned tag's links as
+    stale just because this run did not plan them."""
+    a = _img(str(tmp_path / "media" / "a.png"))
+    tags.toggle_tag(a, "T - Face")
+    tags.toggle_tag(a, "T - Landscape")
+    mirrorsync.sync([str(tmp_path / "media")])
+    other = lib / "Tag Folders" / "T - Landscape" / "a.png"
+    assert os.path.lexists(other)
+    # Rebuild only "T - Face"; "T - Landscape" must survive untouched.
+    mirrorsync.sync([str(tmp_path / "media")], only_tags={"T - Face"})
+    assert os.path.lexists(other)
+
+
+def test_an_unfiltered_run_still_prunes_everywhere(lib, tmp_path):
+    a = _img(str(tmp_path / "media" / "a.png"))
+    tags.toggle_tag(a, "T - Face")
+    mirrorsync.sync([str(tmp_path / "media")])
+    dst = lib / "Tag Folders" / "T - Face" / "a.png"
+    assert os.path.lexists(dst)
+    tags.toggle_tag(a, "T - Face")
+    mirrorsync.sync([str(tmp_path / "media")])
+    assert not os.path.lexists(dst)
+
+
+def test_favourites_can_be_left_out(lib, tmp_path):
+    favorites.set_favorites_layout(False)
+    p = _img(str(tmp_path / "media" / "a.png"))
+    favorites.Favorites().toggle(p)
+    favorites.flush_mirror_ops()
+    rep = mirrorsync.sync([str(tmp_path / "media")], include_favorites=False)
+    assert rep["favourited_files"] == 0
+
+
+def test_the_picker_offers_every_tag(qapp, lib):
+    from gallery_py_qt.main_window import MainWindow
+    win = MainWindow()
+    assert hasattr(win, "_pick_tags_to_mirror")
+    win.close()
+
+
+# -- shared helpers are shared -------------------------------------------------
+
+def test_link_helpers_live_in_one_place():
+    from gallery_py_qt.engine import taglibrary as tl
+    assert mirrorsync.is_link_entry is favorites.is_link_entry
+    assert not hasattr(tl, "_under_any")
+
+
+def test_link_in_place_abandons_a_would_be_copy(lib, tmp_path):
+    favorites.set_link_mode("copy")
+    src = _img(str(tmp_path / "media" / "a.png"))
+    dst = str(tmp_path / "media" / "b.png")
+    assert favorites.link_in_place(src, dst) == "copy"
+    assert not os.path.exists(dst), "nothing may be written"
+
+
+def test_link_in_place_swaps_atomically(lib, tmp_path):
+    favorites.set_link_mode("auto")
+    src = _img(str(tmp_path / "media" / "a.png"))
+    dst = str(tmp_path / "media" / "b.png")
+    how = favorites.link_in_place(src, dst)
+    assert how in ("hardlink", "symlink")
+    assert favorites.is_link_entry(dst)
+    assert not os.path.lexists(dst + ".link.tmp"), "no scratch file left"

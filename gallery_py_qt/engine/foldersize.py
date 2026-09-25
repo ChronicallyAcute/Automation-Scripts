@@ -16,6 +16,8 @@ from __future__ import annotations
 import os
 from typing import Callable
 
+from .. import config
+
 
 class Entry:
     """One row of a size listing: a child folder or file, with its total."""
@@ -127,15 +129,8 @@ def children_sizes(folder: str,
     return out
 
 
-def fmt_size(nbytes: int) -> str:
-    """Human-readable byte count, matching the duplicate finder's formatting."""
-    if nbytes < 1024:
-        return f"{nbytes} B"
-    kb = nbytes / 1024
-    if kb < 1024:
-        return f"{kb:.0f} KB"
-    mb = kb / 1024
-    return f"{mb:.1f} MB" if mb < 1024 else f"{mb / 1024:.2f} GB"
+# Re-exported so callers that measure sizes here also format them here.
+fmt_size = config.fmt_bytes
 
 
 # -- Where the app's own storage goes ------------------------------------------

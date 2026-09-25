@@ -1310,7 +1310,6 @@ class MainWindow(QMainWindow):
         favorites.set_link_mode(new.get("link_mode", "auto"))
         if self._mv is not None:
             self._mv.set_stable_layout(bool(new.get("stable_layout", False)))
-            self._mv.set_tag_wrap(bool(new.get("tag_row_wrap", False)))
         li = new.get("low_io_mode")
         self._low_io_forced = isinstance(li, bool)
         if self._low_io_forced:
@@ -2254,13 +2253,19 @@ class MainWindow(QMainWindow):
                 "folder).")
             return
 
+        chosen = self._pick_tags_to_mirror()
+        if chosen is None:
+            return
+        only_tags, want_favs = chosen
+
         self._status.setText("Reading tags and favourites…")
         QApplication.processEvents()
         roots = taglibrary.mirror_roots(self._model.all_paths())
-        tagged = mirrorsync.collect_tagged(roots)
-        favd = mirrorsync.collect_favorites(self._model.all_paths())
+        tagged = mirrorsync.collect_tagged(roots, only_tags)
+        favd = (mirrorsync.collect_favorites(self._model.all_paths())
+                if want_favs else set())
         items = mirrorsync.plan(tagged, favd)
-        stale = mirrorsync.stale_links(items)
+        stale = mirrorsync.stale_links(items, only_tags=only_tags)
         self._status.setText("")
 
         todo = [d for d in items if d["action"] != "ok"]
@@ -2316,6 +2321,72 @@ class MainWindow(QMainWindow):
         self._status.setText(
             f"{rep['created'] + rep['replaced']} link(s) written")
         QMessageBox.information(self, "Rebuild complete", msg)
+
+    def _pick_tags_to_mirror(self):
+        """Which tags to mirror, and whether to include favourites.
+
+        Returns (only_tags | None, include_favourites), or None if cancelled.
+        A library with many tags rarely wants every one of them mirrored, and
+        rebuilding one tag should not mean touching the rest.
+        """
+        from PySide6.QtWidgets import (QDialog, QVBoxLayout, QHBoxLayout,
+                                       QListWidget, QListWidgetItem, QLabel,
+                                       QPushButton, QCheckBox)
+        from .engine import tags as _tags
+        names = list(_tags.get_tags())
+        dlg = QDialog(self)
+        dlg.setWindowTitle("Rebuild which links?")
+        dlg.setStyleSheet(self.styleSheet())
+        lay = QVBoxLayout(dlg)
+        hint = QLabel("Tick the tags to mirror as links. Unticked tags are "
+                      "left exactly as they are — their folders are not "
+                      "touched.")
+        hint.setWordWrap(True)
+        hint.setStyleSheet(f"color: {config.FG_MID};")
+        lay.addWidget(hint)
+
+        lst = QListWidget()
+        for name in names:
+            item = QListWidgetItem(name)
+            item.setFlags(item.flags() | Qt.ItemFlag.ItemIsUserCheckable)
+            item.setCheckState(Qt.CheckState.Checked)
+            lst.addItem(item)
+        lay.addWidget(lst, 1)
+
+        row = QHBoxLayout()
+        for label, state in (("All", Qt.CheckState.Checked),
+                             ("None", Qt.CheckState.Unchecked)):
+            b = QPushButton(label)
+            b.clicked.connect(
+                lambda _=False, st=state: [lst.item(i).setCheckState(st)
+                                           for i in range(lst.count())])
+            row.addWidget(b)
+        row.addStretch(1)
+        lay.addLayout(row)
+
+        favs_cb = QCheckBox("Also mirror favourites")
+        favs_cb.setChecked(True)
+        lay.addWidget(favs_cb)
+
+        buttons = QHBoxLayout()
+        buttons.addStretch(1)
+        cancel = QPushButton("Cancel")
+        cancel.clicked.connect(dlg.reject)
+        buttons.addWidget(cancel)
+        ok = QPushButton("Continue")
+        ok.setDefault(True)
+        ok.clicked.connect(dlg.accept)
+        buttons.addWidget(ok)
+        lay.addLayout(buttons)
+
+        if dlg.exec() != QDialog.DialogCode.Accepted:
+            return None
+        picked = {lst.item(i).text() for i in range(lst.count())
+                  if lst.item(i).checkState() == Qt.CheckState.Checked}
+        # All ticked means "no filter" — which also lets stale links be pruned
+        # across the whole tree rather than only the named folders.
+        only = None if picked == set(names) else picked
+        return only, favs_cb.isChecked()
 
     # -- tag library tidy ------------------------------------------------------
     def _tidy_tag_library(self) -> None:
@@ -2505,7 +2576,6 @@ class MainWindow(QMainWindow):
             self._mv = MultiView(self._model, self._favs, self)
             self._mv.set_stable_layout(
                 bool(self._prefs.get("stable_layout", False)))
-            self._mv.set_tag_wrap(bool(self._prefs.get("tag_row_wrap", False)))
             self._mv.favToggled.connect(self._toggle_fav_path)
             self._mv.trashed.connect(self._trash_path)
             self._mv.rotated.connect(self._rotate_from_multiview)

@@ -42,6 +42,22 @@ PREFS_FILE    = os.path.join(HOME, ".gallery_py_qt_prefs.json")     # own
 RECENT_FILE   = os.path.join(HOME, ".gallery_py_qt_recent.json")    # own
 CRASH_LOG     = os.path.join(HOME, ".gallery_py_qt_crash.log")
 
+def fmt_bytes(nbytes: int) -> str:
+    """Human-readable byte count (B / KB / MB / GB).
+
+    Lives here because four separate dialogs had grown their own identical
+    copy, and a size shown by the trash must read the same as one shown by the
+    duplicate finder.
+    """
+    if nbytes < 1024:
+        return f"{nbytes} B"
+    kb = nbytes / 1024
+    if kb < 1024:
+        return f"{kb:.0f} KB"
+    mb = kb / 1024
+    return f"{mb:.1f} MB" if mb < 1024 else f"{mb / 1024:.2f} GB"
+
+
 # -- File types --------------------------------------------------------------
 VIDEO_EXT = {".mp4", ".avi", ".mov", ".mkv", ".webm", ".m4v"}
 IMAGE_EXT = {".gif", ".jpg", ".jpeg", ".png", ".bmp", ".webp", ".tiff", ".tif"}

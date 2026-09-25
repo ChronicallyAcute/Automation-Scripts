@@ -44,7 +44,6 @@ from PySide6.QtMultimedia import QMediaPlayer, QAudioOutput, QtAudio
 from PySide6.QtMultimediaWidgets import QGraphicsVideoItem
 
 from . import config
-from .flowlayout import FlowLayout
 from .engine import media, shell, tags
 from .gifplayer import GifPlayer
 from .help_overlay import make_help_panel, toggle_help_panel
@@ -198,42 +197,17 @@ class _AspectLabel(QLabel):
         self._apply()
 
 
-# A drop shadow is a QGraphicsEffect: Qt renders the widget to an offscreen
-# pixmap and blurs it on the CPU for every repaint.  The cost grows with the
-# pixel area of that surface, so at 200-300% display scaling it is 4-9x what it
-# costs at 100% — enough to make hover show/hide visibly stutter.  Past this
-# device-pixel ratio we use a flat plate instead.  GALLERY_TAG_SHADOW=1 forces
-# the shadow back on, =0 forces it off.
-_SHADOW_MAX_DPR = 1.5
-
-
-def _muted(hex_colour: str, amount: float = 0.55) -> str:
-    """`hex_colour` faded toward grey, for a chip whose tag is not set.
-
-    Keeps the hue — which is what identifies a tag once its label has been
-    abbreviated — while staying clearly weaker than a set chip.
-    """
-    try:
-        h = hex_colour.lstrip("#")
-        if len(h) == 3:
-            h = "".join(c * 2 for c in h)
-        r, g, b = (int(h[i:i + 2], 16) for i in (0, 2, 4))
-        mix = lambda c: int(c + (0xB0 - c) * amount)      # noqa: E731
-        return f"#{mix(r):02x}{mix(g):02x}{mix(b):02x}"
-    except Exception:
-        return config.OVERLAY_FG
+# The chips' drop shadow is a QGraphicsEffect: Qt renders the widget to an
+# offscreen pixmap and blurs it on the CPU for every repaint, and showing or
+# hiding the row on hover IS a repaint.  That cost grows with the pixel area of
+# the surface, so at 300% display scaling it is nine times what it costs at
+# 100% — enough to stutter.  The shadow is the intended look and stays on by
+# default; GALLERY_TAG_SHADOW=0 swaps it for a flat plate behind each chip,
+# which looks close and costs nothing, for anyone who hits that stutter.
 
 
 def _shadow_affordable() -> bool:
-    env = os.environ.get("GALLERY_TAG_SHADOW")
-    if env in ("0", "1"):
-        return env == "1"
-    try:
-        from PySide6.QtGui import QGuiApplication
-        screen = QGuiApplication.primaryScreen()
-        return screen is None or screen.devicePixelRatio() <= _SHADOW_MAX_DPR
-    except Exception:
-        return True
+    return os.environ.get("GALLERY_TAG_SHADOW") != "0"
 
 
 class _Slot(QWidget):
@@ -285,15 +259,10 @@ class _Slot(QWidget):
         # the media shows through between the tag chips (matching _btnbar).
         self._tagbar = QWidget(self)
         self._tagbar.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
-        # With no bar behind them the chips would vanish on bright media, so
-        # they need their own contrast.  A drop shadow looks best, but a
-        # QGraphicsEffect forces Qt to render the widget into an offscreen
-        # pixmap and blur it ON THE CPU for every repaint — and showing or
-        # hiding the row on hover is a repaint.  That cost scales with the
-        # SURFACE AREA, so at 300% display scaling it is nine times what it is
-        # at 100%, which is where the hover stutter comes from.  Above a
-        # modest device-pixel ratio, fall back to a flat translucent plate
-        # behind each chip: visually close, and free.
+        # With no bar behind them the chips would vanish on bright media, so a
+        # tight dark shadow gives every glyph its own contrast instead.
+        # GALLERY_TAG_SHADOW=0 swaps it for a flat plate, which costs nothing
+        # on a high-DPI display where the offscreen blur is expensive.
         self._chip_plate = not _shadow_affordable()
         if not self._chip_plate:
             _tagshadow = QGraphicsDropShadowEffect(self._tagbar)
@@ -301,18 +270,9 @@ class _Slot(QWidget):
             _tagshadow.setOffset(0, 1)
             _tagshadow.setColor(QColor(0, 0, 0, 230))
             self._tagbar.setGraphicsEffect(_tagshadow)
-        # A wrapping layout, not QHBoxLayout: a box layout squeezes chips to
-        # their minimum and then overflows the widget, so on a narrow tile the
-        # chips past the right edge were clipped away — invisible AND
-        # unclickable, with nothing to show they existed.  This wraps instead.
-        # It bites hardest on a high-DPI display: 3840x2160 at 300% is a
-        # 1280x720 LOGICAL desktop, so every tile is narrow.
-        self._taglay = FlowLayout(self._tagbar, margin=0, spacing=2)
+        self._taglay = QHBoxLayout(self._tagbar)
         self._taglay.setContentsMargins(2, 1, 2, 1)
-        # Single row by default — the original look.  What does not fit goes
-        # into an overflow menu rather than off the edge, so the chips stay
-        # reachable on a narrow tile without the row growing taller.
-        self._tag_wrap = False
+        self._taglay.setSpacing(2)
         self._tag_btns: dict[str, QToolButton] = {}
         # Resting state shows only the tags this file HAS — that is the part
         # worth reading while scanning a grid.  The full, editable chip row
@@ -748,23 +708,10 @@ class _Slot(QWidget):
         # Ask how tall the chips need to be AT THIS WIDTH: the row wraps, so
         # its height depends on how much room it was given.  sizeHint() would
         # report one row's worth and clip the rest.
-        # The chips may span the TILE even when the media is letterboxed
-        # narrower: a single row needs the width, and the bar is a transparent
-        # overlay, so borrowing the black margin costs nothing visually.
-        bar_w = max(1, dw if self._tag_wrap else max(dw, sw - 4))
-        self._fit_tag_row(bar_w)
-        th = max(1, self._taglay.heightForWidth(bar_w))
-        # Never let the chips eat the whole tile: past a third of the media
-        # height they stop being an overlay.  The rest stays reachable because
-        # hovering expands the row over the media above it.
-        th = min(th, max(1, int(dh * 0.5)))
-        bar_x = max(0, x) if self._tag_wrap else max(0, min(x, 2))
-        self._tagbar.setGeometry(bar_x,
+        th = self._tagbar.sizeHint().height()
+        self._tagbar.setGeometry(max(0, x),
                                  max(0, y + dh - th - seek_h),
-                                 bar_w, th)
-        # Lay the chips out NOW: Qt defers activation, and the caller (and the
-        # tests) read positions immediately after this returns.
-        self._taglay.activate()
+                                 max(1, dw), th)
         self._tagbar.raise_()
         if self._is_video:
             self._position_seek()
@@ -966,12 +913,6 @@ class _Slot(QWidget):
                     " border: 1px solid transparent; border-radius: 2px;"
                     " font-size: 8px; padding: 0 3px; }"
                     " QToolButton:hover { background: rgba(0,0,0,90); }")
-    # Unset chips still wear their tag's colour, just muted: when a label is
-    # abbreviated to fit the row, the colour is what tells the tags apart.
-    _TAG_CSS_DIM = ("QToolButton { color: %s; background: transparent;"
-                    " border: 1px solid transparent; border-radius: 2px;"
-                    " font-size: 8px; padding: 0 3px; }"
-                    " QToolButton:hover { background: rgba(0,0,0,90); }")
 
     def rebuild_tag_buttons(self) -> None:
         """(Re)create the tag buttons from the current tag set."""
@@ -1005,22 +946,8 @@ class _Slot(QWidget):
             b.clicked.connect(lambda _=False, tg=t: self._toggle_tag(tg))
             self._taglay.addWidget(b)
             self._tag_btns[t] = b
-        # Overflow: holds whatever chips the row cannot fit.  Sits just before
-        # the zoom controls so those keep their far-right position.
-        self._tag_more_btn = QToolButton()
-        self._tag_more_btn.setText("⋯")
-        self._tag_more_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        self._tag_more_btn.setPopupMode(
-            QToolButton.ToolButtonPopupMode.InstantPopup)
-        self._tag_more_btn.setStyleSheet(
-            self._plated(self._TAG_CSS_OFF % config.OVERLAY_FG))
-        self._tag_more_menu = QMenu(self._tag_more_btn)
-        self._tag_more_btn.setMenu(self._tag_more_menu)
-        self._tag_more_btn.hide()
-        self._taglay.addWidget(self._tag_more_btn)
-        # (No stretch item: a flow layout packs from the left and wraps, so a
-        # spacer would consume a whole row.)
-        # Per-tile resize (±10%), sized like the tag chips.
+        self._taglay.addStretch(1)
+        # Far-right: per-tile resize (±10%), sized like the tag chips.
         self._tile_zoom_out_btn = self._mk_tile_zoom("−", -self._TILE_ZOOM_STEP,
                                                      "Shrink this media 10%")
         self._tile_zoom_in_btn = self._mk_tile_zoom("+", self._TILE_ZOOM_STEP,
@@ -1107,153 +1034,6 @@ class _Slot(QWidget):
             tags.sync_tag_folders(self._path, self._favs.is_fav(self._path))
             self._refresh_tag_styles()
 
-    def set_tag_wrap(self, on: bool) -> None:
-        """Wrap the chip row over several lines, or keep it to one (default)."""
-        self._tag_wrap = bool(on)
-        self._position_overlays()
-
-    # How chip labels are shortened, in the order tried.  Every tag stays on
-    # the row and keeps its colour; only the text gives way.  A tag set that
-    # shares a prefix ("T - Face", "T - Landscape") loses it first, because
-    # that prefix is width without information.
-    _LABEL_LEVELS = ("full", "noprefix", "trim8", "trim5", "trim3", "trim2")
-
-    @staticmethod
-    def _shared_prefix(names: "list[str]") -> str:
-        """The prefix every tag shares, trimmed to a separator."""
-        if len(names) < 2:
-            return ""
-        first, last = min(names), max(names)
-        i = 0
-        while i < min(len(first), len(last)) and first[i] == last[i]:
-            i += 1
-        pre = first[:i]
-        cut = max(pre.rfind(c) for c in " -_/|")
-        return pre[:cut + 1] if cut >= 0 else ""
-
-    def _labels_for_level(self, level: str, prefix: str) -> "dict[str, str]":
-        """Chip text for every tag at this compaction level.
-
-        Truncation is made UNIQUE: shortening "T - Face" and "T - Family" to
-        "Fa" would put two identical chips on the row, so a colliding label is
-        extended a character at a time until it is its own.
-        """
-        tags_list = list(self._tag_btns)
-        if level == "full":
-            return {t: t for t in tags_list}
-        stripped = {
-            t: (t[len(prefix):] if prefix and t.startswith(prefix) else t) or t
-            for t in tags_list}
-        if level == "noprefix":
-            return stripped
-        n = int(level[4:])
-        out: "dict[str, str]" = {}
-        taken: "set[str]" = set()
-        for t in tags_list:
-            text = stripped[t]
-            k = min(n, len(text))
-            while text[:k] in taken and k < len(text):
-                k += 1
-            label = text[:k] or t[:n]
-            # Still colliding (one name is a prefix of another): let it be —
-            # the chips carry different colours, which is what distinguishes
-            # them at this size anyway.
-            taken.add(label)
-            out[t] = label
-        return out
-
-    def _apply_labels(self, level: str, prefix: str) -> None:
-        for t, label in self._labels_for_level(level, prefix).items():
-            b = self._tag_btns[t]
-            if b.text() != label:
-                b.setText(label)
-            b.setToolTip(f'Toggle tag "{t}"')
-        # Compact levels drop a little padding: at three characters the chrome
-        # around a chip costs more width than the text inside it.
-        tight = level.startswith("trim")
-        if getattr(self, "_chips_tight", None) is not tight:
-            self._chips_tight = tight
-            self._taglay.setSpacing(1 if tight else 2)
-            self._refresh_tag_styles()
-        self._taglay.invalidate()
-
-    def _fit_tag_row(self, width: int) -> None:
-        """Keep the chip row to a single line, as it has always looked.
-
-        The layout itself wraps freely; single-row is enforced here by hiding
-        the chips that do not fit and offering them from an overflow menu — so
-        they stay reachable, which is the whole point.  Doing it here (rather
-        than letting the layout drop items) keeps the ditto / new-tag / zoom
-        controls in place: only tag chips are ever displaced.
-        """
-        want = [t for t in self._tag_btns if self._tag_should_show(t)]
-        if self._tag_wrap:
-            for t in self._tag_btns:
-                self._tag_btns[t].setVisible(t in want)
-            self._tag_more_btn.hide()
-            self._taglay.invalidate()
-            return
-
-        space = max(0, self._taglay.spacing())
-        m = self._taglay.contentsMargins()
-        avail = width - m.left() - m.right()
-        for b in (getattr(self, "_repeat_btn", None),
-                  getattr(self, "_new_tag_btn", None),
-                  getattr(self, "_tile_zoom_out_btn", None),
-                  getattr(self, "_tile_zoom_in_btn", None)):
-            if b is not None and not b.isHidden():
-                avail -= b.sizeHint().width() + space
-
-        # Shorten the labels until every chip fits.  Collapsing into a menu
-        # hides tags behind a click and loses the at-a-glance colour row, so
-        # it is the last resort rather than the first.
-        prefix = self._shared_prefix(list(self._tag_btns))
-        cost: "dict[str, int]" = {}
-        for level in self._LABEL_LEVELS:
-            self._apply_labels(level, prefix)
-            cost = {t: self._tag_btns[t].sizeHint().width() + space
-                    for t in want}
-            if sum(cost.values()) <= avail:
-                break
-        if sum(cost.values()) > avail:
-            # Even the shortest labels do not fit — keep the row honest by
-            # offering the remainder rather than clipping it away.
-            avail -= self._tag_more_btn.sizeHint().width() + space
-        used = 0
-        hidden: "list[str]" = []
-        for t in self._tag_btns:
-            b = self._tag_btns[t]
-            if t not in want:
-                b.hide()
-                continue
-            if used + cost[t] <= avail:
-                used += cost[t]
-                b.show()
-            else:
-                b.hide()
-                hidden.append(t)
-
-        self._tag_more_menu.clear()
-        if hidden:
-            cur = set(tags.tags_for(self._path)) if self._path else set()
-            for t in hidden:
-                act = self._tag_more_menu.addAction(
-                    ("\u2713  " if t in cur else "       ") + t)
-                act.triggered.connect(
-                    lambda _=False, tg=t: self._toggle_tag(tg))
-            self._tag_more_btn.setToolTip(
-                f"{len(hidden)} more tag(s): " + ", ".join(hidden))
-            self._tag_more_btn.show()
-        else:
-            self._tag_more_btn.hide()
-        # Visibility changed, so the layout's cached hints are stale.
-        self._taglay.invalidate()
-
-    def _tag_should_show(self, tag: str) -> bool:
-        if self._tag_editing:
-            return True
-        return bool(self._path) and tag in set(tags.tags_for(self._path))
-
     def set_tag_editing(self, on: bool) -> None:
         """Expand the tag row to the full editable set (hover), or collapse it."""
         self._tag_editing = bool(on)
@@ -1282,11 +1062,7 @@ class _Slot(QWidget):
     # the "background: transparent" in the base template.
     _CHIP_PLATE = " QToolButton { background: rgba(0,0,0,150); }"
 
-    _CHIP_TIGHT = " QToolButton { padding: 0 1px; }"
-
     def _plated(self, css: str) -> str:
-        if getattr(self, "_chips_tight", False):
-            css += self._CHIP_TIGHT
         return css + self._CHIP_PLATE if self._chip_plate else css
 
     @staticmethod
@@ -1311,7 +1087,7 @@ class _Slot(QWidget):
             hue = tags.color_of(t) or config.ACCENT
             self._set_css(b, self._plated(
                 (self._TAG_CSS_ON % (hue, hue)) if t in cur
-                else (self._TAG_CSS_DIM % _muted(hue))))
+                else (self._TAG_CSS_OFF % config.OVERLAY_FG)))
         # The ditto button lights up only when there are remembered tags to add.
         recent = tags.recent_tags()
         pending = bool(self._path) and any(
@@ -1949,7 +1725,6 @@ class MultiView(QWidget):
         self._relayout_timer.setInterval(16)
         self._relayout_timer.timeout.connect(self._do_relayout)
         self._stable_layout = False
-        self._tag_wrap = False
 
         # Keyboard/mouse help (?/F1 dispatched here by MainWindow — binding
         # them locally too would make the shortcuts ambiguous, like H was).
@@ -2748,17 +2523,7 @@ class MultiView(QWidget):
         """Rebuild every tile's tag buttons after the tag set changed."""
         for slot in self._all_slots():
             slot.rebuild_tag_buttons()
-            slot.set_tag_wrap(self._tag_wrap)
             slot._position_overlays()
-
-    def set_tag_wrap(self, on: bool) -> None:
-        """One row of chips (default) or wrap them over several lines."""
-        self._tag_wrap = bool(on)
-        for slot in self._all_slots():
-            slot.set_tag_wrap(self._tag_wrap)
-
-    def tag_wrap(self) -> bool:
-        return getattr(self, "_tag_wrap", False)
 
     # -- tag the whole page ----------------------------------------------------
     def page_paths(self) -> "list[str]":

@@ -31,14 +31,7 @@ from .engine import cache, dupes, tags, scan, shell
 _THUMB_PX = 72
 
 
-def _fmt_size(nbytes: int) -> str:
-    if nbytes < 1024:
-        return f"{nbytes} B"
-    kb = nbytes / 1024
-    if kb < 1024:
-        return f"{kb:.0f} KB"
-    mb = kb / 1024
-    return f"{mb:.1f} MB" if mb < 1024 else f"{mb / 1024:.2f} GB"
+_fmt_size = config.fmt_bytes
 
 
 class _ScanSignals(QObject):

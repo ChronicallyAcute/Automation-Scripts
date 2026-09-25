@@ -21,8 +21,6 @@ class SettingsDialog(QDialog):
     _FAVLOC_LABELS = [
         ("Beside the media, in each folder (default)", True),
         ("All together in the favourites folder", False)]
-    _TAGROW_LABELS = [("One row, extras in a ⋯ menu (default)", False),
-                      ("Wrap onto as many rows as needed", True)]
     _CHROME_LABELS = [
         ("Reflow tiles into the freed space (default)", False),
         ("Keep the tile layout stable (faster)", True)]
@@ -82,15 +80,6 @@ class SettingsDialog(QDialog):
         browse.clicked.connect(self._pick_fav_dir)
         fav_lay.addWidget(browse)
         form.addRow("Favourites folder", fav_row)
-
-        self._tagrow = QComboBox()
-        for label, val in self._TAGROW_LABELS:
-            self._tagrow.addItem(label, val)
-        self._select(self._tagrow, bool(prefs.get("tag_row_wrap", False)))
-        self._tagrow.setToolTip(
-            "How the per-tile tag chips are laid out when there are more than "
-            "fit across the tile")
-        form.addRow("Tag chips", self._tagrow)
 
         self._favloc = QComboBox()
         for label, val in self._FAVLOC_LABELS:
@@ -160,7 +149,6 @@ class SettingsDialog(QDialog):
                             else None)
         p["trash_purge_days"] = self._purge.value()
         p["stable_layout"] = bool(self._chrome.currentData())
-        p["tag_row_wrap"] = bool(self._tagrow.currentData())
         p["favorites_beside_media"] = bool(self._favloc.currentData())
         chosen = self._fav_dir.text().strip()
         p["favorites_dir"] = "" if chosen == config.DEFAULT_FAVORITES_DIR \

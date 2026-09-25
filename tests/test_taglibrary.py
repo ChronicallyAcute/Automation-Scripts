@@ -434,14 +434,6 @@ def test_settings_round_trips_the_favourites_folder(qapp, tmp_path):
     dlg.done(0)
 
 
-def test_settings_round_trips_the_tag_row_choice(qapp):
-    from gallery_py_qt.settings_dialog import SettingsDialog
-    dlg = SettingsDialog({})
-    assert dlg.result_prefs()["tag_row_wrap"] is False    # one row by default
-    dlg._select(dlg._tagrow, True)
-    assert dlg.result_prefs()["tag_row_wrap"] is True
-    dlg.done(0)
-
 
 # -- links live where they are STORED, not where they point --------------------
 

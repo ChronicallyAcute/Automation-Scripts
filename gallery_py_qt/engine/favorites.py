@@ -317,6 +317,60 @@ def _probe_one(how: str, folder: str, source: "str | None" = None
                 pass
 
 
+def is_link_entry(path: str) -> bool:
+    """True when `path` is a name for content that also exists elsewhere.
+
+    A symlink, or a regular file carrying more than one name. Removing either
+    is lossless — the content survives under its other name — which is what
+    makes it safe to prune from a mirror folder, unlike a lone file.
+    """
+    if os.path.islink(path):
+        return True
+    try:
+        return os.stat(path).st_nlink > 1
+    except OSError:
+        return False
+
+
+def link_in_place(src: str, dst: str, allow_copy: bool = False) -> str:
+    """Put a link to `src` at `dst`, replacing whatever is there.
+
+    Returns the mode used, or "copy" having changed NOTHING when linking was
+    impossible and `allow_copy` is false — replacing a copy with another copy
+    reclaims no space and just churns the disk.
+
+    The link is built under a temporary name and moved into place only once it
+    exists, so a failure can never leave `dst` deleted with nothing in it.
+    """
+    tmp = dst + ".link.tmp"
+    try:
+        os.makedirs(os.path.dirname(dst) or ".", exist_ok=True)
+        if os.path.lexists(tmp):
+            os.remove(tmp)
+        how = place_file(src, tmp)
+        if how == "copy" and not allow_copy:
+            os.remove(tmp)
+            return "copy"
+        if os.path.lexists(dst):
+            os.remove(dst)
+        os.rename(tmp, dst)        # rename, not replace: tmp may be a symlink
+        return how
+    except OSError:
+        try:
+            if os.path.lexists(tmp):
+                os.remove(tmp)
+        except OSError:
+            pass
+        raise
+
+
+def under_any(path: str, roots: "list[str]") -> bool:
+    """Is `path` inside any of `roots` (or one of them)?"""
+    ap = os.path.abspath(path)
+    return any(ap == r or ap.startswith(r + os.sep)
+               for r in (os.path.abspath(x) for x in roots))
+
+
 def probe_link_mode(folder: str, source: "str | None" = None
                     ) -> "tuple[str, str]":
     """What placement would ACTUALLY happen for files put into `folder`?

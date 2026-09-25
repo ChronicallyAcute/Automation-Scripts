@@ -33,27 +33,29 @@ from . import favorites, taglibrary, tags as _tags
 
 # -- reading the sources of truth ----------------------------------------------
 
-def _inside_mirrors(path: str, roots: "list[str]") -> bool:
-    ap = os.path.abspath(path)
-    return any(ap == r or ap.startswith(r + os.sep)
-               for r in (os.path.abspath(x) for x in roots))
-
-
-def collect_tagged(roots: "list[str] | None" = None) -> "dict[str, list[str]]":
+def collect_tagged(roots: "list[str] | None" = None,
+                   only_tags: "set[str] | list[str] | None" = None
+                   ) -> "dict[str, list[str]]":
     """{original: [tags]} from the tag store.
 
     Only existing files, only tags still in the tag set (a name dropped from
     the set should not resurrect a folder), and never a file that already
     lives inside the mirror tree — linking a link would compound.
+
+    `only_tags` narrows it further: mirror just those tags. A library with
+    fifty tags does not necessarily want fifty folders, and rebuilding one tag
+    should not mean walking all of them.
     """
     skip = list(roots if roots is not None else taglibrary.mirror_roots())
     known = set(_tags.get_tags())
+    if only_tags is not None:
+        known &= {str(t) for t in only_tags}
     out: "dict[str, list[str]]" = {}
     for path, names in _tags._load().items():
         keep = [t for t in names if t in known]
         if not keep:
             continue
-        if _inside_mirrors(path, skip) or not os.path.isfile(path):
+        if favorites.under_any(path, skip) or not os.path.isfile(path):
             continue
         out[path] = sorted(keep)
     return out
@@ -197,7 +199,9 @@ def plan(tagged: "dict[str, list[str]]", favourited: "set[str]"
 
 
 def stale_links(plan_items: "list[dict]",
-                roots: "list[str] | None" = None) -> "list[str]":
+                roots: "list[str] | None" = None,
+                only_tags: "set[str] | list[str] | None" = None
+                ) -> "list[str]":
     """Links in the mirror tree that the plan does not call for.
 
     A file untagged since the last sync, or an original that has been deleted,
@@ -210,10 +214,17 @@ def stale_links(plan_items: "list[dict]",
     something the user put there, so it is left alone.
     """
     wanted = {os.path.abspath(d["dst"]) for d in plan_items}
+    if roots is None:
+        if only_tags is None:
+            roots = [taglibrary.tag_folders_root(),
+                     favorites.central_favorites_root()]
+        else:
+            # A filtered run has no opinion about the other tags' folders, and
+            # must not treat "not planned" as "stale" for them.
+            roots = [os.path.join(taglibrary.tag_folders_root(), t)
+                     for t in only_tags]
     out: "list[str]" = []
-    for root in (roots if roots is not None else
-                 [taglibrary.tag_folders_root(),
-                  favorites.central_favorites_root()]):
+    for root in roots:
         if not root or not os.path.isdir(root):
             continue
         for dirpath, _dirnames, filenames in os.walk(root):
@@ -227,14 +238,8 @@ def stale_links(plan_items: "list[dict]",
     return sorted(out)
 
 
-def is_link_entry(path: str) -> bool:
-    """True when `path` is a name for content that exists elsewhere too."""
-    if os.path.islink(path):
-        return True
-    try:
-        return os.stat(path).st_nlink > 1
-    except OSError:
-        return False
+# Shared with the relink pass: a symlink, or a file with more than one name.
+is_link_entry = favorites.is_link_entry
 
 
 # -- applying ------------------------------------------------------------------
@@ -267,31 +272,19 @@ def apply(plan_items: "list[dict]", prune: "list[str] | None" = None,
         if not os.path.isfile(src):
             report["errors"].append(f"{src}: original has gone")
             continue
-        tmp = dst + ".synclink.tmp"
+        existed = os.path.lexists(dst)
         try:
-            os.makedirs(os.path.dirname(dst), exist_ok=True)
-            if os.path.lexists(tmp):
-                os.remove(tmp)
-            how = favorites.place_file(src, tmp)
-            if how == "copy":
+            if favorites.link_in_place(src, dst) == "copy":
                 # A copy here would defeat the point and silently consume the
                 # space this exists to save.
-                os.remove(tmp)
                 report["copied"] += 1
                 continue
-            if os.path.lexists(dst):
-                os.remove(dst)
+            if existed:
                 report["replaced"] += 1
             else:
                 report["created"] += 1
-            os.rename(tmp, dst)
         except OSError as exc:
             report["errors"].append(f"{dst}: {exc}")
-            try:
-                if os.path.lexists(tmp):
-                    os.remove(tmp)
-            except OSError:
-                pass
 
     for path in (prune or []):
         if progress is not None and progress(done, total, path) is False:
@@ -327,14 +320,23 @@ def _prune_empty_dirs() -> None:
 def sync(media_roots: "list[str] | None" = None,
          index: "dict[str, str] | None" = None,
          do_prune: bool = True,
+         only_tags: "set[str] | list[str] | None" = None,
+         include_favorites: bool = True,
          progress: "Callable[[int, int, str], bool | None] | None" = None
          ) -> dict:
-    """Read the data, plan, and apply — the whole reconciliation."""
+    """Read the data, plan, and apply — the whole reconciliation.
+
+    `only_tags` restricts the rebuild to those tags; `include_favorites` can
+    switch the favourites mirror off, so a run can address one without
+    disturbing the other.
+    """
     roots = taglibrary.mirror_roots(media_roots)
-    tagged = collect_tagged(roots)
-    favourited = collect_favorites(media_roots, index)
+    tagged = collect_tagged(roots, only_tags)
+    favourited = (collect_favorites(media_roots, index)
+                  if include_favorites else set())
     items = plan(tagged, favourited)
-    prune = stale_links(items) if do_prune else []
+    prune = (stale_links(items, only_tags=only_tags)
+             if do_prune else [])
     report = apply(items, prune, progress=progress)
     report["tagged_files"] = len(tagged)
     report["favourited_files"] = len(favourited)

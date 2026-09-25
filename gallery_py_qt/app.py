@@ -73,9 +73,9 @@ def main(argv: list[str] | None = None) -> int:
               f"at {dpr:.2f}x scaling  →  {g.width()}x{g.height()} logical",
               file=sys.stderr)
         if dpr > 1.5:
-            print("[display] high-DPI: tag chips use a flat plate instead of a "
-                  "blurred shadow (GALLERY_TAG_SHADOW=1 to override)",
-                  file=sys.stderr)
+            print("[display] high-DPI: if the tag row stutters on hover, set "
+                  "GALLERY_TAG_SHADOW=0 (swaps the chips' blurred shadow for "
+                  "a flat plate)", file=sys.stderr)
 
     win = MainWindow()
     win.show()
