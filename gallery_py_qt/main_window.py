@@ -915,6 +915,8 @@ class MainWindow(QMainWindow):
                                   self._open_size_triage)
         self._more_menu.addAction("◔  Storage report…", self._storage_report)
         self._more_menu.addAction("⛃  Tidy tag library…", self._tidy_tag_library)
+        self._more_menu.addAction("⇶  Rebuild tag && favourite links…",
+                                  self._rebuild_links)
         self._more_menu.addSeparator()
         self._collapse_act = self._more_menu.addAction("Hide duplicate copies")
         self._collapse_act.setCheckable(True)
@@ -2229,6 +2231,91 @@ class MainWindow(QMainWindow):
             self._report_collapsed()
         else:
             self._status.setText("Showing every copy")
+
+    # -- rebuild the mirror library --------------------------------------------
+    def _rebuild_links(self) -> None:
+        """Make the tag / favourites folders match the data, using links.
+
+        The per-file mirroring is incremental: it only reacts to tagging that
+        happens while the app runs. Tags recovered from a legacy store, a
+        folder deleted by hand, or a move to a new favourites location all
+        leave the folders out of step, and nothing else reconciles them.
+        """
+        from PySide6.QtWidgets import QMessageBox, QProgressDialog
+        from .engine import mirrorsync, taglibrary, favorites as _favs
+
+        eff, why = _favs.probe_link_mode(taglibrary.tag_folders_root())
+        if eff == "copy":
+            QMessageBox.warning(
+                self, "Links are not possible",
+                f"{why}\n\nRebuilding would fill the folders with full "
+                "copies, so it has been stopped. Point the favourites folder "
+                "at a drive that can store links (Settings → Favourites "
+                "folder).")
+            return
+
+        self._status.setText("Reading tags and favourites…")
+        QApplication.processEvents()
+        roots = taglibrary.mirror_roots(self._model.all_paths())
+        tagged = mirrorsync.collect_tagged(roots)
+        favd = mirrorsync.collect_favorites(self._model.all_paths())
+        items = mirrorsync.plan(tagged, favd)
+        stale = mirrorsync.stale_links(items)
+        self._status.setText("")
+
+        todo = [d for d in items if d["action"] != "ok"]
+        replacing = sum(1 for d in items if d["action"] == "replace")
+        if not todo and not stale:
+            QMessageBox.information(
+                self, "Already up to date",
+                f"{len(tagged)} tagged file(s) and {len(favd)} favourite(s) "
+                f"are already mirrored as links.\n\n{len(items)} link(s) "
+                "checked; nothing to change.")
+            return
+        if QMessageBox.question(
+                self, "Rebuild tag & favourite links",
+                f"{len(tagged)} tagged file(s), {len(favd)} favourite(s).\n\n"
+                f"  create   {len(todo) - replacing} new {eff}(s)\n"
+                f"  replace  {replacing} existing cop(y/ies) with {eff}s\n"
+                f"  remove   {len(stale)} stale link(s)\n"
+                f"  leave    {len(items) - len(todo)} already correct\n\n"
+                "Every tagged file is linked into its tag folder — not just "
+                "favourited ones, and regardless of type or length, since a "
+                "link costs no space.\n\n"
+                "Only links are ever removed; no real file is deleted.\n\n"
+                "Proceed?") != QMessageBox.StandardButton.Yes:
+            return
+
+        dlg = QProgressDialog("Linking…", "Cancel", 0,
+                              len(todo) + len(stale), self)
+        dlg.setWindowTitle("Rebuild tag & favourite links")
+        dlg.setMinimumDuration(0)
+        dlg.setValue(0)
+
+        def _tick(done: int, total: int, path: str) -> bool:
+            dlg.setMaximum(max(total, 1))
+            dlg.setValue(done)
+            dlg.setLabelText(f"{done} / {total}\n{os.path.basename(path)}")
+            QApplication.processEvents()
+            return not dlg.wasCanceled()
+
+        rep = mirrorsync.apply(items, stale, progress=_tick)
+        dlg.close()
+
+        msg = (f"Created {rep['created']} link(s); replaced "
+               f"{rep['replaced']} cop(y/ies); removed {rep['pruned']} stale "
+               f"link(s).\n{rep['already']} were already correct.")
+        if rep["cancelled"]:
+            msg = "Cancelled part way through.\n\n" + msg
+        if rep["copied"]:
+            msg += (f"\n\n{rep['copied']} file(s) could not be linked and "
+                    "were skipped rather than copied.")
+        if rep["errors"]:
+            msg += (f"\n\n{len(rep['errors'])} error(s):\n"
+                    + "\n".join(rep["errors"][:10]))
+        self._status.setText(
+            f"{rep['created'] + rep['replaced']} link(s) written")
+        QMessageBox.information(self, "Rebuild complete", msg)
 
     # -- tag library tidy ------------------------------------------------------
     def _tidy_tag_library(self) -> None:

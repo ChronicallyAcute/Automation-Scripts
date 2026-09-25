@@ -88,7 +88,9 @@ def test_every_tag_is_reachable_on_one_row(qapp, tmp_path):
     s.resize(426, 360)
     s._position_overlays()
     qapp.processEvents()
-    on_row = {b.text() for b in s._tag_btns.values() if not b.isHidden()}
+    # Chip LABELS are abbreviated to fit, so reachability is checked by tag
+    # identity: every tag is either a visible chip or an entry in the menu.
+    on_row = {t for t, b in s._tag_btns.items() if not b.isHidden()}
     in_menu = {a.text().strip().lstrip("\u2713").strip()
                for a in s._tag_more_menu.actions()}
     assert on_row | in_menu >= set(s._tag_btns), "a tag became unreachable"
@@ -318,4 +320,105 @@ def test_plated_chips_carry_their_own_background(qapp, tmp_path, monkeypatch):
     assert s._tagbar.graphicsEffect() is None, "no offscreen blur at high DPI"
     css = s._tag_btns[tags.get_tags()[0]].styleSheet()
     assert "rgba(0,0,0,150)" in css, "chips need their own contrast instead"
+    s.deleteLater()
+
+
+# -- chips: all on one row, colour-coded, no ellipsis -------------------------
+
+def _colour_tags():
+    names = ["T - Face", "T - Landscape", "T - Portrait", "T - Family",
+             "T - Archive", "T - Wallpaper", "T - Reference", "T - Night",
+             "T - Macro"]
+    tags.set_tags(names)
+    palette = ["#e6194b", "#3cb44b", "#ffe119", "#4363d8", "#f58231",
+               "#911eb4", "#46f0f0", "#f032e6", "#bcf60c"]
+    for name, hue in zip(names, palette):
+        tags.set_color(name, hue)
+    return names
+
+
+def _narrow_slot(qapp, tmp_path):
+    s = _Slot(0, Favorites())
+    s.show_item(0, _img(tmp_path / "tall.png", (900, 1600)))
+    s.set_tag_editing(True)
+    s.resize(426, 360)
+    s._position_overlays()
+    qapp.processEvents()
+    return s
+
+
+def test_every_chip_stays_on_the_row_without_an_ellipsis(qapp, tmp_path):
+    names = _colour_tags()
+    s = _narrow_slot(qapp, tmp_path)
+    shown = [b for b in s._tag_btns.values() if not b.isHidden()]
+    assert len(shown) == len(names), "no tag may be hidden behind a menu"
+    assert len({b.y() for b in shown}) == 1, "must be a single row"
+    assert s._tag_more_btn.isHidden(), "the ellipsis must not be needed"
+    s.deleteLater()
+
+
+def test_labels_shorten_rather_than_collapse(qapp, tmp_path):
+    _colour_tags()
+    s = _narrow_slot(qapp, tmp_path)
+    labels = [b.text() for b in s._tag_btns.values() if not b.isHidden()]
+    assert all(len(t) < len("T - Landscape") for t in labels)
+    s.deleteLater()
+
+
+def test_shortened_labels_stay_distinct(qapp, tmp_path):
+    """"T - Face" and "T - Family" must not both become "Fa"."""
+    _colour_tags()
+    s = _narrow_slot(qapp, tmp_path)
+    labels = [b.text() for b in s._tag_btns.values() if not b.isHidden()]
+    assert len(set(labels)) == len(labels)
+    s.deleteLater()
+
+
+def test_the_full_name_survives_in_the_tooltip(qapp, tmp_path):
+    _colour_tags()
+    s = _narrow_slot(qapp, tmp_path)
+    assert "T - Landscape" in s._tag_btns["T - Landscape"].toolTip()
+    s.deleteLater()
+
+
+def test_a_shared_prefix_is_dropped_first(qapp, tmp_path):
+    _colour_tags()
+    s = _narrow_slot(qapp, tmp_path)
+    assert s._shared_prefix(list(s._tag_btns)) == "T - "
+    assert not any(b.text().startswith("T - ")
+                   for b in s._tag_btns.values() if not b.isHidden())
+    s.deleteLater()
+
+
+def test_every_chip_carries_its_own_colour(qapp, tmp_path):
+    names = _colour_tags()
+    s = _narrow_slot(qapp, tmp_path)
+    # Unset chips are muted, not colourless — the colour is what identifies a
+    # tag once the label is abbreviated.
+    hues = {b.styleSheet() for b in s._tag_btns.values()}
+    assert len(hues) == len(names), "each chip must be styled distinctly"
+    s.deleteLater()
+
+
+def test_a_set_chip_is_stronger_than_an_unset_one(qapp, tmp_path):
+    names = _colour_tags()
+    p = _img(tmp_path / "a.png")
+    s = _Slot(0, Favorites())
+    s.show_item(0, p)
+    tags.toggle_tag(p, names[0])
+    s._refresh_tag_styles()
+    assert "bold" in s._tag_btns[names[0]].styleSheet()
+    assert "bold" not in s._tag_btns[names[1]].styleSheet()
+    s.deleteLater()
+
+
+def test_full_names_return_on_a_wide_tile(qapp, tmp_path):
+    _colour_tags()
+    s = _Slot(0, Favorites())
+    s.show_item(0, _img(tmp_path / "wide.png", (1600, 900)))
+    s.set_tag_editing(True)
+    s.resize(1400, 700)
+    s._position_overlays()
+    qapp.processEvents()
+    assert s._tag_btns["T - Landscape"].text() == "T - Landscape"
     s.deleteLater()

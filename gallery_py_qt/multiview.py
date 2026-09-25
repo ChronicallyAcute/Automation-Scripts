@@ -207,6 +207,23 @@ class _AspectLabel(QLabel):
 _SHADOW_MAX_DPR = 1.5
 
 
+def _muted(hex_colour: str, amount: float = 0.55) -> str:
+    """`hex_colour` faded toward grey, for a chip whose tag is not set.
+
+    Keeps the hue — which is what identifies a tag once its label has been
+    abbreviated — while staying clearly weaker than a set chip.
+    """
+    try:
+        h = hex_colour.lstrip("#")
+        if len(h) == 3:
+            h = "".join(c * 2 for c in h)
+        r, g, b = (int(h[i:i + 2], 16) for i in (0, 2, 4))
+        mix = lambda c: int(c + (0xB0 - c) * amount)      # noqa: E731
+        return f"#{mix(r):02x}{mix(g):02x}{mix(b):02x}"
+    except Exception:
+        return config.OVERLAY_FG
+
+
 def _shadow_affordable() -> bool:
     env = os.environ.get("GALLERY_TAG_SHADOW")
     if env in ("0", "1"):
@@ -949,6 +966,12 @@ class _Slot(QWidget):
                     " border: 1px solid transparent; border-radius: 2px;"
                     " font-size: 8px; padding: 0 3px; }"
                     " QToolButton:hover { background: rgba(0,0,0,90); }")
+    # Unset chips still wear their tag's colour, just muted: when a label is
+    # abbreviated to fit the row, the colour is what tells the tags apart.
+    _TAG_CSS_DIM = ("QToolButton { color: %s; background: transparent;"
+                    " border: 1px solid transparent; border-radius: 2px;"
+                    " font-size: 8px; padding: 0 3px; }"
+                    " QToolButton:hover { background: rgba(0,0,0,90); }")
 
     def rebuild_tag_buttons(self) -> None:
         """(Re)create the tag buttons from the current tag set."""
@@ -1089,6 +1112,71 @@ class _Slot(QWidget):
         self._tag_wrap = bool(on)
         self._position_overlays()
 
+    # How chip labels are shortened, in the order tried.  Every tag stays on
+    # the row and keeps its colour; only the text gives way.  A tag set that
+    # shares a prefix ("T - Face", "T - Landscape") loses it first, because
+    # that prefix is width without information.
+    _LABEL_LEVELS = ("full", "noprefix", "trim8", "trim5", "trim3", "trim2")
+
+    @staticmethod
+    def _shared_prefix(names: "list[str]") -> str:
+        """The prefix every tag shares, trimmed to a separator."""
+        if len(names) < 2:
+            return ""
+        first, last = min(names), max(names)
+        i = 0
+        while i < min(len(first), len(last)) and first[i] == last[i]:
+            i += 1
+        pre = first[:i]
+        cut = max(pre.rfind(c) for c in " -_/|")
+        return pre[:cut + 1] if cut >= 0 else ""
+
+    def _labels_for_level(self, level: str, prefix: str) -> "dict[str, str]":
+        """Chip text for every tag at this compaction level.
+
+        Truncation is made UNIQUE: shortening "T - Face" and "T - Family" to
+        "Fa" would put two identical chips on the row, so a colliding label is
+        extended a character at a time until it is its own.
+        """
+        tags_list = list(self._tag_btns)
+        if level == "full":
+            return {t: t for t in tags_list}
+        stripped = {
+            t: (t[len(prefix):] if prefix and t.startswith(prefix) else t) or t
+            for t in tags_list}
+        if level == "noprefix":
+            return stripped
+        n = int(level[4:])
+        out: "dict[str, str]" = {}
+        taken: "set[str]" = set()
+        for t in tags_list:
+            text = stripped[t]
+            k = min(n, len(text))
+            while text[:k] in taken and k < len(text):
+                k += 1
+            label = text[:k] or t[:n]
+            # Still colliding (one name is a prefix of another): let it be —
+            # the chips carry different colours, which is what distinguishes
+            # them at this size anyway.
+            taken.add(label)
+            out[t] = label
+        return out
+
+    def _apply_labels(self, level: str, prefix: str) -> None:
+        for t, label in self._labels_for_level(level, prefix).items():
+            b = self._tag_btns[t]
+            if b.text() != label:
+                b.setText(label)
+            b.setToolTip(f'Toggle tag "{t}"')
+        # Compact levels drop a little padding: at three characters the chrome
+        # around a chip costs more width than the text inside it.
+        tight = level.startswith("trim")
+        if getattr(self, "_chips_tight", None) is not tight:
+            self._chips_tight = tight
+            self._taglay.setSpacing(1 if tight else 2)
+            self._refresh_tag_styles()
+        self._taglay.invalidate()
+
     def _fit_tag_row(self, width: int) -> None:
         """Keep the chip row to a single line, as it has always looked.
 
@@ -1116,10 +1204,20 @@ class _Slot(QWidget):
             if b is not None and not b.isHidden():
                 avail -= b.sizeHint().width() + space
 
-        cost = {t: self._tag_btns[t].sizeHint().width() + space for t in want}
+        # Shorten the labels until every chip fits.  Collapsing into a menu
+        # hides tags behind a click and loses the at-a-glance colour row, so
+        # it is the last resort rather than the first.
+        prefix = self._shared_prefix(list(self._tag_btns))
+        cost: "dict[str, int]" = {}
+        for level in self._LABEL_LEVELS:
+            self._apply_labels(level, prefix)
+            cost = {t: self._tag_btns[t].sizeHint().width() + space
+                    for t in want}
+            if sum(cost.values()) <= avail:
+                break
         if sum(cost.values()) > avail:
-            # Room has to be kept for the "⋯" button itself, or it would push
-            # out the very chip it was added to make room for.
+            # Even the shortest labels do not fit — keep the row honest by
+            # offering the remainder rather than clipping it away.
             avail -= self._tag_more_btn.sizeHint().width() + space
         used = 0
         hidden: "list[str]" = []
@@ -1184,7 +1282,11 @@ class _Slot(QWidget):
     # the "background: transparent" in the base template.
     _CHIP_PLATE = " QToolButton { background: rgba(0,0,0,150); }"
 
+    _CHIP_TIGHT = " QToolButton { padding: 0 1px; }"
+
     def _plated(self, css: str) -> str:
+        if getattr(self, "_chips_tight", False):
+            css += self._CHIP_TIGHT
         return css + self._CHIP_PLATE if self._chip_plate else css
 
     @staticmethod
@@ -1209,7 +1311,7 @@ class _Slot(QWidget):
             hue = tags.color_of(t) or config.ACCENT
             self._set_css(b, self._plated(
                 (self._TAG_CSS_ON % (hue, hue)) if t in cur
-                else (self._TAG_CSS_OFF % config.OVERLAY_FG)))
+                else (self._TAG_CSS_DIM % _muted(hue))))
         # The ditto button lights up only when there are remembered tags to add.
         recent = tags.recent_tags()
         pending = bool(self._path) and any(
