@@ -2,6 +2,7 @@
 from __future__ import annotations
 import json
 import os
+import re
 import shutil
 import sys
 import time
@@ -34,10 +35,65 @@ def _same_file(a: str, b: str) -> bool:
         return False
 
 
+# Where the per-file favourites mirror goes.  Beside the media (the original
+# behaviour) keeps each folder self-contained — but it also means the mirror
+# lands on the MEDIA's drive, and a drive that cannot store links (exFAT,
+# FAT32) forces every favourite to be a full copy no matter how the app is
+# configured.  Centralising puts the mirrors under FAVORITES_DIR instead, which
+# can be moved to an NTFS drive, and a link stored there may freely point at a
+# file on any filesystem.
+FAVORITES_BESIDE_MEDIA = True
+
+
+def set_favorites_layout(beside: bool) -> None:
+    global FAVORITES_BESIDE_MEDIA
+    FAVORITES_BESIDE_MEDIA = bool(beside)
+
+
+def central_favorites_root() -> str:
+    return os.path.join(config.FAVORITES_DIR, "Favorites")
+
+
+_DRIVE_RE = re.compile(r"^([A-Za-z]):[\\/]?")
+
+
+def mirror_subpath(src_dir: str) -> "list[str]":
+    """The path components a centralised mirror of `src_dir` lives under.
+
+    ``G:\\X\\Trip`` -> ``["G", "X", "Trip"]``; ``/media/Trip`` ->
+    ``["media", "Trip"]``; ``\\\\nas\\share\\Trip`` -> ``["nas", "share",
+    "Trip"]``.  Parsed here rather than with os.path.splitdrive so the shape is
+    the same whichever OS is running — a library written on Windows must map
+    the same way when read anywhere else.
+    """
+    text = (src_dir or "").replace("\\", "/")
+    head: "list[str]" = []
+    m = _DRIVE_RE.match(src_dir or "")
+    if m:
+        head = [m.group(1).upper()]
+        text = text[m.end():]
+    elif text.startswith("//"):                 # UNC \\server\share
+        text = text[2:]
+    parts = [p for p in text.split("/") if p and p not in (".", "..")]
+    return head + parts
+
+
 def mirror_dir_for(path: str) -> str:
-    """Favourited media aggregates into a Favorites folder INSIDE the folder
-    the file lives in (per-folder mirrors, not one catch-all location)."""
-    return os.path.join(os.path.dirname(path), "Favorites")
+    """The Favorites directory holding `path`'s mirrored copy-or-link.
+
+    Beside the media by default.  Centralised, the source path's shape is
+    preserved under the mirror root, so two same-named folders on different
+    drives cannot collide and the result stays browsable.
+    """
+    if FAVORITES_BESIDE_MEDIA:
+        return os.path.join(os.path.dirname(os.path.abspath(path)), "Favorites")
+    # Drop the filename using BOTH separators: os.path.dirname only knows the
+    # host's, and a Windows-shaped path must map identically when the same
+    # library is read on another OS.
+    parts = mirror_subpath(path if _DRIVE_RE.match(path or "")
+                           or "\\" in (path or "")
+                           else os.path.abspath(path))
+    return os.path.join(central_favorites_root(), *parts[:-1])
 
 
 # How favourites / tag-folder aggregation place their files.  "copy" duplicates

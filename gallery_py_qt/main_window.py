@@ -568,6 +568,8 @@ class MainWindow(QMainWindow):
         # How favourites / tag folders place files: copy (default) or
         # hardlink / symlink to save disk space. Set via the Settings dialog.
         config.set_favorites_dir(self._prefs.get("favorites_dir", ""))
+        favorites.set_favorites_layout(
+            bool(self._prefs.get("favorites_beside_media", True)))
         favorites.set_link_mode(self._prefs.get("link_mode", "auto"))
         self.setStyleSheet(theme.stylesheet())
         self._recents = prefs.load_recent()
@@ -1301,6 +1303,8 @@ class MainWindow(QMainWindow):
         if new.get("theme") != self._prefs.get("theme"):
             self._set_theme(new["theme"])
         config.set_favorites_dir(new.get("favorites_dir", ""))
+        favorites.set_favorites_layout(
+            bool(new.get("favorites_beside_media", True)))
         favorites.set_link_mode(new.get("link_mode", "auto"))
         if self._mv is not None:
             self._mv.set_stable_layout(bool(new.get("stable_layout", False)))

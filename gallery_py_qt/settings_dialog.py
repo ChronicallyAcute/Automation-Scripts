@@ -18,6 +18,9 @@ class SettingsDialog(QDialog):
         ("Copy files (uses full disk space)", "copy"),
         ("Hard-link only (same drive)", "hardlink"),
         ("Symlink only", "symlink")]
+    _FAVLOC_LABELS = [
+        ("Beside the media, in each folder (default)", True),
+        ("All together in the favourites folder", False)]
     _TAGROW_LABELS = [("One row, extras in a ⋯ menu (default)", False),
                       ("Wrap onto as many rows as needed", True)]
     _CHROME_LABELS = [
@@ -89,6 +92,18 @@ class SettingsDialog(QDialog):
             "fit across the tile")
         form.addRow("Tag chips", self._tagrow)
 
+        self._favloc = QComboBox()
+        for label, val in self._FAVLOC_LABELS:
+            self._favloc.addItem(label, val)
+        self._select(self._favloc,
+                     bool(prefs.get("favorites_beside_media", True)))
+        self._favloc.setToolTip(
+            "Mirrors placed beside the media land on the MEDIA's drive — and a "
+            "drive that cannot store links (exFAT, FAT32) forces them to be "
+            "full copies. Keeping them together in the favourites folder lets "
+            "them live on a drive that can.")
+        form.addRow("Favourite mirrors", self._favloc)
+
         self._io = QComboBox()
         for label, val in self._IO_LABELS:
             self._io.addItem(label, val)
@@ -146,6 +161,7 @@ class SettingsDialog(QDialog):
         p["trash_purge_days"] = self._purge.value()
         p["stable_layout"] = bool(self._chrome.currentData())
         p["tag_row_wrap"] = bool(self._tagrow.currentData())
+        p["favorites_beside_media"] = bool(self._favloc.currentData())
         chosen = self._fav_dir.text().strip()
         p["favorites_dir"] = "" if chosen == config.DEFAULT_FAVORITES_DIR \
             else chosen

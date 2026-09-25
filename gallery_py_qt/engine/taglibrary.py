@@ -201,7 +201,8 @@ def mirror_roots(media_folders: "list[str] | None" = None,
     and the per-folder Favorites directories beside the media.
     """
     from . import foldertags
-    roots = [tag_folders_root(), foldertags.folder_tags_root()]
+    roots = [tag_folders_root(), foldertags.folder_tags_root(),
+             favorites.central_favorites_root()]
     for name in (tag_names if tag_names is not None else _tags.get_tags()):
         roots.append(os.path.join(config.FAVORITES_DIR, name))
     for folder in {os.path.dirname(p) for p in (media_folders or [])}:

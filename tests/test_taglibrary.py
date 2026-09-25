@@ -441,3 +441,94 @@ def test_settings_round_trips_the_tag_row_choice(qapp):
     dlg._select(dlg._tagrow, True)
     assert dlg.result_prefs()["tag_row_wrap"] is True
     dlg.done(0)
+
+
+# -- links live where they are STORED, not where they point --------------------
+
+def test_a_link_may_point_across_filesystems(tmp_path):
+    """The whole basis for keeping the library local: a link stored on a drive
+    that supports links may target a file on one that does not."""
+    from gallery_py_qt.engine import scan as _scan
+    target_dir = tmp_path / "external"
+    link_dir = tmp_path / "local"
+    target_dir.mkdir()
+    link_dir.mkdir()
+    real = _img(str(target_dir / "photo.png"), (50, 40))
+    link = str(link_dir / "photo.png")
+    try:
+        os.symlink(real, link)
+    except (OSError, NotImplementedError):
+        pytest.skip("no symlink privilege")
+    assert media.peek_size(link) == (50, 40)
+    assert [os.path.basename(p) for p in _scan.scan_media(str(link_dir)).paths] \
+        == ["photo.png"]
+    assert os.lstat(link).st_size < os.stat(real).st_size, "link must be tiny"
+
+
+def test_a_dangling_link_is_skipped_not_fatal(tmp_path):
+    """An unplugged external drive leaves every link dangling; that must
+    degrade quietly rather than break the gallery."""
+    from gallery_py_qt.engine import foldersize as _fs, scan as _scan
+    target_dir = tmp_path / "external"
+    link_dir = tmp_path / "local"
+    target_dir.mkdir()
+    link_dir.mkdir()
+    real = _img(str(target_dir / "photo.png"))
+    link = str(link_dir / "photo.png")
+    try:
+        os.symlink(real, link)
+    except (OSError, NotImplementedError):
+        pytest.skip("no symlink privilege")
+    os.remove(real)                          # drive unplugged
+    assert _scan.scan_media(str(link_dir)).paths == []
+    assert media.peek_size(link) == (0, 0)
+    assert _fs.measure(str(link_dir))[0] == 0
+
+
+# -- centralised favourite mirrors ---------------------------------------------
+
+def test_mirrors_sit_beside_the_media_by_default(tmp_path):
+    favorites.set_favorites_layout(True)
+    got = favorites.mirror_dir_for(str(tmp_path / "Trip" / "a.png"))
+    assert got == str(tmp_path / "Trip" / "Favorites")
+
+
+def test_centralised_mirrors_preserve_the_path_shape(tmp_path, monkeypatch):
+    monkeypatch.setattr(config, "FAVORITES_DIR", str(tmp_path / "lib"))
+    favorites.set_favorites_layout(False)
+    got = favorites.mirror_dir_for("G:\\X\\Holiday 2024\\a.png")
+    assert got.replace(os.sep, "/").endswith("Favorites/G/X/Holiday 2024")
+
+
+def test_path_shape_is_the_same_on_any_os():
+    """A library written on Windows must map identically when read elsewhere."""
+    assert favorites.mirror_subpath("G:\\X\\Trip") == ["G", "X", "Trip"]
+    assert favorites.mirror_subpath("g:/X/Trip") == ["G", "X", "Trip"]
+    assert favorites.mirror_subpath("/media/Trip") == ["media", "Trip"]
+    assert favorites.mirror_subpath("\\\\nas\\share\\Trip") == [
+        "nas", "share", "Trip"]
+
+
+def test_same_named_folders_on_different_drives_do_not_collide(tmp_path,
+                                                               monkeypatch):
+    monkeypatch.setattr(config, "FAVORITES_DIR", str(tmp_path / "lib"))
+    favorites.set_favorites_layout(False)
+    g = favorites.mirror_dir_for("G:\\Trip\\a.png")
+    c = favorites.mirror_dir_for("C:\\Trip\\a.png")
+    assert g != c
+
+
+def test_relink_scope_includes_the_central_mirror_root(tmp_path, monkeypatch):
+    monkeypatch.setattr(config, "FAVORITES_DIR", str(tmp_path / "lib"))
+    os.makedirs(favorites.central_favorites_root(), exist_ok=True)
+    roots = [os.path.abspath(r) for r in taglibrary.mirror_roots(tag_names=[])]
+    assert os.path.abspath(favorites.central_favorites_root()) in roots
+
+
+def test_settings_round_trips_the_mirror_layout(qapp):
+    from gallery_py_qt.settings_dialog import SettingsDialog
+    dlg = SettingsDialog({})
+    assert dlg.result_prefs()["favorites_beside_media"] is True
+    dlg._select(dlg._favloc, False)
+    assert dlg.result_prefs()["favorites_beside_media"] is False
+    dlg.done(0)

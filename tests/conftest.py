@@ -69,6 +69,7 @@ def isolated(tmp_path, monkeypatch):
     monkeypatch.setattr(health, "_dirty", False)
     monkeypatch.setattr(health, "_load_failed", False)
     favorites.set_link_mode("copy")        # link mode is module-global state
+    favorites.set_favorites_layout(True)   # ditto the mirror layout
     favorites.reset_link_fallbacks()
     monkeypatch.setattr(tags, "_load_failed", False)
     monkeypatch.setattr(tags, "_backed_up", False)
