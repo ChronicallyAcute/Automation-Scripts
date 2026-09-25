@@ -80,6 +80,10 @@ def isolated(tmp_path, monkeypatch):
     # Drain the shared single-worker mirror pool so background copies/embeds
     # submitted by this test can't bleed into (and slow down) the next one.
     favorites.flush_mirror_ops(timeout=15)
+    # The stall watchdog reads other threads' stacks; leaving one per test
+    # running into teardown is a crash waiting to happen.
+    from gallery_py_qt import diag as _diag
+    _diag.uninstall()
     # Destroy any widgets the test created so their media pipelines / thread
     # pools are freed — otherwise QMediaPlayers accumulate across the suite and
     # eventually stall Qt's media init under the offscreen platform.

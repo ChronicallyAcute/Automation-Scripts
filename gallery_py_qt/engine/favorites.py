@@ -46,9 +46,28 @@ def mirror_dir_for(path: str) -> str:
 LINK_MODE = "copy"
 
 
+# "auto" is the sensible default for a library that should not be duplicated:
+# try the cheapest real link first, and only copy when the platform leaves no
+# alternative.  Hard links are preferred because they survive the original
+# being moved within its volume and need no privilege; symlinks are the only
+# option ACROSS volumes (the tag folders under FAVORITES_DIR are routinely on
+# a different drive than the media), at the cost of breaking if the original
+# moves.
+_MODES = ("copy", "hardlink", "symlink", "auto")
+
+
 def set_link_mode(mode: str) -> None:
     global LINK_MODE
-    LINK_MODE = mode if mode in ("copy", "hardlink", "symlink") else "copy"
+    LINK_MODE = mode if mode in _MODES else "copy"
+
+
+def _ladder() -> "tuple[str, ...]":
+    """The placement strategies to attempt, in order, for the current mode."""
+    if LINK_MODE == "auto":
+        return ("hardlink", "symlink")
+    if LINK_MODE in ("hardlink", "symlink"):
+        return (LINK_MODE,)
+    return ()
 
 
 # When a link is requested but cannot be made, we fall back to a real copy so
@@ -102,56 +121,78 @@ def place_file(src: str, dst: str) -> str:
             os.remove(dst)
     except OSError:
         pass
-    if LINK_MODE == "hardlink":
+    last: "OSError | None" = None
+    for how in _ladder():
         try:
-            os.link(src, dst)
-            return "hardlink"
+            if how == "hardlink":
+                os.link(src, dst)
+            else:
+                os.symlink(os.path.abspath(src), dst)
+            return how
         except OSError as exc:
-            _note_fallback(exc)
-    elif LINK_MODE == "symlink":
-        try:
-            os.symlink(os.path.abspath(src), dst)
-            return "symlink"
-        except OSError as exc:
-            _note_fallback(exc)
+            last = exc
+    if last is not None:
+        _note_fallback(last)
     shutil.copy2(src, dst)
     return "copy"
 
 
-def probe_link_mode(folder: str) -> "tuple[str, str]":
-    """Would LINK_MODE actually work for files placed into `folder`?
+def _probe_one(how: str, folder: str, source: "str | None" = None
+               ) -> "tuple[bool, str]":
+    """Try one placement strategy for real; clean up after itself.
 
-    Returns (effective_mode, explanation).  Makes a real link to a scratch file
-    and deletes it, because the answer depends on the pair of locations — the
-    same setting can work for the per-folder Favorites mirror and silently
-    degrade to copying for the tag folders on another drive.
+    `source` is where the ORIGINAL media lives. It matters: a hard link cannot
+    cross volumes, so linking C:\\media into G:\\X fails even though linking
+    within either one succeeds. Probing both ends is the only way to get a
+    truthful answer.
     """
-    if LINK_MODE == "copy":
-        return "copy", "Copying is selected."
-    probe_dir = os.path.abspath(folder)
-    src = os.path.join(probe_dir, ".gallery_linkprobe.tmp")
-    dst = src + ".link"
+    target = os.path.abspath(folder)
+    src_dir = os.path.abspath(source) if source else target
+    src = os.path.join(src_dir, ".gallery_linkprobe.tmp")
+    dst = os.path.join(target, ".gallery_linkprobe.link")
     try:
-        os.makedirs(probe_dir, exist_ok=True)
+        os.makedirs(target, exist_ok=True)
+        os.makedirs(src_dir, exist_ok=True)
         with open(src, "wb") as f:
             f.write(b"0")
     except OSError as exc:
-        return "copy", f"Cannot write to {probe_dir}: {exc}"
+        return False, f"Cannot write a probe file: {exc}"
     try:
-        if LINK_MODE == "hardlink":
+        if how == "hardlink":
             os.link(src, dst)
         else:
             os.symlink(src, dst)
-        return LINK_MODE, f"{LINK_MODE} works for files placed in {probe_dir}."
+        where = (f"from {src_dir} into {target}" if source
+                 else f"in {target}")
+        return True, f"{how} works {where}."
     except OSError as exc:
-        return "copy", (f"{LINK_MODE} is NOT possible for {probe_dir} "
-                        f"({exc}) — full copies are being made instead.")
+        return False, f"{how} is not possible here ({exc})."
     finally:
-        for p in (dst, src):
+        for q in (dst, src):
             try:
-                os.remove(p)
+                os.remove(q)
             except OSError:
                 pass
+
+
+def probe_link_mode(folder: str, source: "str | None" = None
+                    ) -> "tuple[str, str]":
+    """What placement would ACTUALLY happen for files put into `folder`?
+
+    Returns (effective_mode, explanation). The setting is not the answer: a
+    link that cannot be made silently becomes a full copy, and whether it can
+    be made depends on the pair of locations, so this tests them for real.
+    """
+    if LINK_MODE == "copy":
+        return "copy", "Copying is selected."
+    for how in _ladder():
+        ok, why = _probe_one(how, folder, source)
+        if ok:
+            return how, why
+    tried = " or ".join(_ladder()) or "linking"
+    return "copy", (f"{tried} is NOT possible for {os.path.abspath(folder)}"
+                    + (f" from {os.path.abspath(source)}" if source else "")
+                    + " — full copies are being made instead.")
 
 
 class Favorites:

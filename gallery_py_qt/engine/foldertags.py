@@ -175,29 +175,28 @@ def _hardlink_tree(src: str, dst: str) -> None:
                 shutil.copy2(s, d)
 
 
-def place_folder(src: str, dst: str) -> None:
-    """Mirror album `src` to `dst` per LINK_MODE.
+def place_folder(src: str, dst: str) -> str:
+    """Mirror album `src` to `dst` per LINK_MODE; returns the mode used.
 
     "symlink" makes a single directory symlink; "hardlink" recreates the tree
-    with per-file hardlinks; "copy" (and any link fallback) duplicates the
-    bytes.  Whatever is already at `dst` is cleared first.
+    with per-file hardlinks; "auto" tries each in turn; "copy" (and any link
+    fallback) duplicates the bytes.  Whatever is at `dst` is cleared first.
     """
     _remove_mirror(dst)
     src_abs = os.path.abspath(src)
-    mode = favorites.LINK_MODE
-    if mode == "symlink":
+    # Reuse the per-file ladder so an album mirror makes the same choice a
+    # favourited file would — otherwise "auto" would silently copy whole trees.
+    for how in favorites._ladder():
         try:
-            os.symlink(src_abs, dst, target_is_directory=True)
-            return
+            if how == "symlink":
+                os.symlink(src_abs, dst, target_is_directory=True)
+            else:
+                _hardlink_tree(src_abs, dst)
+            return how
         except OSError:
-            pass
-    elif mode == "hardlink":
-        try:
-            _hardlink_tree(src_abs, dst)
-            return
-        except OSError:
-            pass
+            _remove_mirror(dst)      # a partial tree must not be left behind
     _copytree(src_abs, dst)
+    return "copy"
 
 
 def _remove_mirror(path: str) -> None:

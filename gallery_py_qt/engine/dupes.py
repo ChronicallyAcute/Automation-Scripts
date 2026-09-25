@@ -247,8 +247,11 @@ def best_tagged(group: "list[str]") -> str:
 
     Tag count comes first because tagging is the work that cannot be recovered
     from the bytes — the files are byte-identical, so every other difference is
-    cosmetic.  mtime breaks the common tie (neither copy tagged); the path
-    breaks the rest so the choice never depends on dict ordering.
+    cosmetic.  Next, a real file beats a symlink: once the tag folders hold
+    links rather than copies, the link and its target are the same media, and
+    the one worth showing is the one at its own location — a link would break
+    if the original ever moved.  mtime breaks the common tie (nothing tagged);
+    the path breaks the rest so the choice never depends on dict ordering.
     """
     from . import tags as _tags
 
@@ -257,7 +260,7 @@ def best_tagged(group: "list[str]") -> str:
             mtime = os.stat(p).st_mtime
         except OSError:
             mtime = 0.0
-        return (len(_tags.tags_for(p)), mtime, p)
+        return (len(_tags.tags_for(p)), not os.path.islink(p), mtime, p)
 
     return max(group, key=rank) if group else ""
 

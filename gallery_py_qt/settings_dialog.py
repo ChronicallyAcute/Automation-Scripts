@@ -13,9 +13,11 @@ from . import config
 
 
 class SettingsDialog(QDialog):
-    _LINK_LABELS = [("Copy files (default)", "copy"),
-                    ("Hard-link (save space, same drive)", "hardlink"),
-                    ("Symlink (save space)", "symlink")]
+    _LINK_LABELS = [
+        ("Link instead of copying (default)", "auto"),
+        ("Copy files (uses full disk space)", "copy"),
+        ("Hard-link only (same drive)", "hardlink"),
+        ("Symlink only", "symlink")]
     _CHROME_LABELS = [
         ("Reflow tiles into the freed space (default)", False),
         ("Keep the tile layout stable (faster)", True)]
@@ -44,7 +46,7 @@ class SettingsDialog(QDialog):
         self._link = QComboBox()
         for label, val in self._LINK_LABELS:
             self._link.addItem(label, val)
-        self._select(self._link, prefs.get("link_mode", "copy"))
+        self._select(self._link, prefs.get("link_mode", "auto"))
         form.addRow("Favourites / tag folders", self._link)
 
         self._chrome = QComboBox()

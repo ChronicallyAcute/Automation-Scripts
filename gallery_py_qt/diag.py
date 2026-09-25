@@ -54,6 +54,36 @@ def write(text: str) -> None:
         pass
 
 
+# The watchdog inspects other threads' frames (sys._current_frames), which is
+# only safe while those threads exist.  A daemon thread left running into
+# interpreter shutdown can therefore crash the process, and every install()
+# used to add another one that never stopped.  Track it so it can be replaced
+# and stopped.
+_thread: "threading.Thread | None" = None
+_stop: "threading.Event | None" = None
+
+
+def _new_stop_event() -> "threading.Event":
+    global _stop
+    uninstall()
+    _stop = threading.Event()
+    return _stop
+
+
+def uninstall() -> None:
+    """Stop the watchdog thread and wait briefly for it to notice."""
+    global _thread, _stop
+    if _stop is not None:
+        _stop.set()
+    t, _thread = _thread, None
+    if t is not None and t.is_alive():
+        t.join(timeout=1.0)
+
+
+def is_running() -> bool:
+    return _thread is not None and _thread.is_alive()
+
+
 def install(app, threshold_ms: int = 120) -> None:
     """Start the GUI-thread stall watchdog."""
     global _last_beat, _main_tid, _timer
@@ -72,9 +102,12 @@ def install(app, threshold_ms: int = 120) -> None:
     _timer.timeout.connect(_beat)
     _timer.start()
 
+    stop = _new_stop_event()
+
     def _watch() -> None:
-        while True:
-            time.sleep(0.02)
+        while not stop.is_set():
+            if stop.wait(0.02):
+                return
             gap = (time.perf_counter() - _last_beat) * 1000.0
             if gap < threshold_ms:
                 continue
@@ -85,10 +118,22 @@ def install(app, threshold_ms: int = 120) -> None:
                      if frame is not None else "  (stack unavailable)\n")
             write(f"GUI THREAD BLOCKED ~{gap:.0f}ms while running:\n{stack}")
             # Wait for recovery so one long stall isn't reported repeatedly.
-            while (time.perf_counter() - _last_beat) * 1000.0 >= threshold_ms:
-                time.sleep(0.02)
+            while (not stop.is_set()
+                   and (time.perf_counter() - _last_beat) * 1000.0
+                   >= threshold_ms):
+                stop.wait(0.02)
 
-    threading.Thread(target=_watch, name="stall-watchdog", daemon=True).start()
+    global _thread
+    _thread = threading.Thread(target=_watch, name="stall-watchdog",
+                               daemon=True)
+    _thread.start()
+    # The watchdog reads other threads' stacks, which is not a safe thing to be
+    # doing while the interpreter tears those threads down — so it must stop
+    # before shutdown, not merely be a daemon.
+    try:
+        app.aboutToQuit.connect(uninstall)
+    except Exception:
+        pass
     try:
         open(LOG_PATH, "a", encoding="utf-8").close()
     except OSError:

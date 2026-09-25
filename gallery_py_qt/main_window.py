@@ -567,7 +567,7 @@ class MainWindow(QMainWindow):
         config.apply_theme(self._prefs.get("theme", "dark"))
         # How favourites / tag folders place files: copy (default) or
         # hardlink / symlink to save disk space. Set via the Settings dialog.
-        favorites.set_link_mode(self._prefs.get("link_mode", "copy"))
+        favorites.set_link_mode(self._prefs.get("link_mode", "auto"))
         self.setStyleSheet(theme.stylesheet())
         self._recents = prefs.load_recent()
         self._favs = Favorites()
@@ -655,11 +655,22 @@ class MainWindow(QMainWindow):
                 cache.enforce_cap()
             except Exception:
                 pass
-        QTimer.singleShot(
-            1500, lambda: self._scan_pool.start(_FnJob(_housekeeping)))
+        # Both of these are OWNED timers, not QTimer.singleShot: a bare
+        # singleShot outlives the window it targets, so closing the window
+        # inside its delay still fires the callback — and the warning below
+        # opens a MODAL dialog, which on a half-torn-down window aborts the
+        # process.  Parented to self, they die with it.
+        self._housekeeping_timer = QTimer(self)
+        self._housekeeping_timer.setSingleShot(True)
+        self._housekeeping_timer.timeout.connect(
+            lambda: self._scan_pool.start(_FnJob(_housekeeping)))
+        self._housekeeping_timer.start(1500)
         # An unreadable tag/rating file must be loud, not a silent "no tags":
         # saving is disabled in that state to protect what's on disk.
-        QTimer.singleShot(300, self._warn_if_stores_unreadable)
+        self._store_warn_timer = QTimer(self)
+        self._store_warn_timer.setSingleShot(True)
+        self._store_warn_timer.timeout.connect(self._warn_if_stores_unreadable)
+        self._store_warn_timer.start(300)
         # Heal the tag set from the data: if the tag-set file was reset or
         # damaged, descriptors still on files would otherwise have no button
         # and look deleted.
@@ -900,14 +911,17 @@ class MainWindow(QMainWindow):
         self._more_menu.addAction("▦  Size triage (free up space)…",
                                   self._open_size_triage)
         self._more_menu.addAction("◔  Storage report…", self._storage_report)
+        self._more_menu.addAction("⛃  Tidy tag library…", self._tidy_tag_library)
         self._more_menu.addSeparator()
         self._collapse_act = self._more_menu.addAction("Hide duplicate copies")
         self._collapse_act.setCheckable(True)
         self._collapse_act.setToolTip(
             "Show only one tile per set of byte-identical files — the copy "
             "carrying the most tags")
+        # On by default: with the tag folders holding links to the same media,
+        # every tagged file would otherwise appear once per tag it carries.
         self._collapse_act.setChecked(
-            bool(self._prefs.get("collapse_duplicates", False)))
+            bool(self._prefs.get("collapse_duplicates", True)))
         self._model.set_collapse_duplicates(self._collapse_act.isChecked())
         self._collapse_act.toggled.connect(self._toggle_collapse_dupes)
         self._more_btn.setMenu(self._more_menu)
@@ -1285,7 +1299,7 @@ class MainWindow(QMainWindow):
         new = dlg.result_prefs()
         if new.get("theme") != self._prefs.get("theme"):
             self._set_theme(new["theme"])
-        favorites.set_link_mode(new.get("link_mode", "copy"))
+        favorites.set_link_mode(new.get("link_mode", "auto"))
         if self._mv is not None:
             self._mv.set_stable_layout(bool(new.get("stable_layout", False)))
         li = new.get("low_io_mode")
@@ -1589,6 +1603,8 @@ class MainWindow(QMainWindow):
             broken.append(("ratings", _ratings._RATINGS_FILE))
         if not broken:
             return
+        if not self.isVisible():
+            return          # closing / never shown: a modal here has no owner
         lines = "\n".join(f"  • {what}:  {path}" for what, path in broken)
         self._status.setText("Tag/rating file unreadable — saving disabled")
         QMessageBox.warning(
@@ -2206,6 +2222,21 @@ class MainWindow(QMainWindow):
             self._report_collapsed()
         else:
             self._status.setText("Showing every copy")
+
+    # -- tag library tidy ------------------------------------------------------
+    def _tidy_tag_library(self) -> None:
+        """Separate real tags from the media folders sharing their namespace."""
+        from .library_dialog import TagLibraryDialog
+        dlg = TagLibraryDialog(self._model.all_paths(), self)
+        dlg.changed.connect(self._on_library_changed)
+        dlg.exec()
+
+    def _on_library_changed(self) -> None:
+        self._rebuild_tag_filter_menu()
+        if self._mv is not None:
+            self._mv.rebuild_tag_buttons()
+        self._apply_filter()
+        self._start_dupe_scan()
 
     # -- storage report --------------------------------------------------------
     def _storage_report(self) -> None:
