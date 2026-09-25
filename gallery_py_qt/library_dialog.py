@@ -31,21 +31,28 @@ class _RelinkJob(QRunnable):
     """Index originals and plan the relink off the GUI thread (walks disk)."""
 
     def __init__(self, sources: "list[str]", roots: "list[str]",
-                 signals: _Signals):
+                 signals: _Signals, recursive: bool = True):
         super().__init__()
         self._sources = list(sources)
         self._roots = list(roots)
+        self._recursive = recursive
         self._sig = signals
 
     def run(self) -> None:
         try:
-            self._sig.progress.emit("Indexing originals by filename…")
-            index = taglibrary.index_originals(self._sources,
-                                               exclude=self._roots)
+            collisions: "dict[str, list[str]]" = {}
+            self._sig.progress.emit(
+                f"Indexing originals under {len(self._sources)} folder(s)…")
+            index = taglibrary.index_originals(
+                self._sources, exclude=self._roots,
+                recursive=self._recursive, collisions=collisions,
+                progress=lambda n, where: self._sig.progress.emit(
+                    f"Indexing… {n} name(s) so far  ·  {where}"))
             self._sig.progress.emit(
                 f"Indexed {len(index)} name(s). Scanning the tag folders…")
             plan = taglibrary.plan_relink(self._roots, index)
-            self._sig.done.emit(plan)
+            self._sig.done.emit({"plan": plan, "index": index,
+                                 "collisions": collisions})
         except Exception as exc:                   # pragma: no cover
             self._sig.done.emit(exc)
 
@@ -106,7 +113,41 @@ class TagLibraryDialog(QDialog):
         self._relink_cb.setToolTip(
             "Matches each copy to an original by filename and swaps it for a "
             "link, reclaiming the space the copy uses")
+        self._relink_cb.toggled.connect(self._sync_source_enabled)
         root.addWidget(self._relink_cb)
+
+        # Where the ORIGINALS live.  Several folders, each searched to full
+        # depth, so originals spread across unrelated directories (or drives)
+        # are all matched in one pass.
+        src_label = QLabel("Search these folders for the original files:")
+        src_label.setStyleSheet(f"color: {config.FG_MID};")
+        root.addWidget(src_label)
+
+        self._sources = QTreeWidget()
+        self._sources.setHeaderHidden(True)
+        self._sources.setRootIsDecorated(False)
+        self._sources.setMaximumHeight(110)
+        root.addWidget(self._sources)
+
+        src_row = QHBoxLayout()
+        add_src = QPushButton("Add folder…")
+        add_src.clicked.connect(self._add_source)
+        src_row.addWidget(add_src)
+        rm_src = QPushButton("Remove")
+        rm_src.clicked.connect(self._remove_source)
+        src_row.addWidget(rm_src)
+        self._recursive_cb = QCheckBox("Search subfolders")
+        self._recursive_cb.setChecked(True)
+        self._recursive_cb.setToolTip(
+            "Walk each folder to its full depth. Off, only files sitting "
+            "directly in the chosen folders are matched.")
+        src_row.addWidget(self._recursive_cb)
+        src_row.addStretch(1)
+        root.addLayout(src_row)
+
+        for folder in self._remembered_sources():
+            self._add_source_path(folder)
+        self._sync_source_enabled(True)
 
         self._status = QLabel("")
         self._status.setWordWrap(True)
@@ -216,47 +257,109 @@ class TagLibraryDialog(QDialog):
         else:
             QMessageBox.information(self, "Done", self._status.text())
 
+    # -- where the originals live -------------------------------------------------
+    def _remembered_sources(self) -> "list[str]":
+        """Last session's folders, else the folders currently open."""
+        try:
+            from .engine import prefs as _prefs
+            saved = _prefs.load_prefs().get("relink_sources", [])
+        except Exception:
+            saved = []
+        if saved:
+            return [p for p in saved if isinstance(p, str)]
+        return sorted({os.path.dirname(p) for p in self._media_folders})[:4]
+
+    def _remember_sources(self) -> None:
+        try:
+            from .engine import prefs as _prefs
+            p = _prefs.load_prefs()
+            p["relink_sources"] = self.source_folders()
+            _prefs.save_prefs(p)
+        except Exception:
+            pass
+
+    def source_folders(self) -> "list[str]":
+        return [self._sources.topLevelItem(i).text(0)
+                for i in range(self._sources.topLevelItemCount())]
+
+    def _add_source_path(self, folder: str) -> None:
+        if not folder or folder in self.source_folders():
+            return
+        item = QTreeWidgetItem([folder])
+        if not os.path.isdir(folder):
+            item.setText(0, folder + "   (missing)")
+            item.setDisabled(True)
+        self._sources.addTopLevelItem(item)
+
+    def _add_source(self) -> None:
+        start = (self.source_folders() or [""])[-1] or (
+            self._media_folders[0] if self._media_folders
+            else os.path.expanduser("~"))
+        if os.path.isfile(start):
+            start = os.path.dirname(start)
+        folder = QFileDialog.getExistingDirectory(
+            self, "Add a folder to search for original files", start)
+        if folder:
+            self._add_source_path(folder)
+
+    def _remove_source(self) -> None:
+        for item in self._sources.selectedItems():
+            self._sources.takeTopLevelItem(
+                self._sources.indexOfTopLevelItem(item))
+
+    def _sync_source_enabled(self, on: bool) -> None:
+        for w in (self._sources, self._recursive_cb):
+            w.setEnabled(bool(on))
+
     # -- relink ------------------------------------------------------------------
     def _start_relink(self, keep: "list[str]") -> None:
-        start = (self._media_folders[0] if self._media_folders
-                 else os.path.expanduser("~"))
-        source = QFileDialog.getExistingDirectory(
-            self,
-            "Where do the ORIGINAL media files live? (searched recursively)",
-            os.path.dirname(start) if os.path.isfile(start) else start)
-        if not source:
+        sources = [f for f in self.source_folders() if os.path.isdir(f)]
+        if not sources:
+            self._add_source()
+            sources = [f for f in self.source_folders() if os.path.isdir(f)]
+        if not sources:
             QMessageBox.information(
                 self, "Skipped",
-                self._status.text() + "\n\nRelinking skipped — no source "
-                "folder chosen.")
+                self._status.text() + "\n\nRelinking skipped — no folder was "
+                "given to search for the originals.")
             return
         roots = taglibrary.mirror_roots(self._media_folders, keep)
         if not roots:
             QMessageBox.information(self, "Nothing to relink",
                                     "No tag or Favorites folders were found.")
             return
+        self._remember_sources()
         self._apply_btn.setEnabled(False)
         self._progress.show()
         self._sig = _Signals(self)
         self._sig.progress.connect(self._status.setText)
         self._sig.done.connect(self._on_plan)
-        self._pool.start(_RelinkJob([source], roots, self._sig))
+        self._pool.start(_RelinkJob(sources, roots, self._sig,
+                                    self._recursive_cb.isChecked()))
 
-    def _on_plan(self, plan) -> None:
+    def _on_plan(self, result) -> None:
         self._progress.hide()
         self._apply_btn.setEnabled(True)
-        if isinstance(plan, Exception):
-            QMessageBox.warning(self, "Relink failed", str(plan))
+        if isinstance(result, Exception):
+            QMessageBox.warning(self, "Relink failed", str(result))
             return
+        plan = result["plan"]
+        index = result["index"]
+        collisions = result["collisions"]
         self._plan = [p for p in plan if p["action"] == "link"]
         orphans = [p for p in plan if p["action"] == "orphan"]
+        searched = (f"Searched {len(self.source_folders())} folder(s)"
+                    + (" and their subfolders" if self._recursive_cb.isChecked()
+                       else " (top level only)")
+                    + f", indexing {len(index)} filename(s).")
         if not self._plan:
             QMessageBox.information(
                 self, "Nothing to relink",
-                "No real copies were found — the tag folders already hold "
-                "links.\n\n"
-                + (f"{len(orphans)} file(s) had no original of that name "
-                   "outside the mirrors; they were left alone."
+                searched + "\n\nNo real copies were found — the tag folders "
+                "already hold links.\n\n"
+                + (f"{len(orphans)} file(s) had no original of that name in "
+                   "those folders; they were left alone. Add the folder the "
+                   "originals live in and run it again."
                    if orphans else ""))
             return
         total = sum(p["bytes"] for p in self._plan)
@@ -269,17 +372,37 @@ class TagLibraryDialog(QDialog):
                 "Hard links need the tag folders on the SAME drive as your "
                 "media; symlinks need Developer Mode on Windows.")
             return
+        # Filename-only matching across several directories means the same
+        # name can exist in more than one of them; the first found wins, so
+        # say which names that decided rather than resolving it silently.
+        ambiguous = ""
+        if collisions:
+            picked = {p["original"] for p in self._plan}
+            relevant = {n: v for n, v in collisions.items()
+                        if any(x in picked for x in v)}
+            if relevant:
+                sample = "\n".join(
+                    f"  • {n} — {len(v)} copies, using {v[0]}"
+                    for n, v in list(relevant.items())[:6])
+                ambiguous = (
+                    f"\n{len(relevant)} filename(s) exist in more than one of "
+                    "the searched folders. The first one found is used:\n"
+                    f"{sample}\n"
+                    + (f"  … and {len(relevant) - 6} more\n"
+                       if len(relevant) > 6 else "") + "\n")
         if QMessageBox.question(
                 self, "Replace copies with links?",
+                searched + "\n\n"
                 f"{len(self._plan)} copy(ies) would become {eff}s, freeing "
                 f"about {foldersize.fmt_size(total)}.\n\n"
                 f"{why}\n\n"
                 "Matching is by FILENAME — content is not compared, as you "
                 "asked. A re-encoded file of the same name would be replaced "
-                "by a link to the original.\n\n"
-                + (f"{len(orphans)} file(s) have no original elsewhere and "
-                   "will be left as they are.\n\n" if orphans else "")
-                + "Proceed?"
+                "by a link to the original.\n"
+                + ambiguous
+                + (f"\n{len(orphans)} file(s) have no original in those "
+                   "folders and will be left as they are.\n" if orphans else "")
+                + "\nProceed?"
                 ) != QMessageBox.StandardButton.Yes:
             return
         relinked, freed, errors = taglibrary.relink_copies(self._plan)

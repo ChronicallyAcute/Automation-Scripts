@@ -22,6 +22,7 @@ would happen and changes nothing.
 """
 from __future__ import annotations
 import os
+from typing import Callable
 import shutil
 import sys
 
@@ -217,29 +218,61 @@ def _under_any(path: str, roots: "list[str]") -> bool:
 
 
 def index_originals(roots: "list[str]",
-                    exclude: "list[str] | None" = None) -> "dict[str, str]":
+                    exclude: "list[str] | None" = None,
+                    recursive: bool = True,
+                    collisions: "dict[str, list[str]] | None" = None,
+                    progress: "Callable[[int, str], None] | None" = None
+                    ) -> "dict[str, str]":
     """{basename: path} for the media under `roots`, for filename matching.
 
-    First occurrence wins. `exclude` lists the app-made mirror directories: a
-    copy must never be adopted as its own original, or relinking would point a
-    file at itself. A standalone media folder inside FAVORITES_DIR is NOT
-    excluded — it is a legitimate place for an original to live.
+    Several roots may be given, and each is walked to its full depth by
+    default, so originals scattered across unrelated directories (or drives)
+    are all found in one pass. Roots may overlap or repeat; a file is indexed
+    once.
+
+    First occurrence wins. Pass `collisions` to learn where that mattered: it
+    is filled with {basename: [every path seen]} for names found in more than
+    one place. With filename-only matching that ambiguity decides which
+    original a copy gets linked to, so it is worth showing rather than
+    resolving silently.
+
+    `exclude` lists the app-made mirror directories: a copy must never be
+    adopted as its own original, or relinking would point a file at itself. A
+    standalone media folder inside FAVORITES_DIR is NOT excluded — it is a
+    legitimate place for an original to live.
     """
     skip = list(exclude if exclude is not None else mirror_roots())
     out: "dict[str, str]" = {}
+    seen_paths: "set[str]" = set()
+    n = 0
     for root in roots:
+        if not root or not os.path.isdir(root):
+            continue
         for dirpath, dirnames, filenames in os.walk(root):
             if _under_any(dirpath, skip):
                 dirnames[:] = []
                 continue
             dirnames[:] = [d for d in dirnames if d != "Favorites"]
+            if not recursive:
+                dirnames[:] = []
+            if progress is not None:
+                progress(len(out), dirpath)
             for fn in filenames:
                 if os.path.splitext(fn.lower())[1] not in config.SUPPORTED:
                     continue
                 path = os.path.join(dirpath, fn)
+                ap = os.path.abspath(path)
+                if ap in seen_paths:
+                    continue          # overlapping roots: index a file once
                 if os.path.islink(path):
                     continue          # a link is not an original
-                out.setdefault(fn, path)
+                seen_paths.add(ap)
+                n += 1
+                if fn in out:
+                    if collisions is not None:
+                        collisions.setdefault(fn, [out[fn]]).append(path)
+                    continue
+                out[fn] = path
     return out
 
 

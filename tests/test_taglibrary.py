@@ -532,3 +532,157 @@ def test_settings_round_trips_the_mirror_layout(qapp):
     dlg._select(dlg._favloc, False)
     assert dlg.result_prefs()["favorites_beside_media"] is False
     dlg.done(0)
+
+
+# -- originals scattered across directories ------------------------------------
+
+def test_index_walks_to_full_depth(lib, tmp_path):
+    deep = tmp_path / "media" / "a" / "b" / "c"
+    _img(str(deep / "deep.png"))
+    index = taglibrary.index_originals([str(tmp_path / "media")], exclude=[])
+    assert "deep.png" in index
+
+
+def test_index_spans_several_unrelated_roots(lib, tmp_path):
+    _img(str(tmp_path / "one" / "x.png"))
+    _img(str(tmp_path / "two" / "nested" / "y.png"))
+    index = taglibrary.index_originals(
+        [str(tmp_path / "one"), str(tmp_path / "two")], exclude=[])
+    assert {"x.png", "y.png"} <= set(index)
+
+
+def test_non_recursive_stays_at_the_top_level(lib, tmp_path):
+    _img(str(tmp_path / "media" / "top.png"))
+    _img(str(tmp_path / "media" / "sub" / "deep.png"))
+    index = taglibrary.index_originals([str(tmp_path / "media")], exclude=[],
+                                       recursive=False)
+    assert "top.png" in index and "deep.png" not in index
+
+
+def test_overlapping_roots_index_each_file_once(lib, tmp_path):
+    _img(str(tmp_path / "media" / "x.png"))
+    root = str(tmp_path / "media")
+    seen = []
+    taglibrary.index_originals([root, root], exclude=[],
+                               progress=lambda n, where: seen.append(where))
+    index = taglibrary.index_originals([root, root, str(tmp_path)], exclude=[])
+    assert index["x.png"].endswith("x.png")
+
+
+def test_a_missing_root_is_skipped_not_fatal(lib, tmp_path):
+    _img(str(tmp_path / "media" / "x.png"))
+    index = taglibrary.index_originals(
+        [str(tmp_path / "nope"), str(tmp_path / "media")], exclude=[])
+    assert "x.png" in index
+
+
+def test_collisions_report_names_found_in_several_places(lib, tmp_path):
+    _img(str(tmp_path / "one" / "same.png"))
+    _img(str(tmp_path / "two" / "same.png"))
+    _img(str(tmp_path / "one" / "unique.png"))
+    col: dict = {}
+    taglibrary.index_originals(
+        [str(tmp_path / "one"), str(tmp_path / "two")], exclude=[],
+        collisions=col)
+    assert "same.png" in col and len(col["same.png"]) == 2
+    assert "unique.png" not in col
+
+
+def test_collisions_is_optional(lib, tmp_path):
+    _img(str(tmp_path / "one" / "same.png"))
+    _img(str(tmp_path / "two" / "same.png"))
+    index = taglibrary.index_originals(
+        [str(tmp_path / "one"), str(tmp_path / "two")], exclude=[])
+    assert len(index) == 1, "first occurrence still wins"
+
+
+def test_progress_reports_directories_as_they_are_walked(lib, tmp_path):
+    _img(str(tmp_path / "media" / "sub" / "x.png"))
+    seen = []
+    taglibrary.index_originals([str(tmp_path / "media")], exclude=[],
+                               progress=lambda n, where: seen.append(where))
+    assert any("sub" in w for w in seen)
+
+
+def test_relink_matches_an_original_in_a_different_directory(lib, tmp_path):
+    """The point of the recursive multi-root search: the copy and its original
+    need not share a folder, or even a tree."""
+    if not _can_link(tmp_path):
+        pytest.skip("filesystem has no hard links")
+    favorites.set_link_mode("auto")
+    original = _img(str(tmp_path / "archive" / "2019" / "trip" / "pic.png"))
+    dst = str(lib / "T - Face" / "pic.png")
+    shutil.copy(original, dst)
+    roots = taglibrary.mirror_roots(tag_names=["T - Face"])
+    index = taglibrary.index_originals([str(tmp_path / "archive")],
+                                       exclude=roots)
+    plan = taglibrary.plan_relink(roots, index)
+    relinked, _freed, errors = taglibrary.relink_copies(plan)
+    assert relinked == 1 and not errors
+    assert os.path.islink(dst) or os.stat(dst).st_nlink > 1
+
+
+# -- the dialog's source list ---------------------------------------------------
+
+def _dialog(qapp):
+    from gallery_py_qt.library_dialog import TagLibraryDialog
+    return TagLibraryDialog([], None)
+
+
+def test_dialog_accepts_several_source_folders(qapp, lib, tmp_path):
+    dlg = _dialog(qapp)
+    a, b = str(tmp_path / "a"), str(tmp_path / "b")
+    os.makedirs(a)
+    os.makedirs(b)
+    dlg._add_source_path(a)
+    dlg._add_source_path(b)
+    assert dlg.source_folders() == [a, b]
+    dlg.done(0)
+
+
+def test_dialog_ignores_a_duplicate_folder(qapp, lib, tmp_path):
+    dlg = _dialog(qapp)
+    a = str(tmp_path / "a")
+    os.makedirs(a)
+    dlg._add_source_path(a)
+    dlg._add_source_path(a)
+    assert dlg.source_folders() == [a]
+    dlg.done(0)
+
+
+def test_dialog_can_remove_a_source(qapp, lib, tmp_path):
+    dlg = _dialog(qapp)
+    a = str(tmp_path / "a")
+    os.makedirs(a)
+    dlg._add_source_path(a)
+    dlg._sources.setCurrentItem(dlg._sources.topLevelItem(0))
+    dlg._remove_source()
+    assert dlg.source_folders() == []
+    dlg.done(0)
+
+
+def test_dialog_searches_subfolders_by_default(qapp, lib):
+    dlg = _dialog(qapp)
+    assert dlg._recursive_cb.isChecked()
+    dlg.done(0)
+
+
+def test_source_list_greys_out_when_relinking_is_off(qapp, lib):
+    dlg = _dialog(qapp)
+    dlg._relink_cb.setChecked(False)
+    assert not dlg._sources.isEnabled()
+    dlg._relink_cb.setChecked(True)
+    assert dlg._sources.isEnabled()
+    dlg.done(0)
+
+
+def test_source_folders_are_remembered_between_runs(qapp, lib, tmp_path):
+    a = str(tmp_path / "a")
+    os.makedirs(a)
+    dlg = _dialog(qapp)
+    dlg._add_source_path(a)
+    dlg._remember_sources()
+    dlg.done(0)
+    again = _dialog(qapp)
+    assert a in again.source_folders()
+    again.done(0)
