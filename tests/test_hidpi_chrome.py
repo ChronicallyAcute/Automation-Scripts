@@ -50,7 +50,22 @@ def test_every_chip_stays_inside_a_narrow_tile(qapp, tmp_path):
     s.deleteLater()
 
 
-def test_chips_wrap_onto_several_rows_when_needed(qapp, tmp_path):
+def test_chips_wrap_onto_several_rows_when_asked(qapp, tmp_path):
+    _many_tags()
+    s = _Slot(0, Favorites())
+    s.show_item(0, _img(tmp_path / "tall.png", (900, 1600)))
+    s.set_tag_editing(True)
+    s.resize(426, 360)
+    s.set_tag_wrap(True)                 # opt in; one row is the default
+    qapp.processEvents()
+    rows = {b.y() for b in s._tag_btns.values() if not b.isHidden()}
+    assert len(rows) > 1, "wrap mode must use more than one row"
+    s.deleteLater()
+
+
+def test_the_row_is_a_single_line_by_default(qapp, tmp_path):
+    """The original look: one row, with the remainder in an overflow menu
+    rather than clipped off the edge."""
     _many_tags()
     s = _Slot(0, Favorites())
     s.show_item(0, _img(tmp_path / "tall.png", (900, 1600)))
@@ -58,8 +73,71 @@ def test_chips_wrap_onto_several_rows_when_needed(qapp, tmp_path):
     s.resize(426, 360)
     s._position_overlays()
     qapp.processEvents()
-    rows = {b.y() for b in s._tag_btns.values() if not b.isHidden()}
-    assert len(rows) > 1, "a narrow tile must wrap the chip row"
+    shown = [b for b in s._tag_btns.values() if not b.isHidden()]
+    assert len({b.y() for b in shown}) == 1, "must stay on one row"
+    assert not s._tag_more_btn.isHidden(), "overflow must be offered"
+    assert s._tag_more_menu.actions(), "the hidden chips must be reachable"
+    s.deleteLater()
+
+
+def test_every_tag_is_reachable_on_one_row(qapp, tmp_path):
+    _many_tags()
+    s = _Slot(0, Favorites())
+    s.show_item(0, _img(tmp_path / "tall.png", (900, 1600)))
+    s.set_tag_editing(True)
+    s.resize(426, 360)
+    s._position_overlays()
+    qapp.processEvents()
+    on_row = {b.text() for b in s._tag_btns.values() if not b.isHidden()}
+    in_menu = {a.text().strip().lstrip("\u2713").strip()
+               for a in s._tag_more_menu.actions()}
+    assert on_row | in_menu >= set(s._tag_btns), "a tag became unreachable"
+    s.deleteLater()
+
+
+def test_controls_keep_their_place_when_chips_overflow(qapp, tmp_path):
+    """Only tag chips are displaced — never the ditto / new-tag / zoom
+    controls, which sat at the ends of the row in the original layout."""
+    _many_tags()
+    s = _Slot(0, Favorites())
+    s.show_item(0, _img(tmp_path / "tall.png", (900, 1600)))
+    s.set_tag_editing(True)
+    s.resize(426, 360)
+    s._position_overlays()
+    qapp.processEvents()
+    for name in ("_repeat_btn", "_new_tag_btn",
+                 "_tile_zoom_out_btn", "_tile_zoom_in_btn"):
+        b = getattr(s, name)
+        assert not b.isHidden(), f"{name} was displaced"
+        assert b.x() + b.width() <= s._tagbar.width() + 1, f"{name} clipped"
+    s.deleteLater()
+
+
+def test_a_wide_tile_needs_no_overflow(qapp, tmp_path):
+    _many_tags()
+    s = _Slot(0, Favorites())
+    s.show_item(0, _img(tmp_path / "wide.png", (1600, 900)))
+    s.set_tag_editing(True)
+    s.resize(1400, 700)
+    s._position_overlays()
+    qapp.processEvents()
+    assert s._tag_more_btn.isHidden(), "nothing should overflow on a wide tile"
+    assert all(not b.isHidden() for b in s._tag_btns.values())
+    s.deleteLater()
+
+
+def test_switching_back_from_wrap_restores_one_row(qapp, tmp_path):
+    _many_tags()
+    s = _Slot(0, Favorites())
+    s.show_item(0, _img(tmp_path / "tall.png", (900, 1600)))
+    s.set_tag_editing(True)
+    s.resize(426, 360)
+    s.set_tag_wrap(True)
+    qapp.processEvents()
+    s.set_tag_wrap(False)
+    qapp.processEvents()
+    shown = [b for b in s._tag_btns.values() if not b.isHidden()]
+    assert len({b.y() for b in shown}) == 1
     s.deleteLater()
 
 
@@ -81,6 +159,7 @@ def test_tagbar_is_given_its_wrapped_height(qapp, tmp_path):
     s.show_item(0, _img(tmp_path / "tall.png", (900, 1600)))
     s.set_tag_editing(True)
     s.resize(426, 360)
+    s.set_tag_wrap(True)
     s._position_overlays()
     qapp.processEvents()
     need = s._taglay.heightForWidth(s._tagbar.width())
@@ -95,6 +174,7 @@ def test_tagbar_never_swallows_the_whole_tile(qapp, tmp_path):
     s.show_item(0, _img(tmp_path / "a.png"))
     s.set_tag_editing(True)
     s.resize(300, 300)
+    s.set_tag_wrap(True)
     s._position_overlays()
     qapp.processEvents()
     assert s._tagbar.height() <= s.height() * 0.6

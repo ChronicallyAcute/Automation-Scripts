@@ -7,7 +7,7 @@ from __future__ import annotations
 
 from PySide6.QtWidgets import (QDialog, QFormLayout, QComboBox, QSpinBox,
                                QDialogButtonBox, QLabel, QVBoxLayout,
-                               QPushButton)
+                               QPushButton, QLineEdit, QHBoxLayout, QWidget)
 
 from . import config
 
@@ -18,6 +18,8 @@ class SettingsDialog(QDialog):
         ("Copy files (uses full disk space)", "copy"),
         ("Hard-link only (same drive)", "hardlink"),
         ("Symlink only", "symlink")]
+    _TAGROW_LABELS = [("One row, extras in a ⋯ menu (default)", False),
+                      ("Wrap onto as many rows as needed", True)]
     _CHROME_LABELS = [
         ("Reflow tiles into the freed space (default)", False),
         ("Keep the tile layout stable (faster)", True)]
@@ -60,6 +62,33 @@ class SettingsDialog(QDialog):
             "the layout stable avoids it.")
         form.addRow("When bars auto-hide", self._chrome)
 
+        # Where the favourites / tag folders live.  Exposed because the
+        # default may be on a drive that cannot store links at all (exFAT), in
+        # which case moving it is the only way to stop duplicating the library.
+        fav_row = QWidget()
+        fav_lay = QHBoxLayout(fav_row)
+        fav_lay.setContentsMargins(0, 0, 0, 0)
+        self._fav_dir = QLineEdit(prefs.get("favorites_dir", "")
+                                  or config.FAVORITES_DIR)
+        self._fav_dir.setToolTip(
+            "Hard links cannot cross drives, and only NTFS/ReFS can store "
+            "links — putting this on the same NTFS drive as your media is "
+            "what makes linking possible instead of copying.")
+        fav_lay.addWidget(self._fav_dir, 1)
+        browse = QPushButton("Browse…")
+        browse.clicked.connect(self._pick_fav_dir)
+        fav_lay.addWidget(browse)
+        form.addRow("Favourites folder", fav_row)
+
+        self._tagrow = QComboBox()
+        for label, val in self._TAGROW_LABELS:
+            self._tagrow.addItem(label, val)
+        self._select(self._tagrow, bool(prefs.get("tag_row_wrap", False)))
+        self._tagrow.setToolTip(
+            "How the per-tile tag chips are laid out when there are more than "
+            "fit across the tile")
+        form.addRow("Tag chips", self._tagrow)
+
         self._io = QComboBox()
         for label, val in self._IO_LABELS:
             self._io.addItem(label, val)
@@ -92,6 +121,14 @@ class SettingsDialog(QDialog):
         bb.rejected.connect(self.reject)
         root.addWidget(bb)
 
+    def _pick_fav_dir(self) -> None:
+        from PySide6.QtWidgets import QFileDialog
+        start = self._fav_dir.text().strip() or config.FAVORITES_DIR
+        chosen = QFileDialog.getExistingDirectory(
+            self, "Where should favourites and tag folders live?", start)
+        if chosen:
+            self._fav_dir.setText(chosen)
+
     @staticmethod
     def _select(combo: QComboBox, value) -> None:
         i = combo.findData(value)
@@ -108,4 +145,8 @@ class SettingsDialog(QDialog):
                             else None)
         p["trash_purge_days"] = self._purge.value()
         p["stable_layout"] = bool(self._chrome.currentData())
+        p["tag_row_wrap"] = bool(self._tagrow.currentData())
+        chosen = self._fav_dir.text().strip()
+        p["favorites_dir"] = "" if chosen == config.DEFAULT_FAVORITES_DIR \
+            else chosen
         return p

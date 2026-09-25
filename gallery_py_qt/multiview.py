@@ -292,6 +292,10 @@ class _Slot(QWidget):
         # 1280x720 LOGICAL desktop, so every tile is narrow.
         self._taglay = FlowLayout(self._tagbar, margin=0, spacing=2)
         self._taglay.setContentsMargins(2, 1, 2, 1)
+        # Single row by default — the original look.  What does not fit goes
+        # into an overflow menu rather than off the edge, so the chips stay
+        # reachable on a narrow tile without the row growing taller.
+        self._tag_wrap = False
         self._tag_btns: dict[str, QToolButton] = {}
         # Resting state shows only the tags this file HAS — that is the part
         # worth reading while scanning a grid.  The full, editable chip row
@@ -727,15 +731,23 @@ class _Slot(QWidget):
         # Ask how tall the chips need to be AT THIS WIDTH: the row wraps, so
         # its height depends on how much room it was given.  sizeHint() would
         # report one row's worth and clip the rest.
-        bar_w = max(1, dw)
+        # The chips may span the TILE even when the media is letterboxed
+        # narrower: a single row needs the width, and the bar is a transparent
+        # overlay, so borrowing the black margin costs nothing visually.
+        bar_w = max(1, dw if self._tag_wrap else max(dw, sw - 4))
+        self._fit_tag_row(bar_w)
         th = max(1, self._taglay.heightForWidth(bar_w))
         # Never let the chips eat the whole tile: past a third of the media
         # height they stop being an overlay.  The rest stays reachable because
         # hovering expands the row over the media above it.
         th = min(th, max(1, int(dh * 0.5)))
-        self._tagbar.setGeometry(max(0, x),
+        bar_x = max(0, x) if self._tag_wrap else max(0, min(x, 2))
+        self._tagbar.setGeometry(bar_x,
                                  max(0, y + dh - th - seek_h),
                                  bar_w, th)
+        # Lay the chips out NOW: Qt defers activation, and the caller (and the
+        # tests) read positions immediately after this returns.
+        self._taglay.activate()
         self._tagbar.raise_()
         if self._is_video:
             self._position_seek()
@@ -970,6 +982,19 @@ class _Slot(QWidget):
             b.clicked.connect(lambda _=False, tg=t: self._toggle_tag(tg))
             self._taglay.addWidget(b)
             self._tag_btns[t] = b
+        # Overflow: holds whatever chips the row cannot fit.  Sits just before
+        # the zoom controls so those keep their far-right position.
+        self._tag_more_btn = QToolButton()
+        self._tag_more_btn.setText("⋯")
+        self._tag_more_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._tag_more_btn.setPopupMode(
+            QToolButton.ToolButtonPopupMode.InstantPopup)
+        self._tag_more_btn.setStyleSheet(
+            self._plated(self._TAG_CSS_OFF % config.OVERLAY_FG))
+        self._tag_more_menu = QMenu(self._tag_more_btn)
+        self._tag_more_btn.setMenu(self._tag_more_menu)
+        self._tag_more_btn.hide()
+        self._taglay.addWidget(self._tag_more_btn)
         # (No stretch item: a flow layout packs from the left and wraps, so a
         # spacer would consume a whole row.)
         # Per-tile resize (±10%), sized like the tag chips.
@@ -1058,6 +1083,78 @@ class _Slot(QWidget):
             # under the Gallery Favorites folder (removed when untagged).
             tags.sync_tag_folders(self._path, self._favs.is_fav(self._path))
             self._refresh_tag_styles()
+
+    def set_tag_wrap(self, on: bool) -> None:
+        """Wrap the chip row over several lines, or keep it to one (default)."""
+        self._tag_wrap = bool(on)
+        self._position_overlays()
+
+    def _fit_tag_row(self, width: int) -> None:
+        """Keep the chip row to a single line, as it has always looked.
+
+        The layout itself wraps freely; single-row is enforced here by hiding
+        the chips that do not fit and offering them from an overflow menu — so
+        they stay reachable, which is the whole point.  Doing it here (rather
+        than letting the layout drop items) keeps the ditto / new-tag / zoom
+        controls in place: only tag chips are ever displaced.
+        """
+        want = [t for t in self._tag_btns if self._tag_should_show(t)]
+        if self._tag_wrap:
+            for t in self._tag_btns:
+                self._tag_btns[t].setVisible(t in want)
+            self._tag_more_btn.hide()
+            self._taglay.invalidate()
+            return
+
+        space = max(0, self._taglay.spacing())
+        m = self._taglay.contentsMargins()
+        avail = width - m.left() - m.right()
+        for b in (getattr(self, "_repeat_btn", None),
+                  getattr(self, "_new_tag_btn", None),
+                  getattr(self, "_tile_zoom_out_btn", None),
+                  getattr(self, "_tile_zoom_in_btn", None)):
+            if b is not None and not b.isHidden():
+                avail -= b.sizeHint().width() + space
+
+        cost = {t: self._tag_btns[t].sizeHint().width() + space for t in want}
+        if sum(cost.values()) > avail:
+            # Room has to be kept for the "⋯" button itself, or it would push
+            # out the very chip it was added to make room for.
+            avail -= self._tag_more_btn.sizeHint().width() + space
+        used = 0
+        hidden: "list[str]" = []
+        for t in self._tag_btns:
+            b = self._tag_btns[t]
+            if t not in want:
+                b.hide()
+                continue
+            if used + cost[t] <= avail:
+                used += cost[t]
+                b.show()
+            else:
+                b.hide()
+                hidden.append(t)
+
+        self._tag_more_menu.clear()
+        if hidden:
+            cur = set(tags.tags_for(self._path)) if self._path else set()
+            for t in hidden:
+                act = self._tag_more_menu.addAction(
+                    ("\u2713  " if t in cur else "       ") + t)
+                act.triggered.connect(
+                    lambda _=False, tg=t: self._toggle_tag(tg))
+            self._tag_more_btn.setToolTip(
+                f"{len(hidden)} more tag(s): " + ", ".join(hidden))
+            self._tag_more_btn.show()
+        else:
+            self._tag_more_btn.hide()
+        # Visibility changed, so the layout's cached hints are stale.
+        self._taglay.invalidate()
+
+    def _tag_should_show(self, tag: str) -> bool:
+        if self._tag_editing:
+            return True
+        return bool(self._path) and tag in set(tags.tags_for(self._path))
 
     def set_tag_editing(self, on: bool) -> None:
         """Expand the tag row to the full editable set (hover), or collapse it."""
@@ -1750,6 +1847,7 @@ class MultiView(QWidget):
         self._relayout_timer.setInterval(16)
         self._relayout_timer.timeout.connect(self._do_relayout)
         self._stable_layout = False
+        self._tag_wrap = False
 
         # Keyboard/mouse help (?/F1 dispatched here by MainWindow — binding
         # them locally too would make the shortcuts ambiguous, like H was).
@@ -2548,7 +2646,17 @@ class MultiView(QWidget):
         """Rebuild every tile's tag buttons after the tag set changed."""
         for slot in self._all_slots():
             slot.rebuild_tag_buttons()
+            slot.set_tag_wrap(self._tag_wrap)
             slot._position_overlays()
+
+    def set_tag_wrap(self, on: bool) -> None:
+        """One row of chips (default) or wrap them over several lines."""
+        self._tag_wrap = bool(on)
+        for slot in self._all_slots():
+            slot.set_tag_wrap(self._tag_wrap)
+
+    def tag_wrap(self) -> bool:
+        return getattr(self, "_tag_wrap", False)
 
     # -- tag the whole page ----------------------------------------------------
     def page_paths(self) -> "list[str]":

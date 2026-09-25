@@ -567,6 +567,7 @@ class MainWindow(QMainWindow):
         config.apply_theme(self._prefs.get("theme", "dark"))
         # How favourites / tag folders place files: copy (default) or
         # hardlink / symlink to save disk space. Set via the Settings dialog.
+        config.set_favorites_dir(self._prefs.get("favorites_dir", ""))
         favorites.set_link_mode(self._prefs.get("link_mode", "auto"))
         self.setStyleSheet(theme.stylesheet())
         self._recents = prefs.load_recent()
@@ -1299,9 +1300,11 @@ class MainWindow(QMainWindow):
         new = dlg.result_prefs()
         if new.get("theme") != self._prefs.get("theme"):
             self._set_theme(new["theme"])
+        config.set_favorites_dir(new.get("favorites_dir", ""))
         favorites.set_link_mode(new.get("link_mode", "auto"))
         if self._mv is not None:
             self._mv.set_stable_layout(bool(new.get("stable_layout", False)))
+            self._mv.set_tag_wrap(bool(new.get("tag_row_wrap", False)))
         li = new.get("low_io_mode")
         self._low_io_forced = isinstance(li, bool)
         if self._low_io_forced:
@@ -2264,6 +2267,7 @@ class MainWindow(QMainWindow):
                 f"Favourites mirrors ({rep['mirror_dirs']} folder(s) beside "
                 "your media)")
 
+        vol = _favs.volume_info(config.FAVORITES_DIR)
         mode = _favs.LINK_MODE
         eff_media, why_media = "copy", "No folder is open."
         if self._current_folder:
@@ -2271,12 +2275,18 @@ class MainWindow(QMainWindow):
         eff_tags, why_tags = _favs.probe_link_mode(config.FAVORITES_DIR)
         fallbacks, reason = _favs.link_fallbacks()
 
+        fsline = ""
+        if vol["filesystem"]:
+            can = ("can hold links" if vol["symlinks"] or vol["hardlinks"]
+                   else "CANNOT hold links of any kind")
+            fsline = (f"Favourites drive {vol['root']} is {vol['filesystem']} "
+                      f"— {can}.\n\n")
         detail = (
-            f"Setting: {mode}\n\n"
-            f"  Favourites mirror (beside your media):  {eff_media}\n"
-            f"      {why_media}\n\n"
-            f"  Tag folders ({config.FAVORITES_DIR}):  {eff_tags}\n"
-            f"      {why_tags}")
+            f"Setting: {mode}\n\n" + fsline
+            + f"  Favourites mirror (beside your media):  {eff_media}\n"
+            + f"      {why_media}\n\n"
+            + f"  Tag folders ({config.FAVORITES_DIR}):  {eff_tags}\n"
+            + f"      {why_tags}")
         if fallbacks:
             detail += (f"\n\n{fallbacks} placement(s) this session silently "
                        f"became full copies.\nLast reason: {reason}")
@@ -2404,6 +2414,7 @@ class MainWindow(QMainWindow):
             self._mv = MultiView(self._model, self._favs, self)
             self._mv.set_stable_layout(
                 bool(self._prefs.get("stable_layout", False)))
+            self._mv.set_tag_wrap(bool(self._prefs.get("tag_row_wrap", False)))
             self._mv.favToggled.connect(self._toggle_fav_path)
             self._mv.trashed.connect(self._trash_path)
             self._mv.rotated.connect(self._rotate_from_multiview)

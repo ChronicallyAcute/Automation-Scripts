@@ -137,6 +137,92 @@ def place_file(src: str, dst: str) -> str:
     return "copy"
 
 
+# -- What the volume itself can do ---------------------------------------------
+# Developer Mode grants the PRIVILEGE to create a symlink; it cannot grant the
+# ability to store one.  That is a property of the filesystem, and the drives
+# people keep media on are very often exFAT or FAT32 — neither of which can
+# hold a hard link OR a reparse point, so every placement there degrades to a
+# full copy no matter how the app is configured.  Reporting the filesystem
+# turns "links are not possible" from a dead end into something actionable.
+
+# GetVolumeInformationW capability flags.
+_FILE_SUPPORTS_REPARSE_POINTS = 0x00000080
+_FILE_SUPPORTS_HARD_LINKS     = 0x00400000
+
+
+def volume_info(path: str) -> dict:
+    """{"filesystem", "hardlinks", "symlinks", "root"} for `path`'s volume.
+
+    `hardlinks`/`symlinks` are None when the platform cannot be asked (any
+    non-Windows OS, where the probe is the only authority).
+    """
+    root = os.path.splitdrive(os.path.abspath(path))[0]
+    out = {"filesystem": "", "hardlinks": None, "symlinks": None,
+           "root": root + os.sep if root else ""}
+    if not sys.platform.startswith("win") or not root:
+        return out
+    try:
+        import ctypes
+        from ctypes import wintypes
+        name_buf = ctypes.create_unicode_buffer(261)
+        fs_buf = ctypes.create_unicode_buffer(261)
+        serial = wintypes.DWORD()
+        max_comp = wintypes.DWORD()
+        flags = wintypes.DWORD()
+        ok = ctypes.windll.kernel32.GetVolumeInformationW(
+            ctypes.c_wchar_p(out["root"]), name_buf, ctypes.sizeof(name_buf),
+            ctypes.byref(serial), ctypes.byref(max_comp), ctypes.byref(flags),
+            fs_buf, ctypes.sizeof(fs_buf))
+        if not ok:
+            return out
+        out["filesystem"] = fs_buf.value
+        out["hardlinks"] = bool(flags.value & _FILE_SUPPORTS_HARD_LINKS)
+        out["symlinks"] = bool(flags.value & _FILE_SUPPORTS_REPARSE_POINTS)
+    except Exception:
+        pass
+    return out
+
+
+def explain_link_failure(folder: str, source: "str | None" = None) -> str:
+    """Why linking into `folder` is impossible, in terms the user can act on."""
+    tgt = volume_info(folder)
+    bits = []
+    if tgt["filesystem"]:
+        bits.append(f"{tgt['root']} is formatted {tgt['filesystem']}.")
+    if tgt["symlinks"] is False and tgt["hardlinks"] is False:
+        bits.append(
+            f"{tgt['filesystem'] or 'That filesystem'} cannot store hard links "
+            "or symlinks at all — this is a property of the DRIVE, not of "
+            "Windows, so Developer Mode makes no difference to it. Only NTFS "
+            "(and ReFS) can hold links.")
+        bits.append("Options: reformat that drive as NTFS (it erases the "
+                    "drive), or keep the tag folders on an NTFS drive by "
+                    "pointing the favourites location there.")
+        return " ".join(bits)
+    if source is not None:
+        src = volume_info(source)
+        if (src["root"] and tgt["root"]
+                and src["root"].lower() != tgt["root"].lower()):
+            bits.append(
+                f"The media is on {src['root']} and the tag folders are on "
+                f"{tgt['root']}. A hard link cannot cross drives, so only a "
+                "symlink can work here.")
+    if tgt["symlinks"] is False:
+        bits.append(f"{tgt['root']} cannot store symlinks (no reparse-point "
+                    "support).")
+    elif tgt["symlinks"] is True:
+        bits.append(
+            f"{tgt['root']} does support symlinks, so the refusal is a "
+            "permission or path problem rather than the filesystem. Check "
+            "that the folder is writable and not inside a OneDrive or "
+            "network location.")
+    if bits:
+        return " ".join(bits)
+    return ("The volume could not be queried, so the cause is unknown — the "
+            "link call simply failed. Check that the folder is writable and "
+            "is not a network or cloud-synced location.")
+
+
 def _probe_one(how: str, folder: str, source: "str | None" = None
                ) -> "tuple[bool, str]":
     """Try one placement strategy for real; clean up after itself.
@@ -192,7 +278,8 @@ def probe_link_mode(folder: str, source: "str | None" = None
     tried = " or ".join(_ladder()) or "linking"
     return "copy", (f"{tried} is NOT possible for {os.path.abspath(folder)}"
                     + (f" from {os.path.abspath(source)}" if source else "")
-                    + " — full copies are being made instead.")
+                    + " — full copies are being made instead.\n\n"
+                    + explain_link_failure(folder, source))
 
 
 class Favorites:

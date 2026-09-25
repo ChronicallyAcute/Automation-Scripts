@@ -375,3 +375,69 @@ def test_album_mirror_copy_mode_still_copies(tmp_path):
     dst = str(tmp_path / "mirror")
     assert foldertags.place_folder(str(album), dst) == "copy"
     assert os.path.isfile(os.path.join(dst, "a.png"))
+
+
+# -- why a drive refuses to hold links -----------------------------------------
+
+def test_volume_info_is_honest_off_windows(tmp_path):
+    info = favorites.volume_info(str(tmp_path))
+    assert set(info) == {"filesystem", "hardlinks", "symlinks", "root"}
+    if not os.sys.platform.startswith("win"):
+        assert info["hardlinks"] is None, "must not claim to know"
+
+
+def test_exfat_is_explained_as_a_drive_limit(monkeypatch):
+    monkeypatch.setattr(favorites, "volume_info", lambda p: {
+        "filesystem": "exFAT", "hardlinks": False, "symlinks": False,
+        "root": "G:\\"})
+    why = favorites.explain_link_failure("G:\\X")
+    assert "exFAT" in why and "NTFS" in why
+    assert "Developer Mode" in why, "must correct the likely wrong assumption"
+
+
+def test_cross_drive_is_explained_when_the_volume_is_capable(monkeypatch):
+    monkeypatch.setattr(favorites, "volume_info", lambda p: {
+        "filesystem": "NTFS", "hardlinks": True, "symlinks": True,
+        "root": ("G:\\" if str(p).upper().startswith("G") else "C:\\")})
+    why = favorites.explain_link_failure("G:\\X", "C:\\media")
+    assert "cannot cross drives" in why
+
+
+def test_unknown_volume_does_not_blame_the_drive(monkeypatch):
+    monkeypatch.setattr(favorites, "volume_info", lambda p: {
+        "filesystem": "", "hardlinks": None, "symlinks": None, "root": ""})
+    why = favorites.explain_link_failure("/somewhere")
+    assert "unknown" in why.lower()
+
+
+# -- the favourites location is finally movable --------------------------------
+
+def test_favorites_dir_can_be_moved(tmp_path, monkeypatch):
+    from gallery_py_qt import config as _config
+    target = str(tmp_path / "elsewhere")
+    assert _config.set_favorites_dir(target) == os.path.abspath(target)
+    assert _config.FAVORITES_DIR == os.path.abspath(target)
+
+
+def test_blank_restores_the_default(monkeypatch):
+    from gallery_py_qt import config as _config
+    _config.set_favorites_dir("/tmp/whatever")
+    assert _config.set_favorites_dir("") == _config.DEFAULT_FAVORITES_DIR
+
+
+def test_settings_round_trips_the_favourites_folder(qapp, tmp_path):
+    from gallery_py_qt.settings_dialog import SettingsDialog
+    target = str(tmp_path / "libs")
+    dlg = SettingsDialog({"favorites_dir": target})
+    assert dlg._fav_dir.text() == target
+    assert dlg.result_prefs()["favorites_dir"] == target
+    dlg.done(0)
+
+
+def test_settings_round_trips_the_tag_row_choice(qapp):
+    from gallery_py_qt.settings_dialog import SettingsDialog
+    dlg = SettingsDialog({})
+    assert dlg.result_prefs()["tag_row_wrap"] is False    # one row by default
+    dlg._select(dlg._tagrow, True)
+    assert dlg.result_prefs()["tag_row_wrap"] is True
+    dlg.done(0)

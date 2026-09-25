@@ -14,12 +14,29 @@ os.environ.setdefault("QT_FFMPEG_DEBUG", "0")
 HOME          = os.path.expanduser("~")
 FAVS_FILE     = os.path.join(HOME, ".gallery_favorites.json")       # shared
 TRASH_DIR     = os.path.join(HOME, ".gallery_trash")                # shared
-# Favourited files are mirrored (copied) here.  Overridable at runtime via the
-# "favorites_dir" key in the prefs file.
+# Favourited / tagged files are mirrored here.  Overridable via the
+# "favorites_dir" pref — which MainWindow applies at startup with
+# set_favorites_dir().  The override matters more than it looks: hard links
+# cannot cross volumes and only NTFS/ReFS can store links at all, so being able
+# to move this onto the same (NTFS) drive as the media is the difference
+# between linking and duplicating the whole library.
 if sys.platform.startswith("win"):
-    FAVORITES_DIR = "G:\\X"
+    DEFAULT_FAVORITES_DIR = "G:\\X"
 else:
-    FAVORITES_DIR = os.path.join(HOME, "Downloads", "Gallery Favorites")
+    DEFAULT_FAVORITES_DIR = os.path.join(HOME, "Downloads", "Gallery Favorites")
+FAVORITES_DIR = DEFAULT_FAVORITES_DIR
+
+
+def set_favorites_dir(path: str) -> str:
+    """Point the favourites / tag folders at `path` (blank restores default).
+
+    Modules read config.FAVORITES_DIR at call time rather than caching it, so
+    rebinding it here is enough and takes effect immediately.
+    """
+    global FAVORITES_DIR
+    FAVORITES_DIR = os.path.abspath(os.path.expanduser(path.strip())) \
+        if path and path.strip() else DEFAULT_FAVORITES_DIR
+    return FAVORITES_DIR
 CACHE_DIR     = os.path.join(HOME, ".gallery_py_qt_cache")          # own
 PREFS_FILE    = os.path.join(HOME, ".gallery_py_qt_prefs.json")     # own
 RECENT_FILE   = os.path.join(HOME, ".gallery_py_qt_recent.json")    # own
