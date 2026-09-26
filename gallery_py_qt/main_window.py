@@ -936,6 +936,7 @@ class MainWindow(QMainWindow):
         self._more_menu.addAction("⛃  Tidy tag library…", self._tidy_tag_library)
         self._more_menu.addAction("⇶  Rebuild tag && favourite links…",
                                   self._rebuild_links)
+        self._more_menu.addAction("⌦  Remove tags…", self._remove_tags)
         self._more_menu.addSeparator()
         self._collapse_act = self._more_menu.addAction("Hide duplicate copies")
         self._collapse_act.setCheckable(True)
@@ -2255,6 +2256,112 @@ class MainWindow(QMainWindow):
             self._report_collapsed()
         else:
             self._status.setText("Showing every copy")
+
+    # -- remove tags that were never tags --------------------------------------
+    def _remove_tags(self) -> None:
+        """Erase chosen tag names from the set and from every file.
+
+        A recovery pass used to read EVERY folder in the favourites directory
+        as a tag name and stamp it onto files by filename, so media folder
+        names became tags — and because the tag set heals itself from the
+        store on each launch, they came back every time. Nothing on disk is
+        deleted here; only the records.
+        """
+        from PySide6.QtWidgets import (QDialog, QVBoxLayout, QHBoxLayout,
+                                       QListWidget, QListWidgetItem, QLabel,
+                                       QPushButton, QCheckBox, QMessageBox)
+        from .engine import tags as _tags, taglibrary
+        names = list(_tags.get_tags())
+        if not names:
+            QMessageBox.information(self, "Remove tags", "There are no tags.")
+            return
+        suspect = set(_tags.tags_without_folders())
+
+        dlg = QDialog(self)
+        dlg.setWindowTitle("Remove tags")
+        dlg.setStyleSheet(self.styleSheet())
+        lay = QVBoxLayout(dlg)
+        hint = QLabel(
+            "Ticked tags are erased from the tag list and from every file "
+            "that carries them.<br><b>No folder or file is deleted.</b><br><br>"
+            "Pre-ticked are the names with no folder under "
+            f"<b>{taglibrary.TAG_FOLDERS_DIRNAME}</b> — the shape of a folder "
+            "name mistaken for a tag.")
+        hint.setWordWrap(True)
+        hint.setStyleSheet(f"color: {config.FG_MID};")
+        lay.addWidget(hint)
+
+        lst = QListWidget()
+        for name in names:
+            item = QListWidgetItem(
+                name + ("" if name in suspect else "     (has a tag folder)"))
+            item.setData(Qt.ItemDataRole.UserRole, name)
+            item.setFlags(item.flags() | Qt.ItemFlag.ItemIsUserCheckable)
+            item.setCheckState(Qt.CheckState.Checked if name in suspect
+                               else Qt.CheckState.Unchecked)
+            lst.addItem(item)
+        lay.addWidget(lst, 1)
+
+        row = QHBoxLayout()
+        for label, st in (("All", Qt.CheckState.Checked),
+                          ("None", Qt.CheckState.Unchecked)):
+            b = QPushButton(label)
+            b.clicked.connect(lambda _=False, k=st: [lst.item(i).setCheckState(k)
+                                                     for i in range(lst.count())])
+            row.addWidget(b)
+        row.addStretch(1)
+        lay.addLayout(row)
+
+        embed_cb = QCheckBox("Also rewrite the tags embedded in the files")
+        embed_cb.setToolTip(
+            "A recovery pass reads embedded keywords back, so a name left in "
+            "the file itself returns next time one runs. This rewrites every "
+            "affected file.")
+        lay.addWidget(embed_cb)
+
+        buttons = QHBoxLayout()
+        buttons.addStretch(1)
+        cancel = QPushButton("Cancel")
+        cancel.clicked.connect(dlg.reject)
+        buttons.addWidget(cancel)
+        ok = QPushButton("Remove")
+        ok.setDefault(True)
+        ok.clicked.connect(dlg.accept)
+        buttons.addWidget(ok)
+        lay.addLayout(buttons)
+
+        if dlg.exec() != QDialog.DialogCode.Accepted:
+            return
+        doomed = [lst.item(i).data(Qt.ItemDataRole.UserRole)
+                  for i in range(lst.count())
+                  if lst.item(i).checkState() == Qt.CheckState.Checked]
+        if not doomed:
+            return
+        sample = "\n".join(f"  • {n}" for n in doomed[:15])
+        more = f"\n  … and {len(doomed) - 15} more" if len(doomed) > 15 else ""
+        if QMessageBox.question(
+                self, "Remove these tags?",
+                f"Erase {len(doomed)} tag(s) from the tag list and from every "
+                f"file carrying them?\n\n{sample}{more}\n\n"
+                "No folder or file is deleted. This cannot be undone."
+                ) != QMessageBox.StandardButton.Yes:
+            return
+        rep = _tags.purge_tags(doomed, embed_cb.isChecked())
+        self._rebuild_tag_filter_menu()
+        if self._mv is not None:
+            self._mv.rebuild_tag_buttons()
+        self._apply_filter()
+        msg = (f"Removed {rep['tags']} tag(s); cleared them from "
+               f"{rep['files']} file(s).")
+        if rep["colors"]:
+            msg += f"\nDropped {rep['colors']} tag colour(s)."
+        if rep["mirrors"]:
+            msg += f"\nCleaned {rep['mirrors']} mirror record(s)."
+        if rep["embedded"]:
+            msg += (f"\nRewriting embedded tags on {rep['embedded']} file(s) "
+                    "in the background.")
+        self._status.setText(msg.splitlines()[0])
+        QMessageBox.information(self, "Tags removed", msg)
 
     # -- rebuild the mirror library --------------------------------------------
     def _rebuild_links(self) -> None:

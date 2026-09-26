@@ -94,15 +94,39 @@ def read_tag_folders() -> "dict[str, list[str]]":
     by_base: "dict[str, list[str]]" = {}
     for orig in list(db) + list(_tags._load()):
         by_base.setdefault(os.path.basename(orig), []).append(orig)
-    root = config.FAVORITES_DIR
+    # Which directories count as tag folders.  Listing EVERY directory in
+    # FAVORITES_DIR treated the user's own media folders as tag names and
+    # stamped them onto files by filename — that is how names like "Gallery
+    # Favorites", "Generative" and "Newdl" got into the tag set, and why
+    # adopt_tags_in_use resurrected them from the store on every launch.
+    #
+    # Two sources now, both requiring evidence:
+    #   * anything under "Tag Folders" — being there IS the evidence;
+    #   * a folder in the old layout beside it, but only when the tag set
+    #     already knows that name, so an un-tidied library still recovers
+    #     without arbitrary folder names being adopted.
+    from . import taglibrary
+    tag_dirs: "list[tuple[str, str]]" = []          # (tag, directory)
+    new_root = taglibrary.tag_folders_root()
     try:
-        tag_dirs = [d for d in os.listdir(root)
-                    if os.path.isdir(os.path.join(root, d))]
+        tag_dirs += [(d, os.path.join(new_root, d))
+                     for d in os.listdir(new_root)
+                     if os.path.isdir(os.path.join(new_root, d))
+                     and d.lower() not in taglibrary._RESERVED]
     except OSError:
-        tag_dirs = []
-    for tag in tag_dirs:
+        pass
+    known = {t.lower() for t in _tags.get_tags()}
+    try:
+        tag_dirs += [(d, os.path.join(config.FAVORITES_DIR, d))
+                     for d in os.listdir(config.FAVORITES_DIR)
+                     if d.lower() in known
+                     and d.lower() not in taglibrary._RESERVED
+                     and os.path.isdir(os.path.join(config.FAVORITES_DIR, d))]
+    except OSError:
+        pass
+    for tag, folder in tag_dirs:
         try:
-            names = os.listdir(os.path.join(root, tag))
+            names = os.listdir(folder)
         except OSError:
             continue
         for name in names:

@@ -138,6 +138,94 @@ def remove_tag(name: str) -> None:
     foldertags.remove_folder_tag(name)
 
 
+def purge_tags(names: "list[str] | set[str]",
+               rewrite_embedded: bool = False) -> dict:
+    """Erase `names` from the tag set AND from every file's tag list.
+
+    Unlike remove_tag(), this deletes NOTHING on disk: these names got into
+    the store by mistake (a recovery pass that read every folder in the
+    favourites directory as a tag), and the folders they were named after are
+    the user's own media. Only the records go.
+
+    Removing them from the STORE is the part that matters: adopt_tags_in_use()
+    heals the tag set from the data on every launch, so a name left on a
+    single file comes straight back.
+
+    `rewrite_embedded` also rewrites the copy the FILES carry (JPEG
+    XPKeywords, GIF XMP, the Windows property store for video). Worth doing:
+    a recovery pass reads those back, so a name left embedded returns the next
+    time one runs. It touches every affected file, so it is opt-in.
+
+    Returns {"tags", "files", "colors", "mirrors", "embedded"}.
+    """
+    doomed = {str(n) for n in names if str(n).strip()}
+    report = {"tags": 0, "files": 0, "colors": 0, "mirrors": 0, "embedded": 0}
+    if not doomed or _load_failed:
+        return report
+
+    kept = [t for t in TAGS if t not in doomed]
+    report["tags"] = len(TAGS) - len(kept)
+    set_tags(kept)
+
+    store = _load()
+    for path, lst in list(store.items()):
+        remaining = [t for t in lst if t not in doomed]
+        if len(remaining) == len(lst):
+            continue
+        report["files"] += 1
+        if remaining:
+            store[path] = remaining
+        else:
+            store.pop(path, None)
+            _index_drop(path)
+        if rewrite_embedded and os.path.exists(path):
+            _MIRROR_POOL.submit(_embed_tags, path, list(remaining))
+            report["embedded"] += 1
+    _save()
+
+    colors = _load_colors()
+    for name in doomed:
+        if colors.pop(name, None) is not None:
+            report["colors"] += 1
+    if report["colors"]:
+        _save_colors()
+
+    # The tag-folder manifest records a mirrored copy per (file, tag); leaving
+    # entries for a tag that no longer exists would have the mirror worker
+    # chasing files it can never reconcile.
+    db = _load_tagdb()
+    changed = False
+    for orig, entry in list(db.items()):
+        if not isinstance(entry, dict):
+            continue
+        for tag in list(entry):
+            if tag in doomed:
+                entry.pop(tag, None)
+                report["mirrors"] += 1
+                changed = True
+        if not entry:
+            db.pop(orig, None)
+    if changed:
+        _save_tagdb(db)
+    return report
+
+
+def tags_without_folders() -> "list[str]":
+    """Tag names with no folder under Tag Folders backing them.
+
+    Tag Folders is the authority for what a tag is, so anything in the set
+    without one is a name that arrived some other way — which is exactly the
+    shape of the folder names a recovery pass mistook for tags.
+    """
+    from . import taglibrary
+    try:
+        have = {d.lower() for d in os.listdir(taglibrary.tag_folders_root())
+                if os.path.isdir(os.path.join(taglibrary.tag_folders_root(), d))}
+    except OSError:
+        have = set()
+    return [t for t in get_tags() if t.lower() not in have]
+
+
 # -- Tag colours ---------------------------------------------------------------
 # A colour per tag makes a dense chip row scannable at a glance.  Stored beside
 # the tag set as {tag: "#rrggbb"}; tags without an entry fall back to the
