@@ -31,7 +31,7 @@ def isolated(tmp_path, monkeypatch):
     from gallery_py_qt import config
     from gallery_py_qt.engine import (favorites, tags, ratings, foldertags,
                                       media, smartsets, dimcache, health,
-                                      foldersize)
+                                      foldersize, notdupes)
 
     monkeypatch.setattr(config, "FAVORITES_DIR", str(tmp_path / "GalleryFavorites"))
     monkeypatch.setattr(config, "FAVS_FILE", str(tmp_path / "favs.json"))
@@ -68,6 +68,10 @@ def isolated(tmp_path, monkeypatch):
     monkeypatch.setattr(health, "_store", None)
     monkeypatch.setattr(health, "_dirty", False)
     monkeypatch.setattr(health, "_load_failed", False)
+    monkeypatch.setattr(notdupes, "_FILE", str(tmp_path / "notdupes.json"))
+    monkeypatch.setattr(notdupes, "_store", None)
+    monkeypatch.setattr(notdupes, "_dirty", False)
+    monkeypatch.setattr(notdupes, "_load_failed", False)
     favorites.set_link_mode("copy")        # link mode is module-global state
     favorites.set_favorites_layout(True)   # ditto the mirror layout
     monkeypatch.setattr(config, "DEFAULT_FAVORITES_DIR",

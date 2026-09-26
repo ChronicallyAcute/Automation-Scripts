@@ -26,7 +26,7 @@ from PySide6.QtWidgets import (QDialog, QVBoxLayout, QHBoxLayout, QLabel,
                                QRadioButton, QButtonGroup, QFileDialog)
 
 from . import config
-from .engine import cache, dupes, tags, scan, shell
+from .engine import cache, dupes, notdupes, tags, scan, shell
 
 _THUMB_PX = 72
 
@@ -45,11 +45,13 @@ class _ScanJob(QRunnable):
     GUI thread, so neither the directory walk nor the hashing blocks the UI."""
 
     def __init__(self, paths: "list[str]", signals: _ScanSignals,
-                 roots: "list[str] | None" = None, recursive: bool = True):
+                 roots: "list[str] | None" = None, recursive: bool = True,
+                 near: bool = True):
         super().__init__()
         self._paths = list(paths)
         self._roots = list(roots or [])
         self._recursive = recursive
+        self._near = near
         self._sig = signals
         self._cancelled = False
 
@@ -70,10 +72,18 @@ class _ScanJob(QRunnable):
             except Exception as exc:
                 print(f"[dupes-scan] {root}: {exc}")
         self._sig.counted.emit(len(paths))
-        groups = dupes.find_duplicates(
-            paths,
-            progress=lambda d, t: self._sig.progress.emit(d, t),
-            cancelled=lambda: self._cancelled)
+        if self._near:
+            groups = dupes.find_near_duplicates(
+                paths,
+                progress=lambda d, t: self._sig.progress.emit(d, t),
+                cancelled=lambda: self._cancelled)
+        else:
+            groups = [{"paths": g, "reason": "identical bytes",
+                       "signals": ["identical bytes"], "held_back": []}
+                      for g in dupes.find_duplicates(
+                          paths,
+                          progress=lambda d, t: self._sig.progress.emit(d, t),
+                          cancelled=lambda: self._cancelled)]
         self._sig.done.emit(groups)
 
 
@@ -101,6 +111,7 @@ class DuplicatesDialog(QDialog):
         self._loaded = list(paths or [])
         self._roots: "list[str]" = list(roots or [])
         self._groups: "list[list[str]]" = []
+        self._group_info: "list[dict]" = []
         self._keep_groups = []
 
         root = QVBoxLayout(self)
@@ -195,6 +206,12 @@ class DuplicatesDialog(QDialog):
         self._rescan_btn = QPushButton("Rescan")
         self._rescan_btn.clicked.connect(self._rescan)
         top.addWidget(self._rescan_btn)
+
+        self._forget_btn = QPushButton("Forget dismissed")
+        self._forget_btn.setToolTip(
+            "Let pairs you marked as 'not duplicates' be flagged again")
+        self._forget_btn.clicked.connect(self._forget_not_duplicates)
+        top.addWidget(self._forget_btn)
         lay.addLayout(top)
 
         opts = QHBoxLayout()
@@ -203,6 +220,15 @@ class DuplicatesDialog(QDialog):
         self._recursive_cb.setToolTip("Walk every folder nested inside the "
                                       "added folders")
         opts.addWidget(self._recursive_cb)
+
+        self._near_cb = QCheckBox("Also find near-duplicates")
+        self._near_cb.setChecked(True)
+        self._near_cb.setToolTip(
+            "Beyond byte-identical copies: near-identical names "
+            '("clip (1)", "clip_1", "clip - Copy"), and files sharing a size '
+            "with the same duration (video) or dimensions (image)")
+        self._near_cb.toggled.connect(lambda _=False: self._rescan())
+        opts.addWidget(self._near_cb)
 
         self._use_loaded_cb = QCheckBox("Also include media open in the gallery")
         self._use_loaded_cb.setChecked(bool(self._loaded))
@@ -254,17 +280,18 @@ class DuplicatesDialog(QDialog):
         self._progress.show()
         self._header.setText("Scanning for duplicates…")
         self._start_scan(loaded, self._roots,
-                         self._recursive_cb.isChecked())
+                         self._recursive_cb.isChecked(),
+                         self._near_cb.isChecked())
 
     # -- scan lifecycle --------------------------------------------------------
     def _start_scan(self, paths: "list[str]", roots: "list[str] | None" = None,
-                    recursive: bool = True) -> None:
+                    recursive: bool = True, near: bool = True) -> None:
         self._sig = _ScanSignals(self)
         self._sig.progress.connect(self._on_progress)
         self._sig.counted.connect(self._on_counted)
         self._sig.done.connect(self._on_done)
         self._progress.setRange(0, 0)               # indeterminate until stage 3
-        self._job = _ScanJob(paths, self._sig, roots, recursive)
+        self._job = _ScanJob(paths, self._sig, roots, recursive, near)
         self._pool.start(self._job)
 
     def _on_counted(self, n: int) -> None:
@@ -286,7 +313,8 @@ class DuplicatesDialog(QDialog):
         super().reject()
 
     # -- results UI ------------------------------------------------------------
-    def _populate(self, groups: "list[list[str]]") -> None:
+    def _populate(self, groups) -> None:
+        """`groups` are dicts from find_near_duplicates, or bare path lists."""
         self._checks.clear()
         self._keep_groups = []
         # Clear any prior body content (populate may run again after trashing).
@@ -296,6 +324,12 @@ class DuplicatesDialog(QDialog):
             if w is not None:
                 w.deleteLater()
 
+        info = [g if isinstance(g, dict)
+                else {"paths": list(g), "reason": "identical bytes",
+                      "signals": ["identical bytes"], "held_back": []}
+                for g in groups]
+        self._group_info = info
+        groups = [g["paths"] for g in info]
         self._groups = groups
         n_dupes = sum(len(g) - 1 for g in groups)
         # Count only bytes that deleting would ACTUALLY free: hard links are
@@ -324,6 +358,7 @@ class DuplicatesDialog(QDialog):
             "QFrame#DupGroup { border: 1px solid %s; border-radius: 6px; "
             "margin: 2px; }" % config.FG_DIM)
         lay = QVBoxLayout(box)
+        meta = self._group_info[gi] if gi < len(self._group_info) else {}
         one_file = dupes.is_all_one_file(group)
         title = QLabel(f"Group {gi + 1}  ·  {len(group)} copies  ·  "
                        f"{_fmt_size(self._size_of(group[0]))} each"
@@ -332,6 +367,20 @@ class DuplicatesDialog(QDialog):
                           if not one_file else ""))
         title.setStyleSheet(f"color: {config.FG_MID}; font-weight: bold;")
         lay.addWidget(title)
+
+        # Why these are together: a near-match is a judgement, not a fact, and
+        # the user cannot weigh it without knowing what matched.
+        why = QLabel("Matched on:  " + meta.get("reason", "identical bytes"))
+        why.setStyleSheet(f"color: {config.FG_DIM}; font-size: 11px;")
+        lay.addWidget(why)
+        if meta.get("held_back"):
+            note = QLabel(
+                "Held back (you marked it as not a duplicate of one of "
+                "these):  "
+                + ", ".join(os.path.basename(p) for p in meta["held_back"]))
+            note.setWordWrap(True)
+            note.setStyleSheet(f"color: {config.FG_DIM}; font-size: 11px;")
+            lay.addWidget(note)
         if one_file:
             # Under link_mode=hardlink the favourites/tag-folder mirrors are
             # extra NAMES for the same bytes. Byte comparison cannot tell them
@@ -366,6 +415,17 @@ class DuplicatesDialog(QDialog):
         keep_group = QButtonGroup(box)
         keep_group.setExclusive(True)
         self._keep_groups.append((keep_group, list(group)))
+
+        # "These are not duplicates" — the verdict that makes the finder worth
+        # running twice.  Without it, every look-alike (two frames from one
+        # shoot, a photo and its crop) is re-judged on every scan.
+        not_dupe = QPushButton("These are not duplicates")
+        not_dupe.setToolTip(
+            "Remember that these files are different, so they stop being "
+            "grouped together on future scans. Nothing is deleted.")
+        not_dupe.clicked.connect(
+            lambda _=False, g=list(group): self._mark_not_duplicates(g))
+        lay.addWidget(not_dupe)
 
         newest = self._newest_in(group)
         for path in group:
@@ -430,6 +490,32 @@ class DuplicatesDialog(QDialog):
         show.clicked.connect(lambda _=False, p=path: shell.reveal_path(p))
         h.addWidget(show)
         return row
+
+    def _mark_not_duplicates(self, group: "list[str]") -> None:
+        """Record every pair in `group` as distinct and drop it from view."""
+        added = notdupes.mark(group)
+        self._populate([m for m in self._group_info
+                        if sorted(m["paths"]) != sorted(group)])
+        self._header.setText(
+            self._header.text()
+            + f"   ·   {added} pair(s) remembered as different")
+
+    def _forget_not_duplicates(self) -> None:
+        """Let previously dismissed pairs be flagged again."""
+        n = notdupes.count()
+        if not n:
+            QMessageBox.information(
+                self, "Nothing remembered",
+                "No pairs have been marked as 'not duplicates'.")
+            return
+        if QMessageBox.question(
+                self, "Forget dismissed pairs?",
+                f"{n} pair(s) are remembered as different and are being "
+                "skipped.\n\nForget them all, so they can be flagged "
+                "again?") != QMessageBox.StandardButton.Yes:
+            return
+        notdupes.clear()
+        self._rescan()
 
     def _thumb(self, path: str) -> "QPixmap | None":
         try:

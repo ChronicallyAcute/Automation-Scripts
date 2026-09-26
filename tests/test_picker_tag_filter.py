@@ -126,3 +126,134 @@ def test_modest_tag_match_still_filters(qapp, tmp_path, monkeypatch):
     fs.set_tag_filter({"Az"})
     assert not fs.tag_filter_truncated
     assert "f0.jpg" in set(fs.nameFilters())
+
+
+# -- favourites filter, and hiding folders that lead nowhere -------------------
+
+def _tree_with(qapp, fs):
+    from PySide6.QtWidgets import QTreeView
+    from gallery_py_qt.fs_picker import FolderFilter
+    tree = QTreeView()
+    tree.setModel(fs)
+    return tree, FolderFilter(tree, fs)
+
+
+def _rows(qapp, fs, folder, want=1):
+    idx = fs.setRootPath(folder)
+    for _ in range(400):
+        qapp.processEvents()
+        time.sleep(0.005)
+        if fs.rowCount(idx) >= want:
+            break
+    return idx
+
+
+def test_favourites_filter_is_off_by_default(qapp):
+    fs = _CheckFSModel()
+    assert not fs.favorites_only()
+    assert not fs.filtering_content()
+
+
+def test_favourites_filter_shows_only_favourites(qapp, tmp_path):
+    from gallery_py_qt.engine.favorites import Favorites
+    a = _img(tmp_path / "a.jpg")
+    _img(tmp_path / "b.jpg")
+    Favorites().toggle(a)
+    fs = _CheckFSModel()
+    fs.set_favorites_only(True)
+    names = _names_under(qapp, fs, str(tmp_path))
+    assert "a.jpg" in names and "b.jpg" not in names
+
+
+def test_favourites_and_tags_must_both_hold(qapp, tmp_path):
+    from gallery_py_qt.engine.favorites import Favorites
+    a = _img(tmp_path / "a.jpg")
+    b = _img(tmp_path / "b.jpg")
+    tags.toggle_tag(a, "Az")
+    tags.toggle_tag(b, "Az")
+    Favorites().toggle(a)
+    fs = _CheckFSModel()
+    fs.set_tag_filter({"Az"})
+    fs.set_favorites_only(True)
+    names = _names_under(qapp, fs, str(tmp_path))
+    assert "a.jpg" in names and "b.jpg" not in names
+
+
+def test_a_folder_with_no_match_is_hidden(qapp, tmp_path):
+    """Name filters only hide FILES, so the tree used to fill with folders
+    that opened onto nothing."""
+    from gallery_py_qt.engine.favorites import Favorites
+    (tmp_path / "HasFav").mkdir()
+    (tmp_path / "NoFav").mkdir()
+    a = _img(tmp_path / "HasFav" / "a.jpg")
+    _img(tmp_path / "NoFav" / "b.jpg")
+    Favorites().toggle(a)
+    fs = _CheckFSModel()
+    tree, ff = _tree_with(qapp, fs)
+    fs.set_favorites_only(True)
+    idx = _rows(qapp, fs, str(tmp_path), want=2)
+    tree.setRootIndex(idx)
+    ff.refresh()
+    qapp.processEvents()
+    hidden = {fs.fileName(fs.index(r, 0, idx)): tree.isRowHidden(r, idx)
+              for r in range(fs.rowCount(idx))}
+    assert hidden.get("HasFav") is False
+    assert hidden.get("NoFav") is True
+
+
+def test_a_folder_matching_by_tag_is_kept(qapp, tmp_path):
+    (tmp_path / "Tagged").mkdir()
+    (tmp_path / "Plain").mkdir()
+    a = _img(tmp_path / "Tagged" / "a.jpg")
+    _img(tmp_path / "Plain" / "b.jpg")
+    tags.toggle_tag(a, "Az")
+    fs = _CheckFSModel()
+    tree, ff = _tree_with(qapp, fs)
+    fs.set_tag_filter({"Az"})
+    idx = _rows(qapp, fs, str(tmp_path), want=2)
+    tree.setRootIndex(idx)
+    ff.refresh()
+    qapp.processEvents()
+    hidden = {fs.fileName(fs.index(r, 0, idx)): tree.isRowHidden(r, idx)
+              for r in range(fs.rowCount(idx))}
+    assert hidden.get("Tagged") is False and hidden.get("Plain") is True
+
+
+def test_clearing_the_filter_unhides_every_folder(qapp, tmp_path):
+    from gallery_py_qt.engine.favorites import Favorites
+    (tmp_path / "HasFav").mkdir()
+    (tmp_path / "NoFav").mkdir()
+    a = _img(tmp_path / "HasFav" / "a.jpg")
+    _img(tmp_path / "NoFav" / "b.jpg")
+    Favorites().toggle(a)
+    fs = _CheckFSModel()
+    tree, ff = _tree_with(qapp, fs)
+    fs.set_favorites_only(True)
+    idx = _rows(qapp, fs, str(tmp_path), want=2)
+    tree.setRootIndex(idx)
+    ff.refresh()
+    fs.set_favorites_only(False)
+    ff.refresh()
+    qapp.processEvents()
+    assert all(not tree.isRowHidden(r, idx) for r in range(fs.rowCount(idx)))
+
+
+def test_a_parent_of_a_match_is_kept(qapp, tmp_path):
+    from gallery_py_qt.engine.favorites import Favorites
+    deep = tmp_path / "Outer" / "Inner"
+    deep.mkdir(parents=True)
+    a = _img(deep / "a.jpg")
+    Favorites().toggle(a)
+    fs = _CheckFSModel()
+    fs.set_favorites_only(True)
+    assert fs.folder_matches(str(tmp_path / "Outer"))
+
+
+def test_the_picker_exposes_the_favourites_button(qapp, tmp_path):
+    dlg = _FolderPickDlg(recents=[])
+    btn = dlg._path_row._fav_btn
+    assert not dlg._fs.favorites_only()
+    btn.setChecked(True)
+    qapp.processEvents()
+    assert dlg._fs.favorites_only()
+    dlg.done(0)

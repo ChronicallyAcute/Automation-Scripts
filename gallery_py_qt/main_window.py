@@ -35,8 +35,8 @@ BAR_HIDE_MS = 2000
 # _CheckFSModel now lives in fs_picker so the album-tagging dialog can
 # reuse it without importing this module.  Re-exported here because
 # existing callers/tests address it as main_window._CheckFSModel.
-from .fs_picker import (_CheckFSModel, HoverPreview,  # noqa: E402
-                        quick_access_row)
+from .fs_picker import (_CheckFSModel, FolderFilter,  # noqa: E402
+                        HoverPreview, quick_access_row)
 
 
 class _FolderPickDlg(QDialog):
@@ -99,6 +99,9 @@ class _FolderPickDlg(QDialog):
         # Hover thumbnail preview for individual files: a small floating
         # tooltip-style label fed by the shared async thumbnail loader.
         self._hover = HoverPreview(self, self._tree, self._fs, self._loader)
+        # With a tag or favourites filter on, folders that lead nowhere are
+        # hidden — Qt's name filters only ever hide files.
+        self._folder_filter = FolderFilter(self._tree, self._fs)
 
         # Quick access: common media locations, one click to jump the tree,
         # plus the media-type filter for what the tree shows/imports.

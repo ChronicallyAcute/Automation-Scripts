@@ -287,3 +287,187 @@ def collapse(paths: "list[str]",
             hidden[keeper] = sorted(others)
             drop.update(others)
     return [p for p in paths if p not in drop], hidden
+
+
+# -- Near-duplicates: same media, different bytes -------------------------------
+# Byte-comparison only ever finds exact copies, and the copies that actually
+# accumulate are not exact: a re-download lands as "clip (1).mp4", a file
+# manager writes "clip - Copy.mp4", a re-encode keeps the name but changes
+# every byte. None of those pair with their original under a hash, so the
+# finder reported a clean library while the disk filled with near-misses.
+
+import re as _re
+
+# Suffixes a copy picks up.  Deliberately narrow, because over-stripping
+# invents duplicates out of ordinary filenames:
+#   * the counter is capped at THREE digits.  Cameras name files IMG_2024.jpg,
+#     DSC_0001.jpg, PXL_20240101.jpg — stripping "_2024" would reduce every
+#     photo in a folder to "img.jpg" and flag the lot as copies of each other.
+#     A copy counter is "_1".."_99"; a four-digit run is a sequence or a year.
+#   * a bare "clip 2.mp4" is left alone for the same reason: a numbered
+#     sequence is far more often two files than two copies of one.
+_COPY_SUFFIX = _re.compile(
+    r"(?:"
+    r"\s*\(\d{1,3}\)"                   # "clip (1)", "clip(1)"
+    r"|\s*\[\d{1,3}\]"                  # "clip [1]"
+    r"|_\d{1,3}"                        # "clip_1"  (never "IMG_2024")
+    r"|\s*-\s*copy(?:\s*\(?\d{1,3}\)?)?"   # "clip - Copy", "- Copy (2)"
+    r"|\s*copy(?:\s*\(?\d{1,3}\)?)?"       # "clip copy", "clip copy 2"
+    r"|\s*-\s*kopie|\s*-\s*kopia"       # localised file managers
+    r")+$", _re.IGNORECASE)
+
+
+def base_name(path: str) -> str:
+    """`path`'s filename with any copy suffix stripped, lowercased.
+
+    ``clip.mp4``, ``clip (1).mp4``, ``clip_1.mp4`` and ``clip - Copy.mp4`` all
+    reduce to ``clip.mp4``.
+    """
+    stem, ext = os.path.splitext(os.path.basename(path))
+    stripped = _COPY_SUFFIX.sub("", stem).strip()
+    return ((stripped or stem) + ext).lower()
+
+
+def _duration(path: str) -> float:
+    from . import media
+    if not media.is_video(path):
+        return 0.0
+    try:
+        return float(media.peek_duration(path))
+    except Exception:
+        return 0.0
+
+
+# Below this, files collide on size for no reason at all (icons, thumbnails,
+# solid-colour placeholders), so size stops being evidence of anything.
+_SIG_MIN_BYTES = 4096
+
+
+def signature(path: str, duration_places: int = 0) -> "tuple | None":
+    """What "the same media" looks like from outside the file.
+
+    Size ALONE is not evidence: any two similar images weigh the same, and
+    matching on it groups a folder of unrelated pictures into one blob. It
+    needs corroboration, which differs by kind:
+
+      * video — size plus duration, rounded so two encodes of one clip that
+        differ by milliseconds still match;
+      * image — size plus pixel dimensions.
+
+    Returns None when the file is too small for size to mean anything, or its
+    corroborating measure cannot be read.
+    """
+    from . import media
+    try:
+        size = os.path.getsize(path)
+    except OSError:
+        return None
+    if size < _SIG_MIN_BYTES:
+        return None
+    if media.is_video(path):
+        dur = round(_duration(path), duration_places)
+        return ("v", size, dur) if dur > 0 else None
+    try:
+        w, h = media.peek_size(path)
+    except Exception:
+        return None
+    return ("i", size, w, h) if w > 0 and h > 0 else None
+
+
+def find_near_duplicates(
+    paths: "list[str]",
+    by_name: bool = True,
+    by_signature: bool = True,
+    progress: "Callable[[int, int], None] | None" = None,
+    cancelled: "Callable[[], bool] | None" = None,
+) -> "list[dict]":
+    """Groups of files that are probably the same media.
+
+    Returns ``[{"paths": [...], "reason": str}]``.
+
+    The three signals are UNIONED rather than ranked. Ranking them left a file
+    stranded: once ``a`` and ``b`` paired on bytes, a third copy sharing their
+    name had nobody left to pair with and was reported as nothing at all. One
+    item belongs in one group however many ways its copies are related, and
+    the group is labelled with the strongest relation it contains.
+
+    Pairs the user has declared distinct are never grouped together.
+    """
+    from . import notdupes
+
+    existing = [p for p in dict.fromkeys(paths) if os.path.isfile(p)]
+    parent: "dict[str, str]" = {p: p for p in existing}
+    # How strongly each member is tied in; the group reports its best.
+    STRENGTH = {"identical bytes": 3, "near-identical name": 2,
+                "same size and duration": 1, "same size and dimensions": 1}
+    reasons_of: "dict[str, set]" = {}
+
+    def find(x: str) -> str:
+        while parent[x] != x:
+            parent[x] = parent[parent[x]]
+            x = parent[x]
+        return x
+
+    def union(a: str, b: str, reason: str) -> None:
+        ra, rb = find(a), find(b)
+        merged = reasons_of.pop(ra, set()) | reasons_of.pop(rb, set())
+        if ra != rb:
+            parent[rb] = ra
+        merged.add(reason)
+        reasons_of[find(a)] = merged
+
+    def link_all(members: "list[str]", reason: str) -> None:
+        for other in members[1:]:
+            union(members[0], other, reason)
+
+    for group in find_duplicates(existing, progress=progress,
+                                 cancelled=cancelled):
+        link_all(group, "identical bytes")
+
+    if cancelled and cancelled():
+        return []
+
+    if by_name:
+        by_base: "dict[str, list[str]]" = {}
+        for p in existing:
+            by_base.setdefault(base_name(p), []).append(p)
+        for members in by_base.values():
+            if len(members) > 1:
+                link_all(members, "near-identical name")
+
+    if by_signature:
+        by_sig: "dict[tuple, list[str]]" = {}
+        for i, p in enumerate(existing):
+            if cancelled and cancelled():
+                return []
+            sig = signature(p)
+            if sig is None or sig[0] <= 0:
+                continue
+            by_sig.setdefault(sig, []).append(p)
+            if progress:
+                progress(i + 1, len(existing))
+        for sig, members in by_sig.items():
+            if len(members) > 1:
+                link_all(members, "same size and duration" if sig[0] == "v"
+                         else "same size and dimensions")
+
+    clusters: "dict[str, list[str]]" = {}
+    for p in existing:
+        clusters.setdefault(find(p), []).append(p)
+
+    out: "list[dict]" = []
+    for root, members in clusters.items():
+        if len(members) < 2:
+            continue
+        # Name the group by EVERY signal that bound it: calling a group
+        # "identical bytes" when only two of its four members are would
+        # misrepresent what the user is being asked to judge.
+        found = sorted(reasons_of.get(root, {"same size and dimensions"}),
+                       key=lambda r: -STRENGTH.get(r, 0))
+        reason = " + ".join(found)
+        buckets, held = notdupes.split(sorted(members))
+        for bucket in buckets:
+            out.append({"paths": bucket, "reason": reason,
+                        "signals": found, "held_back": held})
+    out.sort(key=lambda g: (-STRENGTH.get(g["signals"][0], 0), g["paths"][0]))
+    return out

@@ -42,7 +42,11 @@ class _CheckFSModel(QFileSystemModel):
         # be navigated down to the matches.
         self._tag_filter: "set[str]" = set()
         self._tag_match_all = False
+        self._favs_only = False
         self.tag_filter_truncated = False
+        # Folders that cannot contain anything matching the current filter.
+        # Recomputed lazily as directories are walked; see folder_matches().
+        self._folder_ok: "dict[str, bool]" = {}
         self.setFilter(QDir.Filter.AllDirs | QDir.Filter.Files
                        | QDir.Filter.NoDotAndDotDot)
         # Only media files are relevant; hide everything else entirely.
@@ -76,17 +80,58 @@ class _CheckFSModel(QFileSystemModel):
     def tag_filter(self) -> "tuple[set[str], bool]":
         return set(self._tag_filter), self._tag_match_all
 
-    def _tagged_basenames(self) -> "set[str]":
-        """Basenames of the files satisfying the current tag filter."""
+    def set_favorites_only(self, on: bool) -> None:
+        """Show only favourited media (and the folders leading to it)."""
+        self._favs_only = bool(on)
+        self._folder_ok.clear()
+        self._apply_name_filters()
+
+    def favorites_only(self) -> bool:
+        return self._favs_only
+
+    def filtering_content(self) -> bool:
+        """True when something beyond the media-class filter is in force."""
+        return bool(self._tag_filter) or self._favs_only
+
+    def _matching_paths(self) -> "set[str]":
+        """Full paths of the files satisfying the tag / favourite filter."""
         from .engine import tags as _tags
+        from .engine.favorites import Favorites
         out: "set[str]" = set()
-        for path, have in _tags._load().items():
-            hs = set(have)
-            ok = (self._tag_filter <= hs if self._tag_match_all
-                  else bool(self._tag_filter & hs))
-            if ok:
-                out.add(os.path.basename(path))
+        if self._tag_filter:
+            for path, have in _tags._load().items():
+                hs = set(have)
+                ok = (self._tag_filter <= hs if self._tag_match_all
+                      else bool(self._tag_filter & hs))
+                if ok:
+                    out.add(os.path.normcase(os.path.normpath(path)))
+        if self._favs_only:
+            favs = {os.path.normcase(os.path.normpath(p))
+                    for p in Favorites()._paths}
+            out = (out & favs) if self._tag_filter else favs
         return out
+
+    def folder_matches(self, folder: str) -> bool:
+        """Could `folder` contain anything the current filter accepts?
+
+        Answered from the STORES, not the disk: the tag and favourite records
+        hold full paths, so a folder qualifies when any of them sits beneath
+        it. Walking the tree instead would mean a recursive scan per row.
+        """
+        if not self.filtering_content():
+            return True
+        key = os.path.normcase(os.path.normpath(folder))
+        hit = self._folder_ok.get(key)
+        if hit is None:
+            prefix = key + os.sep
+            hit = any(p == key or p.startswith(prefix)
+                      for p in self._matching_paths())
+            self._folder_ok[key] = hit
+        return hit
+
+    def _tagged_basenames(self) -> "set[str]":
+        """Basenames of the files satisfying the tag / favourite filter."""
+        return {os.path.basename(p) for p in self._matching_paths()}
 
     @staticmethod
     def _class_exts(cls: str) -> "set[str]":
@@ -125,7 +170,9 @@ class _CheckFSModel(QFileSystemModel):
         allowed extensions so both filters still apply together.
         """
         exts = getattr(self, "_exts", set(config.SUPPORTED))
-        if not self._tag_filter:
+        self._folder_ok.clear()
+        if not self.filtering_content():
+            self.tag_filter_truncated = False
             self.setNameFilters([f"*{e}" for e in sorted(exts)])
             return
         names = {self._as_pattern(n) for n in self._tagged_basenames()
@@ -205,6 +252,54 @@ class _CheckFSModel(QFileSystemModel):
 
     def checked_all(self) -> list[str]:
         return [p for p in sorted(self._checked) if os.path.exists(p)]
+
+
+class FolderFilter(QObject):
+    """Hides folders that cannot contain anything the filter accepts.
+
+    Name filters only ever hide FILES — Qt always lists directories — so with
+    a tag or favourites filter on, the tree filled with folders that opened
+    onto nothing. There is no filterAcceptsRow hook on QFileSystemModel, so
+    the rows are hidden on the VIEW instead, as each directory finishes
+    loading and as rows arrive.
+    """
+
+    def __init__(self, tree, fs_model):
+        super().__init__(tree)
+        self._tree = tree
+        self._fs = fs_model
+        fs_model.directoryLoaded.connect(self._on_dir_loaded)
+        fs_model.rowsInserted.connect(self._on_rows)
+
+    def refresh(self) -> None:
+        """Re-evaluate everything currently loaded (the filter changed)."""
+        self._apply_under(self._tree.rootIndex())
+
+    def _on_dir_loaded(self, path: str) -> None:
+        self._apply_under(self._fs.index(path))
+
+    def _on_rows(self, parent, first: int, last: int) -> None:
+        self._apply_rows(parent, first, last)
+
+    def _apply_under(self, parent) -> None:
+        rows = self._fs.rowCount(parent)
+        if rows:
+            self._apply_rows(parent, 0, rows - 1)
+
+    def _apply_rows(self, parent, first: int, last: int) -> None:
+        filtering = getattr(self._fs, "filtering_content", lambda: False)()
+        for row in range(first, last + 1):
+            idx = self._fs.index(row, 0, parent)
+            if not idx.isValid():
+                continue
+            if not filtering:
+                self._tree.setRowHidden(row, parent, False)
+                continue
+            path = self._fs.filePath(idx)
+            if not os.path.isdir(path):
+                continue                 # files are handled by name filters
+            self._tree.setRowHidden(row, parent,
+                                    not self._fs.folder_matches(path))
 
 
 class HoverPreview(QObject):
@@ -373,6 +468,23 @@ def _tag_menu_button(fs_model) -> QToolButton:
     return btn
 
 
+def _favs_button(fs_model) -> QToolButton:
+    """A checkable "Favourites" filter, the counterpart to the tags menu."""
+    btn = QToolButton()
+    btn.setCheckable(True)
+    btn.setText(f"{config.ICON_HEART_EMPTY} Favourites")
+    btn.setToolTip("Show only favourited media (and the folders holding it)")
+
+    def _apply(on: bool) -> None:
+        fs_model.set_favorites_only(on)
+        btn.setText((config.ICON_HEART_FULL if on else config.ICON_HEART_EMPTY)
+                    + " Favourites")
+
+    btn.toggled.connect(_apply)
+    btn._apply = _apply                  # exposed for callers / tests
+    return btn
+
+
 def _quick_locations() -> "list[tuple[str, str]]":
     """Resolve the (label, path) pairs for the quick-access strip.
 
@@ -469,6 +581,9 @@ def quick_access_row(fs_model, goto_cb):
     tag_btn = _tag_menu_button(fs_model)
     quick.addWidget(tag_btn)
     outer._tag_btn = tag_btn             # exposed for callers / tests
+    fav_btn = _favs_button(fs_model)
+    quick.addWidget(fav_btn)
+    outer._fav_btn = fav_btn
     outer.addLayout(quick)
 
     # Free-text path box: paste/type any folder and jump straight to it.
