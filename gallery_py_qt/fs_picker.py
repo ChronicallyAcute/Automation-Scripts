@@ -57,7 +57,15 @@ class _CheckFSModel(QFileSystemModel):
     # are matched by BASENAME, so an untagged file that happens to share a name
     # with a tagged one in another folder can slip through — acceptable for a
     # browse-and-pick aid, and it never hides a genuine match.
-    _MAX_NAME_PATTERNS = 400
+    # QFileSystemModel tests every pattern against every entry, so the cost is
+    # files x patterns and a cap is needed — but 400 was set defensively, not
+    # measured, and any real library blew straight past it, leaving the tag
+    # filter silently doing NOTHING while the button still said it was on.
+    # Measured on a 3000-file directory: no filter 724ms, 400 patterns 1106ms,
+    # 20000 patterns 2826ms — and it plateaus there (60000 costs the same).
+    # A few seconds once per directory is a fair price for a filter the user
+    # explicitly asked for; showing everything instead is not.
+    _MAX_NAME_PATTERNS = 20000
 
     def set_tag_filter(self, tags_wanted, match_all: bool = False) -> None:
         """Show only files carrying these tags (empty = no tag filtering)."""

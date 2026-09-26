@@ -16,12 +16,12 @@ import sys
 from PySide6.QtCore import (Qt, QUrl, Signal, QTimer, QObject, QRunnable,
                             QThreadPool, QEvent, QSize)
 from PySide6.QtGui import (QPixmap, QImage, QKeySequence, QShortcut,
-                           QStandardItem, QStandardItemModel)
+                           QStandardItem, QStandardItemModel, QColor)
 from PySide6.QtWidgets import (QDialog, QGraphicsView, QGraphicsScene,
                                QGraphicsPixmapItem, QVBoxLayout, QHBoxLayout,
                                QToolButton, QLabel, QStackedWidget, QWidget,
                                QSlider, QListView, QAbstractItemView, QMenu,
-                               QApplication)
+                               QApplication, QGraphicsDropShadowEffect)
 from PySide6.QtMultimedia import QMediaPlayer, QAudioOutput, QtAudio
 from PySide6.QtMultimediaWidgets import QVideoWidget
 
@@ -140,6 +140,8 @@ class Lightbox(QDialog):
     openMulti   = Signal(int)
     returnToMulti = Signal()      # back to the multi-view page we came from
     rotateRequested = Signal(int)   # degrees clockwise (+90 / -90)
+    tagsChanged     = Signal(str)   # a chip edited this file's tags
+    tagSetChanged   = Signal()      # a new tag name was coined here
 
     _SPEEDS = (0.25, 0.5, 1.0, 1.25, 1.5, 1.75, 2.0)
 
@@ -280,6 +282,21 @@ class Lightbox(QDialog):
         self._tb("?", self._toggle_help, bar).setToolTip("Keyboard shortcuts (?)")
         self._tb(config.ICON_TRASH, self._trash, bar)
         self._tb(config.ICON_CLOSE, self.close, bar)
+
+        # Tag chips, the same row the multi-view tiles carry: full-screen is
+        # when you are most likely to be judging an item, and it was the one
+        # place you could not tag it.  Sits above the transport so it never
+        # collides with the seek bar.
+        from .tagchips import TagChipBar
+        self._tagbar = TagChipBar(self, font_px=12)
+        self._tagbar.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
+        _tagshadow = QGraphicsDropShadowEffect(self._tagbar)
+        _tagshadow.setBlurRadius(4)
+        _tagshadow.setOffset(0, 1)
+        _tagshadow.setColor(QColor(0, 0, 0, 230))
+        self._tagbar.setGraphicsEffect(_tagshadow)
+        self._tagbar.tagsChanged.connect(self.tagsChanged.emit)
+        self._tagbar.tagSetChanged.connect(self.tagSetChanged.emit)
 
         # Keyboard-shortcuts help overlay (hidden until toggled).
         self._help = self._build_help_overlay()
@@ -564,6 +581,7 @@ class Lightbox(QDialog):
             f"QToolButton {{ color: {config.FG_MID}; font-size: 15px; border: none;"
             " background: rgba(0,0,0,90); border-radius: 4px; padding: 4px 8px; }")
         self._refresh_rating()
+        self._tagbar.set_path(path)
         if media.is_video(path):
             self._gif.stop()
             # Cancel any in-flight image decode and clear its loading state.
@@ -649,10 +667,15 @@ class Lightbox(QDialog):
         bh = self._bar_widget.sizeHint().height()
         self._bar_widget.setGeometry(0, 0, w, max(bh, 1))
         self._bar_widget.raise_()
+        th = 0
         if self._transport.isVisible():
             th = self._transport.sizeHint().height()
             self._transport.setGeometry(0, h - th, w, max(th, 1))
             self._transport.raise_()
+        if not self._tagbar.isHidden():
+            gh = self._tagbar.sizeHint().height()
+            self._tagbar.setGeometry(0, max(0, h - th - gh), w, max(gh, 1))
+            self._tagbar.raise_()
         if self._loading_lbl.isVisible():
             self._position_loading()
         if self._help.isVisible():
@@ -693,6 +716,8 @@ class Lightbox(QDialog):
             if self._stack.currentIndex() == 1:
                 self._transport.show()
                 self._transport.raise_()
+            self._tagbar.show()
+            self._tagbar.raise_()
             self._position_overlays()
         # Mouse-move events arrive in the hundreds per second; only restart the
         # timer as it nears expiry so the handler stays near-free.
@@ -706,12 +731,14 @@ class Lightbox(QDialog):
         # window that hasn't been shown, which would let the chrome hide out
         # from under an open help overlay in exactly that case.
         if (self._bar_widget.underMouse() or self._transport.underMouse()
+                or self._tagbar.underMouse()
                 or QApplication.activePopupWidget() is not None
                 or not self._help.isHidden()):
             self._chrome_hide_timer.start()
             return
         self._bar_widget.hide()
-        self._transport.hide()
+        self._transport.hide()          # carries the volume adjuster
+        self._tagbar.hide()
 
     def eventFilter(self, obj, event):
         if event.type() in (QEvent.Type.MouseMove, QEvent.Type.Enter):

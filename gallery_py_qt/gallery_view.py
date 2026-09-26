@@ -969,6 +969,36 @@ class GalleryView(QAbstractScrollArea):
     def _visible_rows(self) -> list[int]:
         return self._visible_cell_rows()
 
+    def visible_rows(self) -> list[int]:
+        """Rows currently on screen — used to open multi-view where you are."""
+        return self._visible_cell_rows()
+
+    def _fully_visible_rows(self) -> list[int]:
+        """Rows whose cell is COMPLETELY inside the viewport.
+
+        Autoplay uses this rather than the painted set: a tile sliced by the
+        viewport edge is barely watchable, and starting a decode pipeline for
+        every item that merely pokes into view is most of the cost of
+        scrolling — a column of tall media can have several half-cells at each
+        edge at once.
+        """
+        if not self._col_ystart:
+            return []
+        scroll_y = self.verticalScrollBar().value()
+        y_max = scroll_y + self.viewport().height()
+        out: list[int] = []
+        for ys, data in zip(self._col_ystart, self._col_data):
+            if not ys:
+                continue
+            k = max(0, bisect.bisect_right(ys, scroll_y) - 1)
+            while k < len(ys) and ys[k] < y_max:
+                y_end, row = data[k]
+                if ys[k] >= scroll_y and y_end <= y_max:
+                    out.append(row)
+                k += 1
+        out.sort()
+        return out
+
     def _sync_video_previews(self) -> None:
         m = self._model
         if m is None:
@@ -979,7 +1009,7 @@ class GalleryView(QAbstractScrollArea):
             self._frame_flush.stop()
             return
         want: set[str] = set()
-        for row in self._visible_rows():
+        for row in self._fully_visible_rows():
             idx = m.index(row)
             if m.data(idx, IsVideoRole):
                 path = m.data(idx, PathRole)

@@ -875,7 +875,7 @@ class MainWindow(QMainWindow):
 
         h.addWidget(self._sep())
         h.addWidget(self._btn(f"{config.ICON_GRID} Multi-view",
-                              lambda: self._open_multiview(0)))
+                              self._enter_multiview))
         self._scroll_btn = self._btn(f"{config.ICON_PLAY} Scroll",
                                      self._toggle_autoscroll, checkable=True)
         h.addWidget(self._scroll_btn)
@@ -2511,6 +2511,13 @@ class MainWindow(QMainWindow):
         dlg.trashRequested.connect(lambda ps: self._trash_paths(list(ps)))
         dlg.exec()
 
+    def _on_lightbox_tags_changed(self, path: str) -> None:
+        """Tags edited in single-view — bring the other views into step."""
+        self._model.reload_path(path)
+        self._model.refresh_duplicate_choice()
+        if self._mv is not None:
+            self._mv.refresh_tag(path)
+
     def _reveal_path(self, path: str) -> None:
         """Select the given path in the grid and scroll it into view."""
         for row in range(self._model.rowCount()):
@@ -2558,6 +2565,8 @@ class MainWindow(QMainWindow):
         self._view.suspend_video_previews()
         self._lightbox_count += 1
         lb = Lightbox(self._model, self._favs, self)
+        lb.tagsChanged.connect(self._on_lightbox_tags_changed)
+        lb.tagSetChanged.connect(self._on_tag_set_changed)
         lb.set_return_kind("multiview" if from_mv else "gallery")
         if from_mv:
             lb.returnToMulti.connect(self._reopen_multiview)
@@ -2577,6 +2586,21 @@ class MainWindow(QMainWindow):
     def _on_lightbox_gone(self, *_) -> None:
         self._lightbox_count = max(0, self._lightbox_count - 1)
         self._resume_previews_if_gallery_active()
+
+    def _enter_multiview(self) -> None:
+        """Open multi-view, resuming where it was rather than restarting.
+
+        Leaving for the gallery and coming back used to call open(0), which
+        resets the page, the orientation group, the layout and the pins — so
+        a long browse lost its place every time. Returning now behaves like
+        the lightbox's back button; only a fresh gallery selection moves it.
+        """
+        if self._mv is not None and self._mv.has_position():
+            self._reopen_multiview()
+            return
+        rows = self._view.visible_rows() if hasattr(self._view, "visible_rows") \
+            else []
+        self._open_multiview(rows[0] if rows else 0)
 
     def _open_multiview(self, start_row: int) -> None:
         # Same reasoning as the lightbox: 4 visible multi-view videos plus 4

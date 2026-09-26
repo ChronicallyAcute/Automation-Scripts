@@ -15,6 +15,7 @@ from __future__ import annotations
 import os
 import sys
 import threading
+import time
 
 os.environ.setdefault("OPENCV_LOG_LEVEL", "ERROR")
 os.environ.setdefault("OPENCV_FFMPEG_LOGLEVEL", "-8")
@@ -82,6 +83,44 @@ def forget_bad_video(path: str) -> None:
     """Drop `path` from the unreadable-video cache so it is probed afresh."""
     with _BAD_LOCK:
         _BAD_VIDEOS.pop(path, None)
+
+
+# Some files are not unreadable, merely ruinous: HEVC whose parameter sets are
+# missing ("VPS 0 does not exist", "SPS 0 does not exist") makes the decoder
+# retry before giving up, and a container missing its index ("moov atom not
+# found") sends FFmpeg scanning the whole file.  Both eventually return an
+# answer, so no failure is ever recorded, and every hover, thumbnail and
+# dimension probe pays the same cost again.  Anything that takes longer than
+# this to yield one frame is treated as unusable: it is not worth a
+# multi-second freeze to show one tile.
+_SLOW_VIDEO_SEC = 4.0
+_slow_reported: "set[str]" = set()
+
+
+class _cost_budget:
+    """Times a cv2 operation and blacklists the file if it overruns."""
+
+    __slots__ = ("path", "_t0", "note")
+
+    def __init__(self, path: str, note: str = ""):
+        self.path = path
+        self.note = note
+
+    def __enter__(self):
+        self._t0 = time.perf_counter()
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        elapsed = time.perf_counter() - self._t0
+        if elapsed >= _SLOW_VIDEO_SEC:
+            _mark_bad_video(self.path)
+            if self.path not in _slow_reported:
+                _slow_reported.add(self.path)
+                print(f"[video] {os.path.basename(self.path)} took "
+                      f"{elapsed:.1f}s to decode{self.note} — skipping it from "
+                      "now on (run \u22ef \u2192 Check media health to confirm)",
+                      file=sys.stderr)
+        return False        # never swallow an exception
 
 
 def is_video(path: str) -> bool:
@@ -226,7 +265,7 @@ def peek_size(path: str) -> tuple[int, int]:
         if not HAS_CV2 or is_bad_video(path):
             return (0, 0)
         try:
-            with _CV2_LOCK:
+            with _CV2_LOCK, _cost_budget(path, " (dimensions)"):
                 cap = cv2.VideoCapture(path)
                 opened = cap.isOpened()
                 w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
@@ -250,7 +289,7 @@ def peek_duration(path: str) -> float:
     if not (is_video(path) and HAS_CV2) or is_bad_video(path):
         return 0.0
     try:
-        with _CV2_LOCK:
+        with _CV2_LOCK, _cost_budget(path, " (duration)"):
             cap = cv2.VideoCapture(path)
             opened = cap.isOpened()
             frames = cap.get(cv2.CAP_PROP_FRAME_COUNT)
@@ -271,7 +310,7 @@ def _video_frame(path: str, frac: float = 0.1) -> QImage | None:
     if not HAS_CV2 or is_bad_video(path):
         return None
     # Serialise cv2 access across loader threads (VideoCapture isn't thread-safe).
-    with _CV2_LOCK:
+    with _CV2_LOCK, _cost_budget(path, " (thumbnail)"):
         cap = cv2.VideoCapture(path)
         try:
             if not cap.isOpened():

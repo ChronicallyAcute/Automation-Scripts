@@ -587,6 +587,10 @@ class _Slot(QWidget):
             self._btnbar.hide()
             for b in self._pan_btns:     # pan arrows follow the button bar
                 b.hide()
+            # The volume popup is chrome too: left up, it floats over a tile
+            # the pointer has already left.
+            self._vol_hide_timer.stop()
+            self._vol_popup.hide()
             self.set_tag_editing(False)  # collapse back to just the set tags
             self._position_overlays()
 
@@ -1799,6 +1803,7 @@ class MultiView(QWidget):
                 s._is_pinned = False
                 s._pin_btn.setIcon(s._pause_icon_off)
                 s._pin_btn.setStyleSheet(s._PIN_OFF)
+            s._pinned_path = ""
             s.clear()
 
         # Bias the partition toward the start item so the opening grid matches
@@ -1832,7 +1837,12 @@ class MultiView(QWidget):
         self._start = min(self._start, max(0, len(self._current_paths) - 1))
         self._update_orient_btn()
         self._show_bars()
+        self._restore_pins()
         self._render(self._start)
+
+    def has_position(self) -> bool:
+        """True when the panel holds a page worth returning to."""
+        return bool(self._current_paths)
 
     def stop_autoscroll(self) -> None:
         """Called by main window when navigating away from multi-view."""
@@ -2628,9 +2638,31 @@ class MultiView(QWidget):
         Without this, tiles kept decoding (and locking) their videos while
         the gallery was shown — burning CPU and blocking deletion of any
         file last seen in multi-view.
+
+        A PINNED tile's item is remembered rather than forgotten: clear()
+        wipes the slot's path, and _render() skips pinned slots on the way
+        back in, so the pin survived as an empty square with nothing in it.
         """
         for slot in self._all_slots():
+            if slot.is_pinned and slot._path:
+                slot._pinned_path = slot._path
             slot.clear()
+
+    def _restore_pins(self) -> None:
+        """Put back what each pinned tile was showing before it was released."""
+        for slot in self._all_slots():
+            want = getattr(slot, "_pinned_path", "")
+            if not slot.is_pinned or not want or slot._path == want:
+                continue
+            if not os.path.exists(want):
+                slot._pinned_path = ""
+                slot._is_pinned = False         # the file went while we were away
+                slot._pin_btn.setIcon(slot._pause_icon_off)
+                slot._pin_btn.setStyleSheet(slot._PIN_OFF)
+                continue
+            row = self._model.row_for_path(want)
+            slot.show_item(row if row >= 0 else -1, want)
+            slot._pinned_path = ""
 
     def _trash_hovered(self) -> None:
         """Delete key: trash the tile currently under the mouse."""
