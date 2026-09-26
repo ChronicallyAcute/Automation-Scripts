@@ -74,6 +74,35 @@ def find_favorites_dirs(roots: "list[str]") -> "list[str]":
     return found
 
 
+def read_central_favorites() -> "set[str]":
+    """Originals recorded by the CENTRALISED favourites tree.
+
+    The mirror there is the favourites equivalent of a tag folder, and it was
+    the one place never read back: only the per-folder mirrors beside the
+    media were scanned, so a library using the central layout could not
+    rebuild its favourites from disk the way the tags could.
+
+    Each entry names its original outright — a symlink through its target, a
+    copy through the path shape the mirror root encodes.
+    """
+    root = favorites.central_favorites_root()
+    out: "set[str]" = set()
+    if not os.path.isdir(root):
+        return out
+    for dirpath, _dirnames, filenames in os.walk(root):
+        for name in filenames:
+            entry = os.path.join(dirpath, name)
+            original = ""
+            if os.path.islink(entry):
+                target = os.path.realpath(entry)
+                original = target if os.path.isfile(target) else ""
+            if not original:
+                original = favorites.original_for_central_mirror(entry)
+            if original and os.path.isfile(original):
+                out.add(original)
+    return out
+
+
 def _original_for_mirror_entry(entry: str,
                                index: "dict[str, str] | None") -> str:
     """The original a file inside a ``Favorites`` folder stands for.
@@ -102,8 +131,8 @@ def collect_favorites(media_roots: "list[str] | None" = None,
 
     The store is authoritative for this session, but a library that has moved
     between machines (or predates the store) carries the record only as the
-    mirrors themselves — so the ``Favorites`` folders are read back too, and
-    the two are unioned.
+    mirrors themselves — so the ``Favorites`` folders are read back too, both
+    the centralised tree and the per-folder ones, and all of it is unioned.
     """
     out: "set[str]" = set()
     try:
@@ -111,6 +140,7 @@ def collect_favorites(media_roots: "list[str] | None" = None,
         out.update(p for p in favs._paths if os.path.isfile(p))
     except Exception:
         pass
+    out |= read_central_favorites()
     for mirror in find_favorites_dirs(list(media_roots or [])):
         try:
             entries = os.listdir(mirror)
@@ -317,6 +347,26 @@ def _prune_empty_dirs() -> None:
                 pass
 
 
+def adopt_favorites(found: "set[str]") -> int:
+    """Put favourites discovered on disk back into the store.
+
+    The tag side already heals itself this way (adopt_tags_in_use); without
+    the same for favourites, a rebuild would re-create the mirrors while the
+    heart icons stayed empty, because the store never learned what the folders
+    already knew. Returns how many were adopted.
+    """
+    try:
+        favs = favorites.Favorites()
+    except Exception:
+        return 0
+    added = [p for p in found if p not in favs._paths]
+    if not added:
+        return 0
+    favs._paths.update(added)
+    favs._save()
+    return len(added)
+
+
 def sync(media_roots: "list[str] | None" = None,
          index: "dict[str, str] | None" = None,
          do_prune: bool = True,
@@ -334,11 +384,13 @@ def sync(media_roots: "list[str] | None" = None,
     tagged = collect_tagged(roots, only_tags)
     favourited = (collect_favorites(media_roots, index)
                   if include_favorites else set())
+    adopted = adopt_favorites(favourited) if include_favorites else 0
     items = plan(tagged, favourited)
     prune = (stale_links(items, only_tags=only_tags)
              if do_prune else [])
     report = apply(items, prune, progress=progress)
     report["tagged_files"] = len(tagged)
     report["favourited_files"] = len(favourited)
+    report["favourites_adopted"] = adopted
     report["planned"] = len(items)
     return report

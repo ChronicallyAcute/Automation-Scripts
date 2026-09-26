@@ -317,6 +317,27 @@ def _probe_one(how: str, folder: str, source: "str | None" = None
                 pass
 
 
+def original_for_central_mirror(path: str) -> str:
+    """The media a centralised mirror entry stands for, from its own path.
+
+    mirror_dir_for() encodes the source's shape under the mirror root
+    (``G:\\X\\Trip\\a.png`` -> ``<root>/Favorites/G/X/Trip/a.png``), so the
+    original can be read straight back out of it — no filename index and no
+    guessing. Returns "" when `path` is not under that root.
+    """
+    root = os.path.abspath(central_favorites_root())
+    ap = os.path.abspath(path)
+    if not ap.startswith(root + os.sep):
+        return ""
+    parts = [p for p in os.path.relpath(ap, root).replace("\\", "/").split("/")
+             if p]
+    if not parts:
+        return ""
+    if len(parts[0]) == 1 and parts[0].isalpha():        # a drive letter
+        return parts[0].upper() + ":" + os.sep + os.sep.join(parts[1:])
+    return os.sep + os.sep.join(parts)
+
+
 def is_link_entry(path: str) -> bool:
     """True when `path` is a name for content that also exists elsewhere.
 

@@ -50,26 +50,36 @@ def looks_like_tag(name: str) -> bool:
 
 # -- 1. survey -----------------------------------------------------------------
 
-def survey() -> "list[dict]":
-    """Every candidate tag name, from the tag set and from disk.
+def survey(include_unsorted: bool = False) -> "list[dict]":
+    """Every candidate tag name.
+
+    ``Tag Folders`` is AUTHORITATIVE: once the library has been tidied, the
+    folders in there are the tags, and the media folders sharing FAVORITES_DIR
+    with it are not. Scanning that parent every time is what made each run
+    re-offer the whole directory — including every folder already rejected as
+    "not a tag", which had to be unticked again.
+
+    `include_unsorted` re-opens the parent for a first-time tidy (or when a
+    tag folder has been created by hand beside it), and the dialog exposes it
+    as a checkbox rather than doing it unasked.
 
     Returns one entry per name:
-        {"name", "in_tag_set", "folder", "files", "suggested"}
-    `folder` is "" when no directory exists for the name. Sorted with the
-    likely tags first so the picker opens on what matters.
+        {"name", "in_tag_set", "folder", "files", "suggested", "unsorted"}
     """
-    root = config.FAVORITES_DIR
     names: "dict[str, dict]" = {}
 
     def entry(name: str) -> dict:
         return names.setdefault(name, {
             "name": name, "in_tag_set": False, "folder": "", "files": 0,
-            "suggested": looks_like_tag(name)})
+            "suggested": looks_like_tag(name), "unsorted": False})
 
     for t in _tags.get_tags():
         entry(t)["in_tag_set"] = True
 
-    for base in (root, tag_folders_root()):
+    bases = [(tag_folders_root(), False)]
+    if include_unsorted:
+        bases.append((config.FAVORITES_DIR, True))
+    for base, unsorted in bases:
         try:
             listing = sorted(os.listdir(base))
         except OSError:
@@ -79,7 +89,14 @@ def survey() -> "list[dict]":
             if not os.path.isdir(path) or name.lower() in _RESERVED:
                 continue
             e = entry(name)
+            if e["folder"]:
+                continue              # already found under Tag Folders
             e["folder"] = path
+            e["unsorted"] = unsorted
+            # A folder that already lives under Tag Folders IS a tag; one
+            # merely sitting beside it is only a candidate.
+            if not unsorted:
+                e["suggested"] = True
             try:
                 e["files"] = sum(1 for x in os.scandir(path) if x.is_file())
             except OSError:

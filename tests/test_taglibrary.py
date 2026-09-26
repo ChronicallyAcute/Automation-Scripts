@@ -55,9 +55,16 @@ def test_survey_puts_suggestions_first(lib):
 
 
 def test_survey_counts_files(lib):
-    _img(str(lib / "T - Face" / "a.png"))
+    _img(os.path.join(taglibrary.tag_folders_root(), "T - Face", "a.png"))
     row = next(e for e in taglibrary.survey() if e["name"] == "T - Face")
     assert row["files"] == 1
+
+
+def test_survey_counts_files_in_an_untidied_folder_too(lib):
+    _img(str(lib / "T - Face" / "a.png"))          # pre-tidy location
+    row = next(e for e in taglibrary.survey(include_unsorted=True)
+               if e["name"] == "T - Face")
+    assert row["files"] == 1 and row["unsorted"]
 
 
 def test_survey_ignores_app_structure(lib):
@@ -678,3 +685,71 @@ def test_source_folders_are_remembered_between_runs(qapp, lib, tmp_path):
     again = _dialog(qapp)
     assert a in again.source_folders()
     again.done(0)
+
+
+# -- Tag Folders is the authority for what a tag is ----------------------------
+
+def test_survey_lists_only_tag_folders_by_default(lib, tmp_path):
+    """Scanning the parent every run re-offered every media folder sitting
+    beside Tag Folders — including ones already rejected as not tags."""
+    os.makedirs(os.path.join(taglibrary.tag_folders_root(), "T - Face"))
+    tags.set_tags(["T - Face"])
+    names = {e["name"] for e in taglibrary.survey()}
+    assert names == {"T - Face"}
+    assert "Holiday 2024" not in names
+
+
+def test_the_opt_in_reopens_the_parent(lib):
+    os.makedirs(os.path.join(taglibrary.tag_folders_root(), "T - Face"))
+    tags.set_tags(["T - Face"])
+    names = {e["name"] for e in taglibrary.survey(include_unsorted=True)}
+    assert {"T - Face", "Holiday 2024", "Screenshots"} <= names
+
+
+def test_a_folder_already_under_tag_folders_is_pre_ticked(lib):
+    os.makedirs(os.path.join(taglibrary.tag_folders_root(), "Oddly Named"))
+    row = next(e for e in taglibrary.survey() if e["name"] == "Oddly Named")
+    assert row["suggested"], "being in Tag Folders IS the evidence"
+    assert not row["unsorted"]
+
+
+def test_an_unsorted_folder_is_flagged_and_not_pre_ticked(lib):
+    rows = {e["name"]: e for e in taglibrary.survey(include_unsorted=True)}
+    assert rows["Holiday 2024"]["unsorted"]
+    assert not rows["Holiday 2024"]["suggested"]
+
+
+def test_a_tag_in_the_set_without_a_folder_still_appears(lib):
+    tags.set_tags(["T - Ghost"])
+    row = next(e for e in taglibrary.survey() if e["name"] == "T - Ghost")
+    assert row["in_tag_set"] and row["folder"] == ""
+
+
+def test_the_dialog_defaults_to_the_tidy_list(qapp, lib):
+    from gallery_py_qt.library_dialog import TagLibraryDialog
+    os.makedirs(os.path.join(taglibrary.tag_folders_root(), "T - Face"))
+    tags.set_tags(["T - Face"])
+    dlg = TagLibraryDialog([], None)
+    assert not dlg._unsorted_cb.isChecked()
+    shown = [dlg._tree.topLevelItem(i).text(0)
+             for i in range(dlg._tree.topLevelItemCount())]
+    assert shown == ["T - Face"]
+    dlg.done(0)
+
+
+def test_the_dialog_checkbox_repopulates(qapp, lib):
+    from gallery_py_qt.library_dialog import TagLibraryDialog
+    os.makedirs(os.path.join(taglibrary.tag_folders_root(), "T - Face"))
+    tags.set_tags(["T - Face"])
+    dlg = TagLibraryDialog([], None)
+    dlg._unsorted_cb.setChecked(True)
+    qapp.processEvents()
+    shown = {dlg._tree.topLevelItem(i).text(0)
+             for i in range(dlg._tree.topLevelItemCount())}
+    assert "Holiday 2024" in shown
+    dlg._unsorted_cb.setChecked(False)
+    qapp.processEvents()
+    shown = {dlg._tree.topLevelItem(i).text(0)
+             for i in range(dlg._tree.topLevelItemCount())}
+    assert shown == {"T - Face"}
+    dlg.done(0)

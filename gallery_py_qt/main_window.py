@@ -860,7 +860,15 @@ class MainWindow(QMainWindow):
         # a short debounce made mid-word typing feel like a freeze on big
         # libraries.  Long enough to coalesce a burst, short enough to feel live.
         self._search.textChanged.connect(lambda _: self._search_timer.start(350))
+        # Enter runs it NOW.  The debounce alone leaves no moment where the
+        # search is definitely applied, so a query that returns nothing reads
+        # as a broken box rather than an empty result.
+        self._search.returnPressed.connect(self._run_search)
+        self._search.setClearButtonEnabled(True)
         h.addWidget(self._search)
+        self._search_btn = self._btn(config.ICON_SEARCH, self._run_search)
+        self._search_btn.setToolTip("Search now (Enter)")
+        h.addWidget(self._search_btn)
 
         # Saved searches: capture the whole filter bar under a name and recall
         # it in one click.  Rebuilt on open so it tracks saves/deletes.
@@ -1731,6 +1739,12 @@ class MainWindow(QMainWindow):
             a.setChecked(False)
         self._tag_matchall_act.setChecked(False)
         self._apply_filter()
+
+    def _run_search(self) -> None:
+        """Apply the search box immediately (Enter, or the button)."""
+        self._search_timer.stop()
+        self._apply_filter()
+        self._search.setFocus()          # keep typing without re-clicking
 
     def _apply_filter(self) -> None:
         """Re-run the filter, surviving (and logging) any per-item failure.

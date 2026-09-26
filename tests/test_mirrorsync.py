@@ -409,3 +409,98 @@ def test_link_in_place_swaps_atomically(lib, tmp_path):
     assert how in ("hardlink", "symlink")
     assert favorites.is_link_entry(dst)
     assert not os.path.lexists(dst + ".link.tmp"), "no scratch file left"
+
+
+# -- favourites rebuild from disk, as tags do ----------------------------------
+
+def _central(tmp_path, monkeypatch):
+    monkeypatch.setattr(config, "FAVORITES_DIR", str(tmp_path / "lib"))
+    favorites.set_favorites_layout(False)
+    favorites.set_link_mode("auto")
+
+
+def test_a_central_mirror_entry_names_its_original(tmp_path, monkeypatch):
+    """The mirror path encodes the source's shape, so the original reads back
+    out of it — no filename index, no guessing."""
+    _central(tmp_path, monkeypatch)
+    entry = os.path.join(favorites.central_favorites_root(), "G", "X", "T",
+                         "a.png")
+    got = favorites.original_for_central_mirror(entry)
+    assert got.replace(os.sep, "/").endswith("X/T/a.png")
+    assert got.upper().startswith("G:")
+
+
+def test_a_path_outside_the_mirror_root_maps_to_nothing(tmp_path, monkeypatch):
+    _central(tmp_path, monkeypatch)
+    assert favorites.original_for_central_mirror(str(tmp_path / "x.png")) == ""
+
+
+def test_favourites_are_read_back_from_the_central_tree(tmp_path, monkeypatch):
+    """The favourites equivalent of a tag folder was the one place never read
+    back, so a moved library could not rebuild its favourites from disk."""
+    _central(tmp_path, monkeypatch)
+    original = _img(str(tmp_path / "media" / "a.png"))
+    mdir = favorites.mirror_dir_for(original)
+    os.makedirs(mdir, exist_ok=True)
+    try:
+        os.symlink(original, os.path.join(mdir, "a.png"))
+    except (OSError, NotImplementedError):
+        pytest.skip("no symlink privilege")
+    assert mirrorsync.read_central_favorites() == {original}
+
+
+def test_a_copy_in_the_central_tree_is_resolved_by_its_path(tmp_path,
+                                                            monkeypatch):
+    _central(tmp_path, monkeypatch)
+    original = _img(str(tmp_path / "media" / "a.png"))
+    mdir = favorites.mirror_dir_for(original)
+    os.makedirs(mdir, exist_ok=True)
+    shutil.copy(original, os.path.join(mdir, "a.png"))
+    assert mirrorsync.read_central_favorites() == {original}
+
+
+def test_a_mirror_whose_original_is_gone_is_ignored(tmp_path, monkeypatch):
+    _central(tmp_path, monkeypatch)
+    original = _img(str(tmp_path / "media" / "a.png"))
+    mdir = favorites.mirror_dir_for(original)
+    os.makedirs(mdir, exist_ok=True)
+    shutil.copy(original, os.path.join(mdir, "a.png"))
+    os.remove(original)
+    assert mirrorsync.read_central_favorites() == set()
+
+
+def test_collect_favorites_includes_the_central_tree(tmp_path, monkeypatch):
+    _central(tmp_path, monkeypatch)
+    original = _img(str(tmp_path / "media" / "a.png"))
+    mdir = favorites.mirror_dir_for(original)
+    os.makedirs(mdir, exist_ok=True)
+    shutil.copy(original, os.path.join(mdir, "a.png"))
+    assert original in mirrorsync.collect_favorites([])
+
+
+def test_favourites_found_on_disk_are_adopted(tmp_path, monkeypatch):
+    """Without this the rebuild re-creates the mirrors while the heart icons
+    stay empty — the store never learns what the folders already know."""
+    _central(tmp_path, monkeypatch)
+    original = _img(str(tmp_path / "media" / "a.png"))
+    assert not favorites.Favorites().is_fav(original)
+    assert mirrorsync.adopt_favorites({original}) == 1
+    assert favorites.Favorites().is_fav(original)
+
+
+def test_adopting_twice_changes_nothing(tmp_path, monkeypatch):
+    _central(tmp_path, monkeypatch)
+    original = _img(str(tmp_path / "media" / "a.png"))
+    mirrorsync.adopt_favorites({original})
+    assert mirrorsync.adopt_favorites({original}) == 0
+
+
+def test_sync_reports_what_it_adopted(tmp_path, monkeypatch):
+    _central(tmp_path, monkeypatch)
+    original = _img(str(tmp_path / "media" / "a.png"))
+    mdir = favorites.mirror_dir_for(original)
+    os.makedirs(mdir, exist_ok=True)
+    shutil.copy(original, os.path.join(mdir, "a.png"))
+    rep = mirrorsync.sync([str(tmp_path / "media")])
+    assert rep["favourites_adopted"] >= 1
+    assert favorites.Favorites().is_fav(original)

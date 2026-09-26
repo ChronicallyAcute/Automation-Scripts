@@ -151,6 +151,7 @@ ICON_COPY        = "\u2398"
 ICON_PLAY        = "\u25b6"
 ICON_PAUSE       = "\u23f8"
 ICON_INFO        = "\u2139\ufe0e"
+ICON_SEARCH      = "\U0001f50d\ufe0e"
 ICON_TRASH       = "\U0001f5d1\ufe0e"
 ICON_PIN         = "\U0001f4cc\ufe0e"
 ICON_PIN_OFF     = "\U0001f4cd\ufe0e"   # round pushpin  \u2014 outline / inactive state

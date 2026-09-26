@@ -330,3 +330,81 @@ def test_the_slow_warning_is_printed_once(tmp_path, monkeypatch, capsys):
         with media._cost_budget(v):
             time.sleep(0.02)
     assert capsys.readouterr().err.count("skipping it from now on") == 1
+
+
+# -- the search bar submits explicitly -------------------------------------------
+
+def _searchable(qapp, tmp_path):
+    from gallery_py_qt.main_window import MainWindow
+    for name in ("beach_one.png", "beach_two.png", "forest.png", "city.png"):
+        _img(tmp_path / "s" / name)
+    win = MainWindow()
+    win.resize(1100, 760)
+    win.show()
+    qapp.processEvents()
+    win.open_folder(str(tmp_path / "s"))
+    for _ in range(400):
+        qapp.processEvents()
+        time.sleep(0.01)
+        if win._model.rowCount() >= 4:
+            break
+    return win
+
+
+def test_enter_applies_the_search_immediately(qapp, tmp_path):
+    """The debounce alone leaves no moment where the search is definitely
+    applied, so an empty result reads as a broken box."""
+    win = _searchable(qapp, tmp_path)
+    win._search.setText("beach")
+    win._search.returnPressed.emit()
+    qapp.processEvents()
+    assert win._model.rowCount() == 2
+    assert not win._search_timer.isActive(), "Enter must cancel the debounce"
+    win.close()
+
+
+def test_the_button_applies_the_search(qapp, tmp_path):
+    win = _searchable(qapp, tmp_path)
+    win._search.setText("forest")
+    win._search_btn.click()
+    qapp.processEvents()
+    shown = [os.path.basename(win._model.path_at(i))
+             for i in range(win._model.rowCount())]
+    assert shown == ["forest.png"]
+    win.close()
+
+
+def test_submitting_keeps_the_cursor_in_the_box(qapp, tmp_path):
+    win = _searchable(qapp, tmp_path)
+    win._search.setText("beach")
+    win._search_btn.click()
+    qapp.processEvents()
+    assert win._search.hasFocus(), "typing must continue without re-clicking"
+    win.close()
+
+
+def test_clearing_restores_everything(qapp, tmp_path):
+    win = _searchable(qapp, tmp_path)
+    win._search.setText("beach")
+    win._search_btn.click()
+    qapp.processEvents()
+    win._search.clear()
+    win._search_btn.click()
+    qapp.processEvents()
+    assert win._model.rowCount() == 4
+    win.close()
+
+
+def test_the_box_offers_a_clear_control(qapp, tmp_path):
+    win = _searchable(qapp, tmp_path)
+    assert win._search.isClearButtonEnabled()
+    win.close()
+
+
+def test_a_field_query_still_works(qapp, tmp_path):
+    win = _searchable(qapp, tmp_path)
+    win._search.setText("type:video")
+    win._search_btn.click()
+    qapp.processEvents()
+    assert win._model.rowCount() == 0        # they are all images
+    win.close()

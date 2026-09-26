@@ -75,9 +75,8 @@ class TagLibraryDialog(QDialog):
         root = QVBoxLayout(self)
 
         intro = QLabel(
-            f"<b>{config.FAVORITES_DIR}</b> holds this app's per-tag folders "
-            "and your own media folders side by side, which is why folder "
-            "names ended up as tag buttons.<br><br>"
+            f"Your tags are the folders in <b>{taglibrary.tag_folders_root()}"
+            "</b>.<br><br>"
             "Tick the names that are <b>real tags</b>. Their folders move into "
             f"<b>{taglibrary.TAG_FOLDERS_DIRNAME}</b>; everything unticked is "
             "removed from the tag list only — <b>no folder or file is "
@@ -93,6 +92,16 @@ class TagLibraryDialog(QDialog):
         self._tree.header().setSectionResizeMode(
             0, QHeaderView.ResizeMode.Stretch)
         root.addWidget(self._tree, 1)
+
+        self._unsorted_cb = QCheckBox(
+            f"Also offer the other folders in {config.FAVORITES_DIR}")
+        self._unsorted_cb.setToolTip(
+            "Off, the list is exactly what is already in "
+            f"{taglibrary.TAG_FOLDERS_DIRNAME}. Turn it on for a first tidy, "
+            "or to promote a folder you created beside it — otherwise every "
+            "run re-offers folders you have already rejected.")
+        self._unsorted_cb.toggled.connect(lambda _=False: self._populate())
+        root.addWidget(self._unsorted_cb)
 
         picks = QHBoxLayout()
         for label, fn in (("Tick suggested", self._tick_suggested),
@@ -173,13 +182,17 @@ class TagLibraryDialog(QDialog):
 
     # -- the list ---------------------------------------------------------------
     def _populate(self) -> None:
+        # Repopulating fires itemChanged for every row it clears and re-adds;
+        # the counter is resynced explicitly at the end instead.
+        self._suspend_count = True
         self._tree.clear()
-        for e in taglibrary.survey():
+        for e in taglibrary.survey(self._unsorted_cb.isChecked()):
             item = QTreeWidgetItem([
                 e["name"],
                 "yes" if e["in_tag_set"] else "—",
                 str(e["files"]) if e["folder"] else "—",
-                e["folder"] or "(no folder)",
+                (e["folder"] or "(no folder)")
+                + ("   — not yet a tag folder" if e["unsorted"] else ""),
             ])
             item.setFlags(item.flags() | Qt.ItemFlag.ItemIsUserCheckable)
             item.setCheckState(0, Qt.CheckState.Checked if e["suggested"]
@@ -188,7 +201,10 @@ class TagLibraryDialog(QDialog):
             self._tree.addTopLevelItem(item)
         for col in (1, 2):
             self._tree.resizeColumnToContents(col)
-        self._tree.itemChanged.connect(lambda *_: self._sync_count())
+        if not getattr(self, "_count_connected", False):
+            self._tree.itemChanged.connect(lambda *_: self._sync_count())
+            self._count_connected = True
+        self._suspend_count = False
         self._sync_count()
 
     def _items(self) -> "list[QTreeWidgetItem]":
@@ -212,6 +228,8 @@ class TagLibraryDialog(QDialog):
                              else Qt.CheckState.Unchecked)
 
     def _sync_count(self) -> None:
+        if getattr(self, "_suspend_count", False):
+            return
         keep = len(self.checked_names())
         self._count.setText(
             f"{keep} tag(s) kept  ·  "
