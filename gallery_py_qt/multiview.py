@@ -206,6 +206,24 @@ class _AspectLabel(QLabel):
 # which looks close and costs nothing, for anyone who hits that stutter.
 
 
+def _muted(hex_colour: str, amount: float = 0.5) -> str:
+    """`hex_colour` faded toward grey, for a chip whose tag is not set.
+
+    Keeps the hue — which is what identifies the tag — while staying clearly
+    weaker than a set chip, so the two states are still distinguishable
+    without reading the label.
+    """
+    try:
+        h = hex_colour.lstrip("#")
+        if len(h) == 3:
+            h = "".join(c * 2 for c in h)
+        r, g, b = (int(h[i:i + 2], 16) for i in (0, 2, 4))
+        mix = lambda c: int(c + (0xB4 - c) * amount)      # noqa: E731
+        return f"#{mix(r):02x}{mix(g):02x}{mix(b):02x}"
+    except Exception:
+        return config.OVERLAY_FG
+
+
 def _shadow_affordable() -> bool:
     return os.environ.get("GALLERY_TAG_SHADOW") != "0"
 
@@ -913,6 +931,13 @@ class _Slot(QWidget):
                     " border: 1px solid transparent; border-radius: 2px;"
                     " font-size: 8px; padding: 0 3px; }"
                     " QToolButton:hover { background: rgba(0,0,0,90); }")
+    # Every chip wears its tag's colour, not just the set ones — that is what
+    # makes a row of them readable at a glance.  Unset is the same rounded,
+    # transparent chip with the hue muted; set adds weight and an outline.
+    _TAG_CSS_DIM = ("QToolButton { color: %s; background: transparent;"
+                    " border: 1px solid transparent; border-radius: 2px;"
+                    " font-size: 8px; padding: 0 3px; }"
+                    " QToolButton:hover { background: rgba(0,0,0,90); }")
 
     def rebuild_tag_buttons(self) -> None:
         """(Re)create the tag buttons from the current tag set."""
@@ -1087,7 +1112,7 @@ class _Slot(QWidget):
             hue = tags.color_of(t) or config.ACCENT
             self._set_css(b, self._plated(
                 (self._TAG_CSS_ON % (hue, hue)) if t in cur
-                else (self._TAG_CSS_OFF % config.OVERLAY_FG)))
+                else (self._TAG_CSS_DIM % _muted(hue))))
         # The ditto button lights up only when there are remembered tags to add.
         recent = tags.recent_tags()
         pending = bool(self._path) and any(

@@ -470,3 +470,62 @@ def test_storage_report_counts_favourites_mirrors(tmp_path):
     _bin(mirror / "a.png", 4321)
     rep = foldersize.app_storage_report([a])
     assert rep["mirror_dirs"] == 1 and rep["mirrors"] == 4321
+
+
+# -- the import tree must actually show names -----------------------------------
+
+def test_the_name_column_stretches(qapp, tmp_path):
+    """A fixed-width Name column plus per-level indentation left deep folders
+    with nothing to draw their title in."""
+    from PySide6.QtWidgets import QHeaderView
+    from gallery_py_qt.main_window import _FolderPickDlg
+    dlg = _FolderPickDlg(recents=[])
+    dlg.resize(900, 580)
+    hdr = dlg._tree.header()
+    assert hdr.sectionResizeMode(0) == QHeaderView.ResizeMode.Stretch
+    assert not hdr.stretchLastSection()
+    dlg.done(0)
+
+
+def test_a_deeply_nested_folder_still_has_room_for_its_name(qapp, tmp_path):
+    from gallery_py_qt.main_window import _FolderPickDlg
+    deep = tmp_path / "Favorites" / "G" / "X" / "T - Face"
+    deep.mkdir(parents=True)
+    dlg = _FolderPickDlg(recents=[])
+    dlg.resize(900, 580)
+    dlg.show()
+    qapp.processEvents()
+    tree = dlg._tree
+    depth = len(deep.parts)
+    room = tree.columnWidth(0) - depth * tree.indentation() - 40
+    assert room > 80, f"only {room}px left for the folder name"
+    dlg.done(0)
+
+
+def test_indentation_is_not_extravagant(qapp):
+    from gallery_py_qt.main_window import _FolderPickDlg
+    dlg = _FolderPickDlg(recents=[])
+    assert dlg._tree.indentation() <= 12
+    dlg.done(0)
+
+
+def test_the_picker_lists_symlinked_media(qapp, tmp_path):
+    """A tag folder holds links, not copies; they must appear like any file."""
+    import time as _t
+    from gallery_py_qt.fs_picker import _CheckFSModel
+    original = _img(tmp_path / "orig.png")
+    folder = tmp_path / "T - Face"
+    folder.mkdir()
+    try:
+        os.symlink(original, str(folder / "link.png"))
+    except (OSError, NotImplementedError):
+        pytest.skip("no symlink privilege")
+    fs = _CheckFSModel()
+    idx = fs.setRootPath(str(folder))
+    for _ in range(300):
+        qapp.processEvents()
+        _t.sleep(0.005)
+        if fs.rowCount(idx):
+            break
+    names = {fs.fileName(fs.index(r, 0, idx)) for r in range(fs.rowCount(idx))}
+    assert "link.png" in names

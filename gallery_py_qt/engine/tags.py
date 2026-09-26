@@ -386,17 +386,48 @@ def _index() -> "dict[str, str]":
     return _norm_index
 
 
+def _real(path: str) -> "str | None":
+    """`path` with links resolved, when that differs from the path itself.
+
+    The tag and favourite folders hold LINKS to the media, so browsing one
+    gives every file a second, equally valid path. The store is keyed by the
+    original, and a link that resolved to nothing showed the media as
+    untagged — and tagging it there would have written a second entry that
+    diverged from the file's own.
+    """
+    try:
+        real = os.path.realpath(path)
+    except OSError:
+        return None
+    return real if real != path else None
+
+
 def _resolve(path: str) -> "str | None":
     """The store key holding `path`'s tags, whatever spelling it arrived in."""
     store = _load()
     if path in store:                      # fast path: exact match
         return path
-    return _index().get(_norm(path))
+    hit = _index().get(_norm(path))
+    if hit is not None:
+        return hit
+    # Not stored under this spelling — follow any link and look again, so a
+    # file reached through a tag folder carries the tags it really has.
+    real = _real(path)
+    if real is not None:
+        if real in store:
+            return real
+        return _index().get(_norm(real))
+    return None
 
 
 def store_key(path: str) -> str:
-    """Key to write `path` under — an existing entry's, else `path` itself."""
-    return _resolve(path) or path
+    """Key to write `path` under.
+
+    An existing entry's key when there is one; otherwise the path with links
+    resolved, so tagging a file through a tag folder updates the file itself
+    rather than creating a rival entry for the link.
+    """
+    return _resolve(path) or _real(path) or path
 
 
 def _index_put(key: str) -> None:

@@ -196,15 +196,41 @@ def test_a_set_chip_wears_its_tag_colour(qapp, tmp_path):
     s.deleteLater()
 
 
-def test_an_unset_chip_is_plain(qapp, tmp_path):
+def test_an_unset_chip_is_muted_not_colourless(qapp, tmp_path):
+    """Every chip is colour-coded; unset is the same rounded, transparent
+    chip with the hue faded, so the two states still read differently."""
     p = _img(tmp_path / "a.png")
     t = tags.get_tags()[0]
     tags.set_color(t, "#3cb44b")
     s = _Slot(0, Favorites())
     s.show_item(0, p)
     s._refresh_tag_styles()
-    assert "#3cb44b" not in s._tag_btns[t].styleSheet()
+    css = s._tag_btns[t].styleSheet()
+    assert "#3cb44b" not in css, "an unset chip must not be at full strength"
+    assert "background: transparent" in css and "border-radius: 2px" in css
+    assert "bold" not in css
     s.deleteLater()
+
+
+def test_every_chip_is_colour_coded(qapp, tmp_path):
+    import re
+    names = tags.get_tags()[:3]
+    palette = ["#e6194b", "#3cb44b", "#4363d8"]
+    for name, hue in zip(names, palette):
+        tags.set_color(name, hue)
+    s = _Slot(0, Favorites())
+    s.show_item(0, _img(tmp_path / "a.png"))
+    s._refresh_tag_styles()
+    seen = {re.search(r"color: (#\w+)", s._tag_btns[n].styleSheet()).group(1)
+            for n in names}
+    assert len(seen) == 3, "each chip must carry its own hue, set or not"
+    s.deleteLater()
+
+
+def test_a_muted_hue_keeps_its_character(qapp):
+    from gallery_py_qt.multiview import _muted
+    assert _muted("#e6194b") != _muted("#3cb44b")
+    assert _muted("#e6194b").startswith("#")
 
 
 def test_the_shadow_is_on_by_default(qapp, tmp_path, monkeypatch):

@@ -81,11 +81,39 @@ def _index() -> "dict[str, str]":
     return _norm_index
 
 
+def _real(path: str) -> "str | None":
+    """`path` with links resolved, when that differs from the path itself.
+
+    The tag and favourite folders hold LINKS to the media, so browsing one
+    gives every file a second, equally valid path. Ratings are keyed by the
+    original; without this a file reached through a tag folder showed
+    unrated, and rating it there wrote a rival entry for the link.
+    """
+    try:
+        real = os.path.realpath(path)
+    except OSError:
+        return None
+    return real if real != path else None
+
+
 def store_key(path: str) -> str:
-    """Key to read/write `path` under — an existing entry's, else `path`."""
-    if path in _load():
+    """Key to read/write `path` under — an existing entry's, else `path`
+    with links resolved, so a link and its target share one rating."""
+    store = _load()
+    if path in store:
         return path
-    return _index().get(_norm(path), path)
+    hit = _index().get(_norm(path))
+    if hit is not None:
+        return hit
+    real = _real(path)
+    if real is not None:
+        if real in store:
+            return real
+        hit = _index().get(_norm(real))
+        if hit is not None:
+            return hit
+        return real
+    return path
 
 
 def rating_of(path: str) -> int:

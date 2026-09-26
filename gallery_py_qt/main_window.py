@@ -15,7 +15,7 @@ import os
 from PySide6.QtCore import (Qt, QObject, QRunnable, QThreadPool, Signal,
                             QTimer, QSize, QDir, QModelIndex)
 from PySide6.QtGui import QAction, QKeySequence, QShortcut, QPixmap
-from PySide6.QtWidgets import QWidgetAction
+from PySide6.QtWidgets import QWidgetAction, QHeaderView
 from PySide6.QtWidgets import (QMainWindow, QWidget, QFrame, QHBoxLayout,
                                QVBoxLayout, QLabel, QToolButton, QLineEdit,
                                QComboBox, QSpinBox, QMenu, QPushButton,
@@ -77,8 +77,19 @@ class _FolderPickDlg(QDialog):
         self._tree.hideColumn(2)          # "Type" adds nothing next to the icon
         self._tree.setSortingEnabled(True)
         self._tree.sortByColumn(0, Qt.SortOrder.AscendingOrder)
-        self._tree.header().setStretchLastSection(False)
-        self._tree.setColumnWidth(0, 320)
+        # Name STRETCHES; size and date take only what they need.  A fixed
+        # width here is what made deep folders nameless: every level of nesting
+        # spends indentation out of the same column, so by the time the tree
+        # reached <fav>/G/X/<tag> there was nothing left to draw the title in —
+        # and worse on a scaled display, where the logical viewport is smaller.
+        hdr = self._tree.header()
+        hdr.setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
+        for col in (1, 3):
+            hdr.setSectionResizeMode(col, QHeaderView.ResizeMode.ResizeToContents)
+        hdr.setStretchLastSection(False)
+        # Half the default: nesting should cost width, but not this much.
+        self._tree.setIndentation(10)
+        self._tree.setTextElideMode(Qt.TextElideMode.ElideMiddle)
         home = self._fs.index(QDir.homePath())
         self._tree.expand(home)
         self._tree.scrollTo(home)
